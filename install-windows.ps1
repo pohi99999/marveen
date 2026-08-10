@@ -305,7 +305,7 @@ console.log("  ✓ Claude Code first-run flags");
 # printed here follows a non-default WEB_PORT. Guarded: any failure keeps 3420.
 $WebPort = 3420
 try {
-  $envPort = (wsl bash -c "grep -E '^WEB_PORT=' '$installPath/.env' 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \"'").Trim()
+  $envPort = (wsl bash -c "grep -E '^WEB_PORT=' '$installPath/.env' 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' `"'").Trim()
   if ($envPort) { $WebPort = $envPort }
 } catch { }
 
