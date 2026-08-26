@@ -395,9 +395,9 @@ interface AgentSummary {
   runningSince: number | null
   authMode: AuthMode
   securityProfile: string
-  /** Which CLI drives this agent's process: 'claude' (default) or 'copilot'
+  /** Which CLI drives this agent's process: 'claude' (default), 'copilot', or 'antigravity'
    *  (GitHub Copilot CLI). See agent-config.ts readAgentEngine. */
-  engine: 'claude' | 'copilot'
+  engine: 'claude' | 'copilot' | 'antigravity'
   /** Named Claude subscription plan id (see claude-plans.ts), or null when the
    *  agent uses the raw claudeConfigDir / default resolution. */
   claudePlan: string | null
@@ -824,10 +824,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const name = sanitizeAgentName(rawName)
     const model = resolveModelId(rawModel || DEFAULT_MODEL)
     const profileId = (rawProfile || 'default').trim() || 'default'
-    // Defaults to 'claude' when absent (or any value other than 'copilot') so
-    // old dashboard frontends and direct API callers that never send `engine`
-    // keep creating Claude-engine agents exactly as before.
-    const engine: 'claude' | 'copilot' = rawEngine === 'copilot' ? 'copilot' : 'claude'
+    // Defaults to 'claude' when absent (or any value other than 'copilot' or
+    // 'antigravity') so old dashboard frontends and direct API callers that
+    // never send `engine` keep creating Claude-engine agents exactly as before.
+    const engine: 'claude' | 'copilot' | 'antigravity' = rawEngine === 'copilot' || rawEngine === 'antigravity' ? rawEngine : 'claude'
 
     if (!name) { json(res, { error: 'Name is required' }, 400); return true }
     if (!description) { json(res, { error: 'Description is required' }, 400); return true }
@@ -2096,8 +2096,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       writeAgentClaudePlan(name, planId)
     }
     if (data.engine !== undefined) {
-      if (data.engine !== 'claude' && data.engine !== 'copilot') {
-        json(res, { error: `engine must be one of claude|copilot` }, 400)
+      if (data.engine !== 'claude' && data.engine !== 'copilot' && data.engine !== 'antigravity') {
+        json(res, { error: `engine must be one of claude|copilot|antigravity` }, 400)
         return true
       }
       writeAgentEngine(name, data.engine)

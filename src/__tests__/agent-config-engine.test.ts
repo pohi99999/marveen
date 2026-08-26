@@ -68,8 +68,18 @@ describe('readAgentEngine', () => {
     expect(readAgentEngine('engine-test-b')).toBe('copilot')
   })
 
+  it('returns antigravity when explicitly set', () => {
+    writeAgentConfig('engine-test-antigravity', { engine: 'antigravity' })
+    expect(readAgentEngine('engine-test-antigravity')).toBe('antigravity')
+  })
+
   it('falls back to claude for an unrecognized value (typo-safety)', () => {
     writeAgentConfig('engine-test-c', { engine: 'gpt-whatever' })
     expect(readAgentEngine('engine-test-c')).toBe('claude')
+  })
+
+  it('falls back to claude for "bogus" value (regression guard)', () => {
+    writeAgentConfig('engine-test-bogus', { engine: 'bogus' })
+    expect(readAgentEngine('engine-test-bogus')).toBe('claude')
   })
 })

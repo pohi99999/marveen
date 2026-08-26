@@ -172,16 +172,16 @@ export function readAgentSecurityProfile(name: string): string {
   return 'default'
 }
 
-export function readAgentEngine(name: string): 'claude' | 'copilot' {
+export function readAgentEngine(name: string): 'claude' | 'copilot' | 'antigravity' {
   try {
     const config = JSON.parse(readFileOr(join(agentDir(name), 'agent-config.json'), '{}'))
-    return config.engine === 'copilot' ? 'copilot' : 'claude'
+    return config.engine === 'copilot' || config.engine === 'antigravity' ? config.engine : 'claude'
   } catch {
     return 'claude'
   }
 }
 
-export function writeAgentEngine(name: string, engine: 'claude' | 'copilot'): void {
+export function writeAgentEngine(name: string, engine: 'claude' | 'copilot' | 'antigravity'): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
