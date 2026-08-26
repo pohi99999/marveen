@@ -9,14 +9,18 @@
 //
 // SCOPE (measured, do not overstate): an in-process mutex serializes only the
 // writers that ACQUIRE it. Same-process is NOT the same as serialized. As of
-// this change EXACTLY TWO call sites take the lock (grep -rln withSessionSendLock
-// src -> agent-process.ts, channel-monitor.ts): sendPromptToSession's emit span
-// (so every caller that delivers through it -- message-router, schedule-runner,
-// inbox-nudge-watcher, channel-monitor delivery, context-guard-runner, the
-// stuck-input re-inject, agent-worker dispatch, routes/agents /login -- is
-// serialized against every other), and channel-monitor's recover-mode
-// clear+re-inject. The dashboard singleton (O_EXCL pidfile, index.ts) is what
-// makes an in-process mutex sufficient FOR THOSE; no file lock is needed there.
+// this change EXACTLY THREE call sites take the lock (grep -rln withSessionSendLock
+// src -> agent-process.ts, channel-monitor.ts, copilot-agent-process.ts):
+// sendPromptToSession's emit span (so every caller that delivers through it --
+// message-router, schedule-runner, inbox-nudge-watcher, channel-monitor
+// delivery, context-guard-runner, the stuck-input re-inject, agent-worker
+// dispatch, routes/agents /login -- is serialized against every other),
+// channel-monitor's recover-mode clear+re-inject, and
+// sendPromptToCopilotSession's send-keys span (the copilot-engine delivery
+// path, which does not go through sendPromptToSession but writes into the same
+// kind of agent-<name> pane, reachable by the router AND schedule-runner). The
+// dashboard singleton (O_EXCL pidfile, index.ts) is what makes an in-process
+// mutex sufficient FOR THOSE; no file lock is needed there.
 //
 // STILL UNGUARDED (in-process writers that hit the pane with a direct tmux
 // send-keys and do NOT go through the lock -- tracked as PANEWRITERS805):
