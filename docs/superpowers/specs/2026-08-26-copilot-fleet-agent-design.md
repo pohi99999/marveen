@@ -75,9 +75,12 @@ NEM kerül be (explicit felhasználói döntés):
 
 ## Architektúra
 
-1. **Séma:** `agent-config.json` új, opcionális `provider` mező
-   (`"claude"` alapérték a visszafele-kompatibilitásért | `"copilot"`).
-2. **Indítás:** `startAgentProcess` elején ág: ha `provider === 'copilot'`,
+1. **Séma:** `agent-config.json` új, opcionális `engine` mező
+   (`"claude"` alapérték a visszafele-kompatibilitásért | `"copilot"`). NEM
+   `provider` a neve — az a kódban már foglalt a csatorna-típusra
+   (telegram/slack/stb., ld. `resolveAgentProvider`/`agentProvider` az
+   `agent-process.ts`-ben), és ütközne vele.
+2. **Indítás:** `startAgentProcess` elején ág: ha `engine === 'copilot'`,
    hívja az új `startCopilotAgentProcess(name, opts)` függvényt — ez
    **különálló, egyszerű logika**, nem ágazik bele a meglévő Claude-útba.
    Parancs nagyjából: `copilot --allow-all-tools [--continue]
