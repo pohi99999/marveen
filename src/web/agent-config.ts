@@ -172,6 +172,15 @@ export function readAgentSecurityProfile(name: string): string {
   return 'default'
 }
 
+export function readAgentEngine(name: string): 'claude' | 'copilot' {
+  try {
+    const config = JSON.parse(readFileOr(join(agentDir(name), 'agent-config.json'), '{}'))
+    return config.engine === 'copilot' ? 'copilot' : 'claude'
+  } catch {
+    return 'claude'
+  }
+}
+
 // Pure-logic resolver for the optional per-agent claudeConfigDir field.
 // Takes the raw agent-config.json text (or `{}` when no file exists) plus an
 // explicit home-dir, and returns the absolute path to use as
