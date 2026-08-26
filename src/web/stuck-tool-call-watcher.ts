@@ -40,13 +40,16 @@
 import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
 import { resolveFromPath } from '../platform.js'
+import { PROJECT_ROOT } from '../config.js'
 import { capturePane } from './agent-process.js'
+import { readTranscriptMtimeFromProjectDir } from './active-model.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
-import { resumeMarveenSession, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
+import { resumeMarveenSession, sendAlert, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
 import {
   stuckToolCallSignature,
   decideStuckToolCallRecovery,
   detectPaneState,
+  parkedChannelInput,
   type StuckToolCallState,
   type StuckToolCallThresholds,
 } from '../pane-state.js'
@@ -67,6 +70,44 @@ const WEDGE_MAX_CPU_PERCENT = 30
 export function confirmsWedgeProfile(cpuPercent: number | null, maxCpuPercent: number): boolean {
   if (cpuPercent === null) return true
   return cpuPercent <= maxCpuPercent
+}
+
+// STUCKFREEZE819: last-instant verdict-validity gate, at KILL EXECUTION time
+// (deliberately NOT folded into the verdict formation -- that would rebuild
+// the same gap smaller). Both false kills measured on 2026-08-19 hit a LIVE
+// session with a STALE verdict: stagnation accrued during a parked/idle
+// stretch, and by the time the kill executed (~2 minutes after the verdict's
+// inputs), the session had woken and was working -- the 20:23:19 kill landed
+// ONE second after a healthy tool_result, mid-turn (79s of healthy work); the
+// 14:08:59 kill landed 9 seconds after an inbox-wakeup injection. The
+// cheapest live-signal is the session transcript's mtime: a working session
+// appends constantly (measured ages at the two false kills: ~2s and ~9s),
+// while a genuinely wedged TUI writes nothing -- by construction its
+// transcript is at least freezeSeconds (180s) old when the verdict fires.
+//
+// Threshold derivation (not a round guess): must sit ABOVE the largest
+// measured false-kill age (9s, with margin) and WELL BELOW the 180s
+// stagnation floor of a real wedge. 30s = 3x the measured maximum and 6x
+// under the floor; any value in (9s, 180s) discriminates the two measured
+// populations.
+//
+// Known limit, stated not hidden: the mtime is DIRECTORY-level (newest jsonl
+// under the main session's project dir), so a hypothetical sibling session
+// with the same cwd could mask a real wedge -- for at most one sweep at a
+// time, because an abort keeps the spell and the next poll re-fires the
+// verdict once the masking writer pauses.
+export const STALE_VERDICT_FRESH_MS = 30_000
+
+// Pure: is the recovery verdict stale because the session's transcript shows
+// recent activity? null mtime (dir unreadable) -> false: fail-open, the
+// stagnation signal stands on its own, same rule as the CPU guard.
+export function verdictStaleByTranscript(
+  transcriptMtimeMs: number | null,
+  nowMs: number,
+  freshMs = STALE_VERDICT_FRESH_MS,
+): boolean {
+  if (transcriptMtimeMs === null) return false
+  return nowMs - transcriptMtimeMs < freshMs
 }
 
 // Recent CPU% of the main session's pane-leader claude (claudePid == panePid for
@@ -176,6 +217,28 @@ async function checkSession(label: string, session: string): Promise<void> {
       watchState.delete(session)
       return
     }
+    // Parked-channel-input guard (2026-08-15, owner-observed false positive).
+    // The idle-prompt guard above is the ONLY thing holding back a residual
+    // footer -- and it stops holding the instant an inbound channel message is
+    // injected into the prompt box, because detectPaneState then reads 'typing',
+    // not 'idle'. Measured sequence that day: the counter had been frozen at 49s
+    // since ~14:52 and was correctly skipped as residual at 14:52, 14:56 and
+    // 15:00; the owner's message landed at 15:03:06; at 15:04:05 the guard no
+    // longer applied, CPU was still low (the turn had not started yet), and this
+    // watcher respawned the pane -- taking the not-yet-processed message with it.
+    // So the ARRIVAL of a message opened the gate on evidence that predated it.
+    // A parked channel block is not wedge evidence: it means the session is
+    // about to be driven, and that case belongs to stuck-input-watcher, which
+    // has its own escalation (Enter -> clear+re-inject -> respawn). Clear the
+    // stale spell so the residual cannot re-arm on the next poll.
+    if (pane != null && parkedChannelInput(pane) != null) {
+      logger.info(
+        { label, session, tag: next.tag, seconds: next.lastSeconds, spellPeakSeconds: next.spellPeakSeconds },
+        'stuck-tool-call-watcher: counter stagnant but an inbound channel message is parked in the prompt (stuck-input-watcher owns this) -- skipping recovery',
+      )
+      watchState.delete(session)
+      return
+    }
     // Post-respawn grace: defer if a respawn (this watcher, channel-monitor's
     // cascade, channel-watchdog.sh, or the #264 stuck-modal-guard on Linux)
     // happened within the grace window. Two reasons: (1) a freshly respawned
@@ -207,6 +270,20 @@ async function checkSession(label: string, session: string): Promise<void> {
       )
       return
     }
+    // STUCKFREEZE819: last-instant validity re-check at the kill boundary.
+    // Every earlier guard sampled state at VERDICT time; this one samples at
+    // EXECUTION time, because the two are ~2 minutes apart and both measured
+    // false kills happened exactly in that gap (the session woke up between
+    // verdict and kill). Abort keeps the spell: a real wedge re-fires on the
+    // next poll, so this gate can only delay a true recovery by one sweep.
+    const transcriptMtime = readTranscriptMtimeFromProjectDir(PROJECT_ROOT)
+    if (verdictStaleByTranscript(transcriptMtime, Date.now())) {
+      logger.warn(
+        { label, session, transcriptAgeMs: transcriptMtime ? Date.now() - transcriptMtime : null, freshMs: STALE_VERDICT_FRESH_MS, seconds: next.lastSeconds },
+        'stuck-tool-call-watcher: verdict stale -- the session transcript was written moments ago, the session is alive; ABORTING recovery (STUCKFREEZE819)',
+      )
+      return
+    }
     // Audit log requested by Marveen 2026-06-02: every respawn this watcher
     // decides on must record the input that led to it, so a regression
     // (spurious respawn during legitimate long work) is easy to spot.
@@ -234,6 +311,21 @@ async function checkSession(label: string, session: string): Promise<void> {
     if (!ok) {
       logger.error({ label, session }, 'stuck-tool-call-watcher: respawn-pane recovery failed')
     }
+    // Owner transparency (2026-07-30, "reggeli leallas"): every wedge recovery
+    // used to be silent, so the owner discovered a dead morning session only by
+    // messaging into the void and then spent the morning pasting logs. One
+    // proactive report replaces that whole loop. Sent on both outcomes -- a
+    // FAILED recovery is exactly when the owner must know.
+    sendAlert(
+      ok
+        // A számot ne úgy írjuk ki, mintha időtartam lenne: a lastSeconds a
+        // KIJELZŐN BEFAGYOTT számláló értéke, a beavatkozás küszöbe viszont a
+        // stagnálás wall-clock hossza (freezeSeconds). A korábbi szöveg ("49s óta
+        // nem haladt") azt sugallta a tulajnak, hogy 49 másodperc után
+        // újraindítunk -- 2026-08-15-én pontosan ezt kérdezte vissza.
+        ? `🔧 A fő session beragadt: a kijelző számlálója ${Math.round(next.lastSeconds ?? 0)}s-nál megállt, és több mint ${THRESHOLDS.freezeSeconds}s-ig nem mozdult. Automatikusan újraindítottam a beszélgetés megtartásával. Ha volt megválaszolatlan üzeneted, mindjárt válaszolok rá.`
+        : `🚨 A fő session beragadt, és az automatikus újraindítás NEM sikerült. Kézi beavatkozás kellhet: tmux attach -t ${session}, vagy scripts/stop.sh && scripts/start.sh a marveen mappából.`,
+    )
   }
 }
 

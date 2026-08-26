@@ -50,7 +50,7 @@ import { readLastIngestionTimestamp, TRANSCRIPT_DIR } from './inbound-probe.js'
 import { decideDownAgentAction, AGENT_MAX_RESTART_ATTEMPTS, parseEtimeToSeconds } from './agent-restart-policy.js'
 // getClaudePidForSession + hasChannelPluginAlive live in the shared liveness
 // module so the standalone channel-coordinator reuses the exact same probe.
-import { getClaudePidForSession, hasChannelPluginAlive, probeChannelPluginLiveness } from '../channel-coordinator/liveness.js'
+import { getClaudePidForSession, hasChannelPluginAlive, probeChannelPluginLiveness, classifyRespawnStampAdvance } from '../channel-coordinator/liveness.js'
 import { getDesiredAgents } from './agent-desired-state.js'
 
 const TMUX = resolveFromPath('tmux')
@@ -908,7 +908,49 @@ function fileRespawnStampMs(): number {
 function writeRespawnStamp(): void {
   try {
     writeFileSync(RESPAWN_STAMP_FILE, String(Math.floor(Date.now() / 1000)))
+    // Attribution input for the external-respawn detector below: a stamp we
+    // wrote ourselves must never be reported as an external actor.
+    lastSelfStampWriteMs = Date.now()
   } catch { /* best effort */ }
+}
+
+// --- external-respawn detector (SOAKRESPAWN819) ---
+//
+// The stamp is consumed by five watchers purely to SUPPRESS themselves, so a
+// respawn performed by anyone but this process (channels.sh relaunched by the
+// service manager after a watchdog exit, the systemd-timer channel-watchdog,
+// a manual operator launch) leaves no dashboard.log trace at all -- the
+// evidence quiets the watchers instead of surfacing. Measured live
+// (hermes soak box, 2026-08-19): 210 service-manager restarts at a ~40min
+// cadence, zero dashboard.log lines. This detector closes that: every stamp
+// advance not attributable to a dashboard-initiated respawn is logged loudly.
+// WHY the respawn happened lives in store/channels-respawn.log (producer-side
+// mirror written by channels.sh); this line says THAT it happened.
+let lastSelfStampWriteMs = 0
+let lastSeenRespawnStampMs = -1
+function checkExternalMainRespawn(): void {
+  const stampMs = fileRespawnStampMs()
+  if (lastSeenRespawnStampMs < 0) {
+    // Boot baseline: whatever the stamp said before this dashboard started is
+    // history, not this boot's news -- without this, every dashboard restart
+    // after any respawn would fire a spurious external-actor warning.
+    lastSeenRespawnStampMs = stampMs
+    return
+  }
+  const verdict = classifyRespawnStampAdvance({
+    stampMs,
+    lastSeenStampMs: lastSeenRespawnStampMs,
+    lastSelfRespawnMs: Math.max(marveenLastHardRestart, marveenLastKeepaliveRespawn, marveenLastSessionCreate, lastSelfStampWriteMs),
+    graceMs: MARVEEN_POST_RESPAWN_GRACE_MS,
+  })
+  if (verdict === 'none') return
+  lastSeenRespawnStampMs = stampMs
+  if (verdict === 'external') {
+    logger.warn(
+      { stampAt: new Date(stampMs).toISOString() },
+      'Main-session respawn stamp advanced by an EXTERNAL actor (service-manager relaunch of channels.sh, channel-watchdog timer, or manual launch) -- the main session was recreated outside the dashboard; reason breadcrumb: store/channels-respawn.log (SOAKRESPAWN819)'
+    )
+  }
 }
 
 // --- Vanished-session recovery (self-healing main session) ---
@@ -1441,8 +1483,17 @@ function handleMarveenUp(): void {
     const stage = marveenDownState.stage
     const providerLabel = getMainAgentProvider()
     logger.info({ stage, downedFor, provider: providerLabel }, 'Marveen channel plugin recovered')
-    if (stage !== 'soft' && stage !== 'save' && stage !== 'resume') {
-      sendAlert(`✅ ${BOT_NAME} ${providerLabel} plugin helyrealt (${stage} utan, ${downedFor}s kieses).`)
+    // Owner transparency (2026-07-30, "reggeli leallas"): a resume-stage
+    // recovery means the main session was actually respawned -- the owner's
+    // in-flight messages may have been dropped, so it must not be silent. Short
+    // soft/save blips stay quiet, but a LONG outage is reported even when the
+    // fix itself was soft: messages sent into that window went unanswered.
+    const disruptive = stage !== 'soft' && stage !== 'save'
+    if (disruptive || downedFor >= 180) {
+      sendAlert(
+        `✅ ${BOT_NAME} ${providerLabel} kapcsolat helyreallt (${downedFor}s kieses, ${stage} szint). ` +
+        `Ha a kieses alatt irtal es nem jott valasz, mindjart potolom.`,
+      )
     }
     marveenDownState = null
   }
@@ -1490,6 +1541,12 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     // Restore persisted failure counts on first tick so a dashboard restart
     // does not reset the cap and restart agents that have already been given up on.
     ensureAgentRestartFailuresInitialized()
+
+    // Surface main-session respawns performed by anyone but this process
+    // (SOAKRESPAWN819) -- must run every sweep, not only when the plugin
+    // probe reaches the main target, so an external churn is visible even
+    // while the plugin is structurally down.
+    checkExternalMainRespawn()
 
     type Target = { session: string; isMarveen: boolean; agentName?: string; provider: ChannelProviderType }
     const targets: Target[] = [{ session: MAIN_CHANNELS_SESSION, isMarveen: true, provider: mainProvider }]
@@ -1794,7 +1851,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
         logger.warn({ agent: t.agentName, provider: t.provider, failures }, 'Agent channel plugin down -- auto-restarting')
         try {
-          stopAgentProcess(t.agentName!)
+          await stopAgentProcess(t.agentName!)
           // Settle before the fresh start. stopAgentProcess already reaps this
           // agent's channel orphans + waits 2s; add more so the shared plugin
           // cache (bun run --cwd <plugin>, .in_use markers) fully releases from
@@ -1811,7 +1868,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           // the --channels plugin MCP server, so the agent comes up with no plugin
           // and no poller (verified: continue -> "Plugin not found" in /mcp; fresh
           // -> plugin loads + poller attaches). Context is dropped, memory persists.
-          startAgentProcess(t.agentName!, { fresh: true })
+          await startAgentProcess(t.agentName!, { fresh: true })
           agentLastRestart.set(t.agentName!, Date.now())
           agentDownSince.delete(t.session)
           agentBusyDeferAlerted.delete(t.session)
@@ -1904,7 +1961,7 @@ async function reconcileDesiredAgents(): Promise<void> {
       if (!memGateAllowsStart(name)) continue   // Commit 3 v1: safe-mode / memory gate
       logger.warn({ agent: name }, 'Desired agent not running -- auto-starting (reconcile)')
       try {
-        const r = startAgentProcess(name)
+        const r = await startAgentProcess(name)
         agentLastRestart.set(name, Date.now())
         if (!r.ok && r.error !== 'Agent is already running') {
           logger.error({ agent: name, error: r.error }, 'Reconcile start failed')

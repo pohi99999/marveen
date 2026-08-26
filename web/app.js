@@ -658,6 +658,11 @@ function renderStaticI18n() {
   document.querySelectorAll('[data-i18n-html]').forEach(el => {
     el.innerHTML = t(el.dataset.i18nHtml)
   })
+  // #updatesSubtitle opts out of the [data-i18n] sweep (renderUpdatesVersion owns
+  // it). Re-apply from the cached status so a language switch re-localizes its
+  // "Current:" label immediately -- never leaving a clobbered/mixed header even
+  // if loadUpdates' refetch is slow or fails.
+  if (typeof renderUpdatesVersion === 'function') renderUpdatesVersion(window._updatesStatus)
   if (typeof applyOnboardingProviderTab === 'function') applyOnboardingProviderTab()
 }
 
@@ -841,8 +846,8 @@ const columns = document.querySelectorAll('.kanban-col-body')
 // Modal wiring
 document.getElementById('cardModalClose').addEventListener('click', () => closeModal(cardModalOverlay))
 document.getElementById('cardDetailClose').addEventListener('click', () => closeModal(cardDetailOverlay))
-cardModalOverlay.addEventListener('click', (e) => { if (e.target === cardModalOverlay) closeModal(cardModalOverlay) })
-cardDetailOverlay.addEventListener('click', (e) => { if (e.target === cardDetailOverlay) closeModal(cardDetailOverlay) })
+attachOverlayCloseGuard(cardModalOverlay)
+attachOverlayCloseGuard(cardDetailOverlay)
 
 // Add card buttons per column
 document.querySelectorAll('.kanban-add-btn').forEach((btn) => {
@@ -1545,6 +1550,14 @@ function createCardEl(card, embeddedChildren = []) {
   return el
 }
 
+// Every move made from this dashboard is made by the human at the keyboard, so
+// each /move call names the owner as `actor`. That is what lets the backend tell
+// an assignment ("the owner dragged this onto you") apart from a self-pickup ("the
+// agent moved its own card"), and only wake the agent in the first case. Falls
+// back to undefined until /api/marveen has loaded -- an unnamed mover means the
+// backend dispatches as it always did, never the opposite.
+function kanbanMoveActor() { return window._marveen?.ownerName || undefined }
+
 // === Drag & Drop ===
 // Wires the drag/drop handlers for one column-body element. Used for the
 // 4 static flat-board columns at load time, and again for every swimlane
@@ -1586,7 +1599,7 @@ function wireKanbanColumnDnD(col) {
       await fetch(`/api/kanban/${encodeURIComponent(cardId)}/move`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus, sort_order: sortOrder }),
+        body: JSON.stringify({ status: newStatus, sort_order: sortOrder, actor: kanbanMoveActor() }),
       })
       loadKanban()
     } catch {
@@ -1752,7 +1765,7 @@ async function kanbanTouchEnd(e) {
     const r = await fetch(`/api/kanban/${encodeURIComponent(cardId)}/move`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus, sort_order: sortOrder }),
+      body: JSON.stringify({ status: newStatus, sort_order: sortOrder, actor: kanbanMoveActor() }),
     })
     if (!r.ok) throw new Error('move failed')
     loadKanban()
@@ -2052,7 +2065,7 @@ async function showCardDetail(card) {
         const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/move`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: newVal, sort_order: 0 }),
+          body: JSON.stringify({ status: newVal, sort_order: 0, actor: kanbanMoveActor() }),
         })
         if (!r.ok) throw new Error('move failed')
         card.status = newVal
@@ -2523,6 +2536,30 @@ function closeModal(overlay) {
   if (overlay && overlay.id === 'skillModalOverlay') skillModalScope = null
 }
 
+// True if any visible text/textarea field inside the overlay has typed
+// content. Used to gate backdrop-click close so a stray click can't
+// silently discard unsaved input (data loss reported 2026-08-19: a full
+// card description was lost by clicking outside the "Új kártya" modal).
+function overlayHasUnsavedInput(overlay) {
+  const fields = overlay.querySelectorAll(
+    'input[type="text"]:not([list]), input[type="date"], input[type="email"], input[type="url"], textarea',
+  )
+  for (const f of fields) {
+    if (f.offsetParent !== null && f.value && f.value.trim()) return true
+  }
+  return false
+}
+
+// Backdrop click closes the modal only if it has no unsaved input; if it
+// does, a confirm() gates the close so the click has to be deliberate.
+function attachOverlayCloseGuard(overlay) {
+  overlay.addEventListener('click', (e) => {
+    if (e.target !== overlay) return
+    if (overlayHasUnsavedInput(overlay) && !confirm('Van be nem mentett szöveg -- biztosan bezárod mentés nélkül?')) return
+    closeModal(overlay)
+  })
+}
+
 // Wizard open
 addBtn.addEventListener('click', () => {
   resetWizard()
@@ -2536,9 +2573,9 @@ document.getElementById('agentDetailClose').addEventListener('click', () => clos
 document.getElementById('skillModalClose').addEventListener('click', () => closeModal(skillModalOverlay))
 
 // Click-outside-to-close
-agentWizardOverlay.addEventListener('click', (e) => { if (e.target === agentWizardOverlay) closeModal(agentWizardOverlay) })
-agentDetailOverlay.addEventListener('click', (e) => { if (e.target === agentDetailOverlay) closeModal(agentDetailOverlay) })
-skillModalOverlay.addEventListener('click', (e) => { if (e.target === skillModalOverlay) closeModal(skillModalOverlay) })
+attachOverlayCloseGuard(agentWizardOverlay)
+attachOverlayCloseGuard(agentDetailOverlay)
+attachOverlayCloseGuard(skillModalOverlay)
 
 // Close all modals on Escape
 document.addEventListener('keydown', (e) => {
@@ -2676,6 +2713,7 @@ function resetWizard() {
   agentDesc.value = ''
   agentModel.value = 'inherit'
   loadAvailableModels()
+  loadOllamaModels()
   selectedAvatar = null
   selectedAvatarFile = null
   document.querySelectorAll('#avatarGrid .avatar-grid-item').forEach(i => i.classList.remove('selected'))
@@ -2929,6 +2967,57 @@ function setupAutoRestartUI(agent) {
   }
 }
 
+// Populate the idle-flush controls from an agent payload. Same source as
+// setupAutoRestartUI (the agent detail carries contextGuard alongside
+// autoRestart), so the settings pane needs no extra fetch.
+//
+// The tokens field is shown in THOUSANDS: the stored value is an absolute
+// token count, and asking an operator to type 500000 into a box invites the
+// 500 that normalizeContextGuardConfig has to defend against.
+function setupIdleFlushUI(agent) {
+  const cg = (agent && agent.contextGuard) || { idleFlushEnabled: false, idleFlushTokens: 400000, idleMinutes: 20 }
+  const enabled = document.getElementById('ifEnabled')
+  const tokens = document.getElementById('ifTokens')
+  const minutes = document.getElementById('ifMinutes')
+  if (!enabled || !tokens || !minutes) return
+  enabled.checked = cg.idleFlushEnabled === true
+  tokens.value = Math.round((cg.idleFlushTokens || 400000) / 1000)
+  minutes.value = cg.idleMinutes || 20
+  showIdleFlushScheduleWarning(agent)
+}
+
+// Warn when this agent has ANY scheduled task, because the idle clock is the
+// transcript mtime and every scheduled wake writes to the transcript: a
+// schedule that fires more often than idleMinutes means the tier can never
+// accumulate enough quiet and will sit switched on doing nothing.
+//
+// Deliberately NOT a computed comparison of cron period vs idleMinutes. A cron
+// parser in the settings pane is a lot of fragile surface for a hint, and it
+// would be silent exactly when it got a schedule shape wrong. Listing the
+// schedules and letting the operator judge is both cheaper and harder to make
+// quietly incorrect.
+async function showIdleFlushScheduleWarning(agent) {
+  const box = document.getElementById('ifScheduleWarning')
+  if (!box) return
+  // Clear as well as hide: the pane is reused for every agent, and a stale
+  // warning left in the node is one accidental unhide away from naming the
+  // wrong agent's schedules.
+  box.hidden = true
+  box.textContent = ''
+  const id = (agent && (agent.autoRestartId || agent.name)) || null
+  if (!id) return
+  try {
+    const res = await fetch('/api/schedules')
+    if (!res.ok) return
+    const all = await res.json()
+    const mine = (Array.isArray(all) ? all : []).filter(t => t && t.agent === id && t.schedule)
+    if (!mine.length) return
+    const list = mine.map(t => `${t.name} (${t.schedule})`).join(', ')
+    box.textContent = t('agents.settings.idle_flush_sched_warning').replace('{list}', list)
+    box.hidden = false
+  } catch { /* the hint is best-effort; never break the pane over it */ }
+}
+
 async function openMarveenDetail() {
   const m = window._marveen
   if (!m) return
@@ -2936,6 +3025,7 @@ async function openMarveenDetail() {
   // Reuse the agent detail modal for Marveen
   currentAgent = { ...m, name: mainAgentId(), claudeMd: '', soulMd: '', mcpJson: '', skills: [] }
   setupAutoRestartUI(currentAgent)
+  setupIdleFlushUI(currentAgent)
 
   const displayName = m.name || 'Marveen'
   document.getElementById('agentDetailTitle').textContent = displayName
@@ -3436,6 +3526,7 @@ async function openAgentDetail(agentName) {
 
   // Auto-restart settings + live context size
   setupAutoRestartUI(currentAgent)
+  setupIdleFlushUI(currentAgent)
 
   // Telegram tab
   updateChannelTab(currentAgent)
@@ -3863,19 +3954,33 @@ function switchAgentTab(tab) {
 
 // === Settings save buttons ===
 async function loadOllamaModels() {
-  const group = document.getElementById('ollamaModelGroup')
-  if (!group) return
-  group.innerHTML = ''
+  // Two optgroups, mirroring loadAvailableModels(): one in the agent edit panel
+  // and one in the new-agent wizard. getElementById returns a single node, so
+  // the earlier single-group version could only ever reach the edit panel --
+  // the wizard had no local-model option at all.
+  const groups = [
+    document.getElementById('ollamaModelGroup'),
+    document.getElementById('agentModelOllamaGroup'),
+  ]
+  let models = []
   try {
     const res = await fetch('/api/ollama/models')
-    const models = await res.json()
+    if (res.ok) models = await res.json()
+  } catch { /* Ollama not reachable -- fall through with an empty list */ }
+  if (!Array.isArray(models)) models = []
+  for (const group of groups) {
+    if (!group) continue
+    group.innerHTML = ''
+    // Hide rather than show an empty group, matching loadAvailableModels().
+    if (models.length === 0) { group.style.display = 'none'; continue }
+    group.style.display = ''
     for (const m of models) {
       const opt = document.createElement('option')
       opt.value = m.name
       opt.textContent = `${m.name} (${m.size})`
       group.appendChild(opt)
     }
-  } catch { /* Ollama not available */ }
+  }
 }
 
 // Populates the DeepSeek optgroups in both the wizard and the agent edit
@@ -4369,6 +4474,42 @@ document.getElementById('saveAutoRestartBtn').addEventListener('click', async ()
     const body = await res.json()
     if (currentAgent) currentAgent.autoRestart = body.autoRestart
     showToast(t('agents.toast.auto_restart_saved'))
+  } catch { showToast(t('common.error_save')) }
+})
+
+document.getElementById('saveIdleFlushBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  // Like auto-restart, this applies to the main session too, so role === 'main'
+  // is NOT skipped. The context-guard store is keyed by the same id.
+  const id = currentAgent.autoRestartId || currentAgent.name
+  // Send the WHOLE config, not just the three idle fields. The endpoint
+  // normalizes the body into a complete config, so a fragment would silently
+  // reset actPct/hardPct/saturationRestart/enabled to their defaults -- saving
+  // an idle-flush preference would disarm the wedge tiers on an agent that had
+  // them on. Re-read rather than trusting the cached detail: not every path
+  // that opens this pane populates contextGuard, and an empty object here is
+  // indistinguishable from a genuinely default config.
+  let current = {}
+  try {
+    const cur = await fetch(`/api/agents/${encodeURIComponent(id)}/context-guard`)
+    if (!cur.ok) throw new Error()
+    current = (await cur.json()).contextGuard || {}
+  } catch { showToast(t('common.error_save')); return }
+  const cfg = Object.assign({}, current, {
+    idleFlushEnabled: document.getElementById('ifEnabled').checked,
+    idleFlushTokens: Math.round(Number(document.getElementById('ifTokens').value) * 1000),
+    idleMinutes: Number(document.getElementById('ifMinutes').value),
+  })
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(id)}/context-guard`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    })
+    if (!res.ok) throw new Error()
+    const body = await res.json()
+    if (currentAgent) currentAgent.contextGuard = body.contextGuard
+    showToast(t('agents.toast.idle_flush_saved'))
   } catch { showToast(t('common.error_save')) }
 })
 
@@ -5571,7 +5712,7 @@ document.getElementById('addScheduleBtn').addEventListener('click', () => {
   })
 })
 document.getElementById('scheduleModalClose').addEventListener('click', () => closeModal(scheduleModalOverlay))
-scheduleModalOverlay.addEventListener('click', (e) => { if (e.target === scheduleModalOverlay) closeModal(scheduleModalOverlay) })
+attachOverlayCloseGuard(scheduleModalOverlay)
 
 // Frequency change handler
 // Type toggle (task vs heartbeat)
@@ -6010,7 +6151,7 @@ function renderScheduleList(tasks) {
 
 const scheduleRunHistoryOverlay = document.getElementById('scheduleRunHistoryOverlay')
 document.getElementById('scheduleRunHistoryClose').addEventListener('click', () => closeModal(scheduleRunHistoryOverlay))
-scheduleRunHistoryOverlay.addEventListener('click', (e) => { if (e.target === scheduleRunHistoryOverlay) closeModal(scheduleRunHistoryOverlay) })
+attachOverlayCloseGuard(scheduleRunHistoryOverlay)
 
 const RUN_STATUS_LABEL = {
   fired: () => t('tasks.run_status.fired'),
@@ -6569,7 +6710,7 @@ document.getElementById('memAddBtn').addEventListener('click', () => {
 
 // Close memory modal
 document.getElementById('memModalClose').addEventListener('click', () => closeModal(memModalOverlay))
-memModalOverlay.addEventListener('click', (e) => { if (e.target === memModalOverlay) closeModal(memModalOverlay) })
+attachOverlayCloseGuard(memModalOverlay)
 
 // Save memory (create or edit)
 document.getElementById('saveMemBtn').addEventListener('click', async () => {
@@ -7634,7 +7775,7 @@ document.querySelectorAll('.catalog-filter-btn').forEach(btn => {
 
 // Catalog install modal
 document.getElementById('catalogInstallClose').addEventListener('click', () => closeModal(catalogInstallOverlay))
-catalogInstallOverlay.addEventListener('click', (e) => { if (e.target === catalogInstallOverlay) closeModal(catalogInstallOverlay) })
+attachOverlayCloseGuard(catalogInstallOverlay)
 
 async function loadCatalog() {
   const grid = document.getElementById('catalogGrid')
@@ -7815,8 +7956,8 @@ document.getElementById('addConnectorBtn').addEventListener('click', () => {
 })
 document.getElementById('connectorModalClose').addEventListener('click', () => closeModal(connectorModalOverlay))
 document.getElementById('connectorDetailClose').addEventListener('click', () => closeModal(connectorDetailOverlay))
-connectorModalOverlay.addEventListener('click', (e) => { if (e.target === connectorModalOverlay) closeModal(connectorModalOverlay) })
-connectorDetailOverlay.addEventListener('click', (e) => { if (e.target === connectorDetailOverlay) closeModal(connectorDetailOverlay) })
+attachOverlayCloseGuard(connectorModalOverlay)
+attachOverlayCloseGuard(connectorDetailOverlay)
 
 // Type toggle
 document.getElementById('connectorType').addEventListener('change', () => {
@@ -9791,7 +9932,7 @@ document.getElementById('memImportOpenBtn').addEventListener('click', () => {
 
 // Close import modal
 document.getElementById('memImportClose').addEventListener('click', () => closeModal(memImportOverlay))
-memImportOverlay.addEventListener('click', (e) => { if (e.target === memImportOverlay) closeModal(memImportOverlay) })
+attachOverlayCloseGuard(memImportOverlay)
 
 // File area click -> trigger file input
 memImportFileArea.addEventListener('click', () => memImportFileInput.click())
@@ -10309,7 +10450,7 @@ function formatMtime(ms) {
 }
 
 document.getElementById('skillDetailClose').addEventListener('click', () => closeModal(skillDetailOverlay))
-skillDetailOverlay.addEventListener('click', (e) => { if (e.target === skillDetailOverlay) closeModal(skillDetailOverlay) })
+attachOverlayCloseGuard(skillDetailOverlay)
 
 // Scope for the next skill create/import action. 'global' means the
 // Skills page opened the modal (write to ~/.claude/skills/); any other
@@ -11664,6 +11805,32 @@ async function pollUpdatesBadge() {
   } catch {}
 }
 
+// Render the running instance's identity into the page-header subtitle -- the
+// same .subtitle slot every other page header uses, so it stays consistent with
+// the rest of the dashboard and is visible in ALL update states (up-to-date,
+// behind, error) because it lives in the header, not the state-specific summary.
+// The semver is primary; the 7-char commit SHA follows as secondary context
+// (e.g. "Jelenlegi: v1.32.1 · db1ed3f"). When the backend could not read a
+// version, the SHA stands alone -- we never fabricate a version. With neither
+// available, the static brand subtitle (rendered from data-i18n) is left as-is.
+function renderUpdatesVersion(data) {
+  const sub = document.getElementById('updatesSubtitle')
+  if (!sub) return
+  const ver = (data && typeof data.version === 'string') ? data.version.trim() : ''
+  const sha = ((data && data.current) || '').slice(0, 7)
+  const parts = []
+  if (ver) parts.push('v' + escapeHtmlUpdates(ver))
+  if (sha) parts.push(`<code>${escapeHtmlUpdates(sha)}</code>`)
+  if (parts.length === 0) {
+    // No version AND no SHA (no git checkout and unreadable package.json): fall
+    // back to the localized brand subtitle. Set as text (not innerHTML) so no
+    // stale markup lingers, and keep it localized on every render.
+    sub.textContent = t('updates.brand_subtitle')
+    return
+  }
+  sub.innerHTML = `${t('updates.current_label')} ${parts.join(' · ')}`
+}
+
 async function loadUpdates() {
   const summary = document.getElementById('updatesSummary')
   const list = document.getElementById('updatesCommitList')
@@ -11677,17 +11844,16 @@ async function loadUpdates() {
     const data = await res.json()
     window._updatesStatus = data
     renderUpdatesBadge(data)
+    renderUpdatesVersion(data)
     updateBranchDriftUI(data)
     renderBranchNotice(data)
-    const cur = (data.current || '').slice(0, 7) || '–'
-    const lat = (data.latest || '').slice(0, 7) || '–'
     if (data.error) {
       summary.className = 'updates-summary error'
-      summary.innerHTML = `<strong>${t('updates.check_failed')}:</strong> ${escapeHtmlUpdates(data.error)}<br>${t('updates.current_label')} <code>${cur}</code>`
+      summary.innerHTML = `<strong>${t('updates.check_failed')}:</strong> ${escapeHtmlUpdates(data.error)}`
       applyBtn.hidden = true
     } else if (data.behind === 0) {
       summary.className = 'updates-summary up-to-date'
-      summary.innerHTML = `<strong>${t('updates.up_to_date_html')}</strong> (<code>${cur}</code>). ${t('updates.no_changes')}`
+      summary.innerHTML = `<strong>${t('updates.up_to_date_html')}</strong>. ${t('updates.no_changes')}`
       applyBtn.hidden = true
     } else {
       summary.className = 'updates-summary behind'
@@ -11896,6 +12062,27 @@ setInterval(pollUpdatesBadge, 5 * 60_000)
 async function fetchOnboardingStatus() {
   try { return await (await fetch('/api/onboarding/status')).json() } catch { return null }
 }
+// WIZFLOW809 BEGIN waitForChannelLive
+// Poll the onboarding status until the channel is MEASURABLY live
+// (status.channelLive: the bun-child/process liveness the channel-monitor
+// uses), instead of a fixed setTimeout. The restart response's
+// `restarted: true` is only a dispatch receipt -- on the cold path the real
+// start takes ~minutes, and a fixed wait opened the pairing step against a
+// still-booting session (WIZFLOW809, three field reports). Checks BEFORE the
+// first sleep so an already-live channel advances immediately; a timeout is
+// NOT success -- the caller must keep the user on this step and say the
+// channel is still starting. Dependencies are parameters so the slow path is
+// unit-testable with a delayed fake signal (the acceptance criterion: the
+// wizard WAITS, it does not get lucky with timing).
+async function waitForChannelLive(fetchStatus, delayMs, maxTries) {
+  for (let i = 0; i < maxTries; i++) {
+    const st = await fetchStatus()
+    if (st && st.channelLive) return 'live'
+    await new Promise((r) => setTimeout(r, delayMs))
+  }
+  return 'timeout'
+}
+// WIZFLOW809 END waitForChannelLive
 function onboardingCurrentStep(s) {
   if (!s.identityConfirmed) return 1
   if (!s.claudeAuthPresent || !s.agentsRunning) return 2
@@ -12127,10 +12314,17 @@ function wireOnboarding(step) {
         }
         if (!res.ok) { botBtn.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
         // The server restarts the channels session so the new bot token goes
-        // live -- say so, and give the respawn a beat before advancing so the
-        // pairing step starts against the restarted service.
+        // live. Do NOT advance on a timer: the restart response is a dispatch
+        // receipt, and the cold start is ~minutes. Wait for the MEASURED
+        // channelLive signal, tell the user the channel is starting meanwhile,
+        // and on timeout stay on this step with an honest "still starting"
+        // message -- the old fixed 4s opened the pairing step against a
+        // booting session, which looked done-and-empty (WIZFLOW809).
         onbMsg(d.restarted ? t('onboarding.step2.saved_restarted') : t('onboarding.step2.saved'))
-        setTimeout(refreshOnboarding, d.restarted ? 4000 : 2000)
+        onbMsg(t('onboarding.step2.waiting_channel'))
+        const outcome = await waitForChannelLive(fetchOnboardingStatus, 3000, 40)  // ~2 min bound
+        if (outcome === 'live') { await refreshOnboarding() }
+        else { botBtn.disabled = false; onbMsg(t('onboarding.step2.channel_slow'), true) }
       } catch (e) { botBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
     })
   } else if (step === 4) {
@@ -12208,6 +12402,7 @@ populateAvatarGrid()
 loadMemAgents()
 loadOverview()
 loadAvailableModels()
+loadOllamaModels()
 {
   const onbClose = document.getElementById('onboardingClose')
   if (onbClose) onbClose.addEventListener('click', dismissOnboarding)
@@ -14748,6 +14943,7 @@ function renderTuToolStats(data) {
 // Ideas (Ötletláda)
 // ============================================================
 let ideas = []
+let ideasAll = []
 let ideasPromoteId = null
 let ideaEditId = null
 let ideaDetailId = null
@@ -14758,12 +14954,16 @@ async function loadIdeasPage() {
   const statusFilter = document.getElementById('ideaStatusFilter')?.value ?? 'active'
   const categoryFilter = document.getElementById('ideaCategoryFilter')?.value || ''
   const params = new URLSearchParams()
-  // 'active' = new+reviewed, fetched unfiltered then narrowed client-side
-  if (statusFilter && statusFilter !== 'active') params.set('status', statusFilter)
+  // Status narrowing happens client-side on the full fetch: the stats row must
+  // count every status, and a server-side status filter starved it — after the
+  // first promote the "Kanbanban" box showed 0 with the item hidden, which read
+  // as data loss on the first live promote (2026-08-20).
   if (categoryFilter) params.set('category', categoryFilter)
   const [ideasRes, catsRes] = await Promise.all([fetch('/api/ideas?' + params), fetch('/api/ideas/categories')])
-  ideas = await ideasRes.json()
-  if (statusFilter === 'active') ideas = ideas.filter(i => i.status === 'new' || i.status === 'reviewed')
+  ideasAll = await ideasRes.json()
+  if (statusFilter === 'active') ideas = ideasAll.filter(i => i.status === 'new' || i.status === 'reviewed')
+  else if (statusFilter) ideas = ideasAll.filter(i => i.status === statusFilter)
+  else ideas = ideasAll
   const cats = await catsRes.json()
   const catSel = document.getElementById('ideaCategoryFilter')
   if (catSel) {
@@ -14776,7 +14976,7 @@ async function loadIdeasPage() {
 
 function renderIdeasStats() {
   const counts = { new: 0, reviewed: 0, kanban: 0, rejected: 0 }
-  for (const i of ideas) counts[i.status] = (counts[i.status] || 0) + 1
+  for (const i of ideasAll) counts[i.status] = (counts[i.status] || 0) + 1
   const el = document.getElementById('ideasStats')
   if (!el) return
   el.innerHTML = Object.entries(counts).map(([s, n]) =>
@@ -16222,7 +16422,7 @@ async function openResearchDoc(agent, name) {
       if (backBtn) backBtn.addEventListener('click', () => switchPage('kanban'))
       const adOverlay = document.getElementById('archivedDetailOverlay')
       document.getElementById('archivedDetailClose').addEventListener('click', () => closeModal(adOverlay))
-      adOverlay.addEventListener('click', e => { if (e.target === adOverlay) closeModal(adOverlay) })
+      attachOverlayCloseGuard(adOverlay)
     }
     populateArchivedProjects()
     doArchivedSearch()

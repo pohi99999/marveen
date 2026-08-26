@@ -12,6 +12,9 @@ import {
   listArchivedKanbanCards,
   revertIdeaFromKanban,
   getHeartbeatKanbanSummary,
+  countNewHotMemories,
+  countPlannedKanbanCards,
+  getDbFileSizeMb,
 } from '../../db.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS } from '../../config.js'
@@ -60,7 +63,17 @@ export function kanbanMoveInstructions(id: string, target: string): string {
     `  curl -s -X POST ${moveUrl} \\`,
     `    ${auth} \\`,
     `    -H 'Content-Type: application/json' \\`,
-    `    -d '{"status":"done"}'`,
+    `    -d '{"status":"done","actor":"${target}"}'`,
+    '',
+    // The "actor" field is not decoration: it is what tells the board WHO moved
+    // the card. Without it a self-pickup (agent -> in_progress on its own card)
+    // is indistinguishable from an assignment, and the dispatcher echoes the
+    // task back at the agent that just started it.
+    `Az "actor":"${target}" mezőt MINDEN mozgatásnál küldd el (ez mondja meg a táblának, hogy te mozgattad). Ha te magad veszed fel a kártyát in_progress-re, ott is:`,
+    `  curl -s -X POST ${moveUrl} \\`,
+    `    ${auth} \\`,
+    `    -H 'Content-Type: application/json' \\`,
+    `    -d '{"status":"in_progress","actor":"${target}"}'`,
     '',
     `Ha elakadtál / ${escalateTo} döntésére/lépésére vársz: NE csak status="waiting"-et állíts be. HÁROM lépés kell EGYÜTT:`,
     `  a) Írj egy kommentet ami KÖZVETLENÜL ${escalateTo}-hez szól, egyértelműen megfogalmazva mit kell eldöntenie/megtennie (NE a saját belső elemzésedet írd oda) -- ugyanaz a comments hívás mint fent, "content" mezőben.`,
@@ -81,7 +94,9 @@ export function kanbanMoveInstructions(id: string, target: string): string {
 // assigned agent once via the inter-agent message router (createAgentMessage),
 // which gives retry / dedup / trust-wrapping / busy-receiver handling for free.
 // dispatched_at is the once-only guard; errors never block the card move.
-function fireKanbanDispatch(id: string): void {
+// `actor` is the mover reported by the caller: an agent that moves its own card
+// to in_progress must not be woken with an assignment for work it just started.
+function fireKanbanDispatch(id: string, actor?: string | null): void {
   try {
     const card = getKanbanCard(id)
     if (!card || card.dispatched_at) return
@@ -91,6 +106,7 @@ function fireKanbanDispatch(id: string): void {
       mainAgentId: MAIN_AGENT_ID,
       agentNames: listAgentNames(),
       isRunning: isAgentRunning,
+      actor,
     })
     if (!target) return
     const desc = (card.description ?? '').trim()
@@ -100,6 +116,65 @@ function fireKanbanDispatch(id: string): void {
     logger.info({ id, target, assignee: card.assignee }, 'Kanban in_progress dispatch fired')
   } catch (err) {
     logger.warn({ err, id }, 'Kanban dispatch failed (card move still succeeded)')
+  }
+}
+
+// HBKANBANDRIFT819: the heartbeat-summary payload, shaped so that TRUNCATED
+// reads still carry the truth. Pure and exported so tests can pin all three
+// properties without HTTP:
+//   1. `counts` is the FIRST key -- JSON.stringify preserves insertion order,
+//      so a reader that loses the tail loses list items, never the numbers;
+//   2. every title is truncated server-side (board titles here run to 15KB);
+//   3. the waiting LIST is capped to the most recently-updated few, while
+//      counts.waiting always carries the FULL total -- the list names items,
+//      the numbers only ever come from counts.
+export const HEARTBEAT_SUMMARY_TITLE_MAX = 160
+export const HEARTBEAT_SUMMARY_WAITING_CAP = 8
+
+type HeartbeatSummaryCard = {
+  id: string; title: string; status: string; priority: string;
+  assignee?: string | null; updated_at?: number | null;
+}
+
+export function buildHeartbeatSummaryResponse(
+  summary: { urgent: HeartbeatSummaryCard[]; in_progress: HeartbeatSummaryCard[]; waiting: HeartbeatSummaryCard[] },
+  newHotMemories1h: number,
+  plannedCount: number,
+  dbSizeMb: number | null,
+) {
+  const trunc = (t: string) =>
+    t.length > HEARTBEAT_SUMMARY_TITLE_MAX ? t.slice(0, HEARTBEAT_SUMMARY_TITLE_MAX) + '…' : t
+  const slim = (c: HeartbeatSummaryCard) => ({
+    id: c.id, title: trunc(c.title), status: c.status, priority: c.priority, assignee: c.assignee ?? null,
+  })
+  const waitingRecent = [...summary.waiting]
+    .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
+    .slice(0, HEARTBEAT_SUMMARY_WAITING_CAP)
+  return {
+    counts: {
+      urgent: summary.urgent.length,
+      in_progress: summary.in_progress.length,
+      // The FULL total, never the capped list length -- the 2026-08-04 lesson
+      // (waiting: 10 reported against 130 real) in endpoint form.
+      waiting: summary.waiting.length,
+      // The report format asks for a planned line; without a sanctioned
+      // source here the agent manufactured the value (planned: 0 against a
+      // real 305, measured 2026-08-19 17:00). Count only, no list.
+      planned: plannedCount,
+      // HBMEMBLIND819: computed server-side with the MAIN agent's id so the
+      // heartbeat agent copies a number instead of running (and rewriting)
+      // a query -- see HEARTBEAT_NEW_HOT_MEMORIES_SQL in db.ts.
+      new_hot_memories_1h: newHotMemories1h,
+      // HBDBMERET822: without a sanctioned source the agent re-invented this
+      // measurement every session (format drift `158 MB` -> `160M`, then a
+      // false `0.0 MB` against a real 159 MB, 2026-08-22 15:00). null means
+      // "could not measure" and renders as "nincs adat" -- never 0, because
+      // for a growth signal a false zero looks like calm, not like failure.
+      db_size_mb: dbSizeMb,
+    },
+    urgent: summary.urgent.map(slim),
+    waiting: waitingRecent.map(slim),
+    waiting_shown: Math.min(summary.waiting.length, HEARTBEAT_SUMMARY_WAITING_CAP),
   }
 }
 
@@ -123,20 +198,18 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   // not a mechanism; an endpoint that cannot return a closed card is. It also
   // removes the sqlite3 CLI from that path, which does not exist on a stock
   // Linux install (#870).
+  //
+  // HBKANBANDRIFT819 (2026-08-19): the 16:42 heartbeat reported waiting:12
+  // against a real 280 -- the endpoint's counts were CORRECT, but the payload
+  // was ~31KB (card titles on this board run to 15KB EACH) and `counts` was
+  // serialized LAST, after the huge arrays. An agent reading truncated output
+  // lost exactly the numbers and counted the visible list instead. Fixes here:
+  // counts serialize FIRST (truncation-resilient ordering), titles are
+  // truncated server-side, and the waiting list is capped to the most recent
+  // few -- while counts.* always carries the FULL totals. The list is for
+  // naming items; the numbers ONLY ever come from counts.
   if (path === '/api/kanban/heartbeat-summary' && method === 'GET') {
-    const summary = getHeartbeatKanbanSummary()
-    const slim = (c: { id: string; title: string; status: string; priority: string; assignee?: string | null }) => ({
-      id: c.id, title: c.title, status: c.status, priority: c.priority, assignee: c.assignee ?? null,
-    })
-    json(res, {
-      urgent: summary.urgent.map(slim),
-      waiting: summary.waiting.map(slim),
-      counts: {
-        urgent: summary.urgent.length,
-        in_progress: summary.in_progress.length,
-        waiting: summary.waiting.length,
-      },
-    })
+    json(res, buildHeartbeatSummaryResponse(getHeartbeatKanbanSummary(), countNewHotMemories(MAIN_AGENT_ID), countPlannedKanbanCards(), getDbFileSizeMb()))
     return true
   }
 
@@ -272,8 +345,9 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const { status, sort_order, actor } = JSON.parse(body.toString())
     if (moveKanbanCard(id, status, sort_order ?? 0, actor)) {
-      // Wake the assigned agent once when the card enters in_progress.
-      if (status === 'in_progress') fireKanbanDispatch(id)
+      // Wake the assigned agent once when the card enters in_progress -- unless
+      // that agent is the one who moved it (self-pickup needs no wake-up).
+      if (status === 'in_progress') fireKanbanDispatch(id, actor)
       json(res, { ok: true })
       return true
     }

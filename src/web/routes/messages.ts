@@ -5,18 +5,46 @@ import {
   markMessageDone, markMessageFailed, getAgentMessage,
   closeOtelSpan,
   getPendingBacklogByAgent,
+  COMPLETION_REPORT_PREFIX,
   type AgentMessage,
 } from '../../db.js'
 import { logger } from '../../logger.js'
 import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
 import { sanitizeAgentIdent } from '../../prompt-safety.js'
 import { isKnownAgent } from '../agent-config.js'
-import { OWNER_NAME } from '../../config.js'
+import { OWNER_NAME, SYSTEM_SENDER_IDS, parseSystemSenderIds } from '../../config.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
 import { parseQualifiedId, formatQualifiedId } from '../federation/address.js'
 import { getFederationConfig } from '../federation/config.js'
 import type { RouteContext } from './types.js'
+
+// Should closing a message produce a reverse "[Eredmény]" notification to its sender?
+//
+// Exported and tested directly, rather than inlined in the PUT handler: the previous
+// tests re-implemented this condition inside the test file, so they passed no matter
+// what the route actually did.
+//
+// Three senders get no notification:
+//   1. self-messages -- the sender already knows;
+//   2. senders that are not addressable agents. `system` posts the [session-stuck] and
+//      [handoff-failure] notices but owns no tmux session, so a reply to it can never be
+//      delivered: it fails, the retry window expires, and the resulting [handoff-failure]
+//      wakes the main agent -- which, once closed, produced the next one. Measured on the
+//      Acrobot install 2026-08-17: 44 of the last 200 rows were `-> system`, all failed.
+//      `isKnownAgent` is the right test here because it accepts MAIN_AGENT_ID as well as
+//      the sub-agent directories; a plain registry lookup would have suppressed every
+//      notification back to the MAIN agent, which is the case this feature exists for.
+//   3. contents that are themselves completion reports -- breaks ping-pong chains.
+export function shouldNotifyDelegator(fromAgent: string, toAgent: string, content: string): boolean {
+  if (fromAgent === toAgent) return false
+  if (!isKnownAgent(fromAgent)) return false
+  if (content.startsWith(COMPLETION_REPORT_PREFIX)) return false
+  return true
+}
+
+// Frozen at module load, like the config constant it derives from.
+const SYSTEM_SENDERS = parseSystemSenderIds(SYSTEM_SENDER_IDS, sanitizeAgentIdent)
 
 export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, url } = ctx
@@ -74,8 +102,17 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // "unknown agent". The owner is not a fleet agent (no agents/<id>/ dir), so
     // isKnownAgent alone rejects it. Match on the router's normalization to stay
     // symmetric with the other guards above.
+    //
+    // Neighbouring SYSTEMS are legitimate senders too, on the same reasoning as
+    // the owner: they are token-authenticated and only notify an agent, but they
+    // have no agents/<id>/ directory. Opt-in via SYSTEM_SENDER_IDS in .env
+    // (empty by default). Without this, such a system silently loses its push
+    // channel the moment this guard ships -- observed here: an external case
+    // manager pushed 4182 messages, then every call 403'd for nine days while
+    // its fail-soft caller logged nothing.
     const isOwnerSender = sanitizeAgentIdent(from) === sanitizeAgentIdent(OWNER_NAME)
-    if (!isOwnerSender && !isKnownAgent(sanitizeAgentIdent(from))) {
+    const isSystemSender = SYSTEM_SENDERS.has(sanitizeAgentIdent(from))
+    if (!isOwnerSender && !isSystemSender && !isKnownAgent(sanitizeAgentIdent(from))) {
       logger.warn({ from: from.trim(), to: to.trim() }, 'Rejected /api/messages POST from unregistered agent')
       json(res, { error: `unknown agent '${from.trim()}' -- from must be a registered fleet agent id` }, 403)
       return true
@@ -152,6 +189,23 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/messages' && method === 'GET') {
+    // An UNKNOWN filter param used to fall through to the global list: a typo,
+    // or the plausible-but-wrong `agent_id`, silently returned the fleet's last
+    // N messages instead of one agent's mailbox. Not an error, not an empty
+    // list -- MORE than asked for, which is the expensive direction to be wrong
+    // in: a caller acting in good faith on that answer reads other agents'
+    // traffic as its own. Fail loudly instead.
+    const KNOWN_PARAMS = new Set(['agent', 'status', 'limit', 'before'])
+    const unknown = [...url.searchParams.keys()].filter((k) => !KNOWN_PARAMS.has(k))
+    if (unknown.length) {
+      json(res, {
+        error: 'unknown query parameter',
+        unknown,
+        known: [...KNOWN_PARAMS],
+        hint: 'the mailbox filter is "agent"; "agent_id" and "to" are not read',
+      }, 400)
+      return true
+    }
     const agent = url.searchParams.get('agent') || ''
     const status = url.searchParams.get('status') || ''
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
@@ -192,16 +246,14 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
         closeOtelSpan(done.trace_id, done.span_id, Date.now(), newStatus === 'done' ? 'ok' : 'error')
       }
       // Notify the delegator: create a reverse message from executor → delegator so
-      // they learn the result without polling. Use a sentinel prefix to break
-      // ping-pong chains (the delegator might write back, which would trigger
-      // markMessageDone on this notification; we skip creating ANOTHER notification
-      // when the original content is already a completion report).
-      if (done && done.from_agent !== done.to_agent && !done.content.startsWith('[Eredmény]')) {
+      // they learn the result without polling. See shouldNotifyDelegator for which
+      // senders are skipped and why.
+      if (done && shouldNotifyDelegator(done.from_agent, done.to_agent, done.content)) {
         const summary = result ? result.slice(0, 500) : '(nincs eredmény)'
         createAgentMessage(
           done.to_agent,
           done.from_agent,
-          `[Eredmény] msg_id:${id} status:${newStatus}\n\n${summary}`,
+          `${COMPLETION_REPORT_PREFIX} msg_id:${id} status:${newStatus}\n\n${summary}`,
         )
       }
       json(res, { ok: true }); return true
