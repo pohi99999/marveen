@@ -27,6 +27,7 @@ import {
   capturePane,
 } from './agent-process.js'
 import { sendPromptToCopilotSession, formatCopilotInboundMessage } from './copilot-agent-process.js'
+import { sendPromptToAntigravitySession, formatAntigravityInboundMessage } from './antigravity-agent-process.js'
 import { detectPaneState, type PaneState } from '../pane-state.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
@@ -568,34 +569,37 @@ export async function runMessageRouterTick(): Promise<void> {
 
       // ENGINE GATE. Resolved ONCE per message, HERE -- above the readiness
       // gate, not at the delivery branch below -- because the readiness gate is
-      // Claude-TUI-specific and would otherwise make the Copilot delivery
-      // branch unreachable in production:
+      // Claude-TUI-specific and would otherwise make ANY non-Claude engine's
+      // delivery branch unreachable in production:
       //
       //   isSessionReadyForPrompt -> capturePane -> detectPaneState (pane-state.ts)
       //
       // decides "idle" by matching Claude Code's status-footer regex. A Copilot
-      // CLI pane never renders that footer, so the gate never opens. Because
-      // the session DOES exist, shouldAbandon's `!sessionExists` condition also
-      // never fires: every message to a copilot-engine agent would re-queue
-      // forever -- never delivered, never abandoned -- and after ~10 min
-      // shouldEscalateStuckSession would fire and re-fire every ~10 min,
-      // spamming the main agent with bogus stuck-session escalations. Kanban
-      // card dispatch routes through here too, so it would break the same way.
+      // CLI pane or an Antigravity CLI pane never renders that footer, so the
+      // gate never opens. Because the session DOES exist, shouldAbandon's
+      // `!sessionExists` condition also never fires: every message to a
+      // non-Claude-engine agent would re-queue forever -- never delivered, never
+      // abandoned -- and after ~10 min shouldEscalateStuckSession would fire and
+      // re-fire every ~10 min, spamming the main agent with bogus stuck-session
+      // escalations. Kanban card dispatch routes through here too, so it would
+      // break the same way.
       //
-      // Skipping the whole `if (!ready) { ... }` block for 'copilot' also skips
-      // the clearStaleParkedInput janitor inside it, which is deliberate: that
-      // janitor is likewise Claude-TUI-tuned (it acts on detectPaneState's
-      // 'typing' state). It happens to no-op against a foreign TUI today, but
-      // "no-ops by coincidence" is not a guarantee worth depending on.
+      // Skipping the whole `if (!ready) { ... }` block for any non-Claude engine
+      // also skips the clearStaleParkedInput janitor inside it, which is
+      // deliberate: that janitor is likewise Claude-TUI-tuned (it acts on
+      // detectPaneState's 'typing' state). It happens to no-op against a foreign
+      // TUI today, but "no-ops by coincidence" is not a guarantee worth
+      // depending on.
       //
-      // Claude-engine agents are unaffected: destEngine is 'claude' for them
-      // (readAgentEngine defaults to 'claude' for every missing/unknown value),
-      // so the condition below reduces to the original
+      // Claude-engine agents are unaffected: usesClaudeTuiDelivery is true for
+      // them (readAgentEngine defaults to 'claude' for every missing/unknown
+      // value), so the condition below reduces to the original
       // `if (!(await isSessionReadyForPrompt(session, host)))` and the block is
       // entered on exactly the same messages as before.
-      const isCopilotEngine = readAgentEngine(msg.to_agent) === 'copilot'
+      const destEngine = readAgentEngine(msg.to_agent)
+      const usesClaudeTuiDelivery = destEngine === 'claude'
 
-      if (!isCopilotEngine && !(await isSessionReadyForPrompt(session, host))) {
+      if (usesClaudeTuiDelivery && !(await isSessionReadyForPrompt(session, host))) {
         // ---- session-stuck detection (card 2922e380 thread a) ----
         // Track how long this session has been continuously not-ready.
         const stuckStart = agentStuckSince.get(msg.to_agent)
@@ -724,24 +728,28 @@ export async function runMessageRouterTick(): Promise<void> {
         // wrap (trusted/untrusted) carries the raw content. Single-source frame.
         // msgId passed so receiving agents can write back via PUT /api/messages/:id.
         const content = isChannelInbound ? deliveryContent : msg.content
-        // Copilot-engine recipients skip the Claude-tuned wrap + pane-idle
-        // delivery path entirely: sendPromptToCopilotSession does a simple,
-        // conservative tmux send (see copilot-agent-process.ts) with the
-        // minimal inter-agent envelope instead of the full trusted/untrusted
+        // Non-Claude engine recipients skip the Claude-tuned wrap + pane-idle
+        // delivery path entirely: sendPromptToCopilotSession /
+        // sendPromptToAntigravitySession do a simple, conservative tmux send
+        // (see copilot-agent-process.ts / antigravity-agent-process.ts) with
+        // the minimal inter-agent envelope instead of the full trusted/untrusted
         // preamble machinery, which is not meaningful outside Claude Code's
-        // <trusted-peer>/<untrusted> prompt-injection framing. `isCopilotEngine`
+        // <trusted-peer>/<untrusted> prompt-injection framing. `destEngine`
         // is the value already resolved above the readiness gate -- one
         // readAgentEngine call per message, not two.
         //
         // The trust distinction is NOT skipped: `category` and `safeFromAgent`
         // come from the same classifyAgentMessage call the Claude path uses, so
         // an untrusted/federated/channel-inbound sender is marked as such in
-        // the Copilot envelope too, under its own sanitized id. A copilot agent
-        // runs with --allow-all-tools (no tool-permission prompts), so handing
-        // it a stranger's payload framed like a teammate's would be the worst
-        // place in the fleet to drop that signal.
-        if (isCopilotEngine) {
+        // the non-Claude envelope too, under its own sanitized id. Both copilot
+        // and antigravity agents run with --dangerously-skip-permissions /
+        // --allow-all-tools (no tool-permission prompts), so handing them a
+        // stranger's payload framed like a teammate's would be the worst place
+        // in the fleet to drop that signal.
+        if (destEngine === 'copilot') {
           await sendPromptToCopilotSession(session, formatCopilotInboundMessage(safeFromAgent, content, category))
+        } else if (destEngine === 'antigravity') {
+          await sendPromptToAntigravitySession(session, formatAntigravityInboundMessage(safeFromAgent, content, category))
         } else {
           const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note)
           // Inline preamble so a fresh session (post hard-restart) doesn't miss
