@@ -40,7 +40,7 @@ vi.mock('node:fs', async (importOriginal) => {
 })
 
 // Import after mocking so it gets the mocked dependencies
-const { buildCopilotLaunchCommand, copilotConfigDir, startCopilotAgentProcess } = await import('../web/copilot-agent-process.js')
+const { buildCopilotLaunchCommand, copilotConfigDir, startCopilotAgentProcess, formatCopilotInboundMessage } = await import('../web/copilot-agent-process.js')
 
 describe('buildCopilotLaunchCommand', () => {
   it('builds a fresh-session command with --allow-all-tools and a quoted config-dir', () => {
@@ -135,5 +135,13 @@ describe('startCopilotAgentProcess', () => {
     })
     const result = startCopilotAgentProcess('coder')
     expect(result).toEqual({ ok: false, error: 'tmux launch failed: no server running' })
+  })
+})
+
+describe('formatCopilotInboundMessage', () => {
+  it('frames an inter-agent message the same way the Claude path does', () => {
+    expect(formatCopilotInboundMessage('marveen', 'Fix the login bug')).toBe(
+      '[Uzenet @marveen-tol]: Fix the login bug',
+    )
   })
 })

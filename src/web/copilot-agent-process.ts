@@ -60,4 +60,30 @@ export function startCopilotAgentProcess(
   return { ok: true }
 }
 
+// Frames an inter-agent message the same way the Claude path's trusted/
+// untrusted envelope does its visible `[Uzenet @<felado>-tol]: ...` line (see
+// agent-message-wrap.ts), so a receiving agent sees an identical-looking
+// envelope regardless of which engine sent or receives it. Deliberately
+// skips the preamble/trust-classification/msg_id machinery that
+// wrapAgentMessageForDelivery adds -- this is the minimal viable envelope
+// for a copilot-engine recipient; revisit once this has real usage data.
+export function formatCopilotInboundMessage(from: string, content: string): string {
+  return `[Uzenet @${from}-tol]: ${content}`
+}
+
+// Delivers a prompt into a copilot-engine agent's tmux session. Deliberately
+// NOT reusing waitForPaneIdle/paneLooksIdle/clearInputBuffer from
+// agent-process.ts -- those are tuned to Claude Code's TUI (see
+// docs/superpowers/specs/2026-08-26-copilot-fleet-agent-design.md, Risks) and
+// are unsafe to reuse as-is against the Copilot CLI's different TUI. Simple,
+// conservative delivery instead: send the literal text, then Enter, with a
+// fixed settle delay. Less robust than the Claude path; revisit once this
+// has real usage data.
+export async function sendPromptToCopilotSession(session: string, text: string): Promise<'sent'> {
+  runTmux(null, ['send-keys', '-t', session, '-l', text])
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  runTmux(null, ['send-keys', '-t', session, 'Enter'])
+  return 'sent'
+}
+
 export { agentSessionName }

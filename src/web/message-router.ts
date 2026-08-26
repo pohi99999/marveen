@@ -17,7 +17,7 @@ import {
 import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
-import { readAgentRemoteHost, readAgentVoiceConfig } from './agent-config.js'
+import { readAgentRemoteHost, readAgentVoiceConfig, readAgentEngine } from './agent-config.js'
 import {
   agentSessionName,
   isSessionReadyForPrompt,
@@ -26,6 +26,7 @@ import {
   sessionExistsOnHost,
   capturePane,
 } from './agent-process.js'
+import { sendPromptToCopilotSession, formatCopilotInboundMessage } from './copilot-agent-process.js'
 import { detectPaneState, type PaneState } from '../pane-state.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
@@ -694,10 +695,20 @@ export async function runMessageRouterTick(): Promise<void> {
         // wrap (trusted/untrusted) carries the raw content. Single-source frame.
         // msgId passed so receiving agents can write back via PUT /api/messages/:id.
         const content = isChannelInbound ? deliveryContent : msg.content
-        const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note)
-        // Inline preamble so a fresh session (post hard-restart) doesn't miss
-        // the context that explains the tag semantics.
-        await sendPromptToSession(session, prefix + wrapped, host)
+        // Copilot-engine recipients skip the Claude-tuned wrap + pane-idle
+        // delivery path entirely: sendPromptToCopilotSession does a simple,
+        // conservative tmux send (see copilot-agent-process.ts) with the
+        // minimal inter-agent envelope instead of the full trusted/untrusted
+        // preamble machinery, which is not meaningful outside Claude Code's
+        // <trusted-peer>/<untrusted> prompt-injection framing.
+        if (readAgentEngine(msg.to_agent) === 'copilot') {
+          await sendPromptToCopilotSession(session, formatCopilotInboundMessage(msg.from_agent, content))
+        } else {
+          const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note)
+          // Inline preamble so a fresh session (post hard-restart) doesn't miss
+          // the context that explains the tag semantics.
+          await sendPromptToSession(session, prefix + wrapped, host)
+        }
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }
