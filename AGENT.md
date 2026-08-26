@@ -119,6 +119,17 @@ működik.
 
 ## 6. Változásnapló
 
+- **2026-08-26 (éjszaka, 3. tétel)** — **Heti AI-felderítés bevezetve**: Zeph
+  kapott egy heti (hétfő 07:00) `ai-heti-felderites` ütemezett feladatot —
+  átfésüli a legújabb releváns Claude/MCP/agent-eszköz fejleményeket a saját
+  stackünkhöz mérten, jelentést ír Obsidianba (`02_Areas/AI eszköz-felderítés/`,
+  új terület-jegyzet) és shared memóriába, üzen Brunellának. Brunella kapott
+  egy párja feladatot (`ai-heti-jelentes`, hétfő 09:00) — szintetizál,
+  Telegramon összefoglal Péternek, kanban-kártyát nyit minden "bevezetni"
+  javaslatra, és **csak Péter explicit, név szerinti jóváhagyása után**
+  végzi el a bevezetést (nem az autonómia-szintes gyors-jóváhagyással). Mindkét
+  CLAUDE.md-be (Zeph, Brunella) bekerült a szakasz, és mindkét feladat
+  verziókövetett sablonként is elmentve (`seed-scheduled-tasks/ai-heti-*`).
 - **2026-08-26 (éjszaka, 2. tétel)** — **Git-checkout eltérés feltárva és javítva**: a
   WSL futtatási checkout 112 elmaradt upstream-szinkron commitot tartalmazott
   sosem pusholva, a Windows fejlesztői checkout közben 24 saját committal haladt

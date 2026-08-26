@@ -1,0 +1,8 @@
+{
+  "schedule": "0 7 * * 1",
+  "agent": "zeph",
+  "enabled": true,
+  "type": "task",
+  "skipIfBusy": false,
+  "createdAt": 0
+}
