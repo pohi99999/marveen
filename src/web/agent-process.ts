@@ -55,6 +55,7 @@ import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
 import { startCopilotAgentProcess } from './copilot-agent-process.js'
+import { startAntigravityAgentProcess } from './antigravity-agent-process.js'
 
 // Lazy so a transient PATH gap at import time (e.g. the 04:00 auto-update
 // restart, where the finalizer omits the bin dir from PATH) cannot hard-crash
@@ -960,6 +961,10 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
 
   if (readAgentEngine(name) === 'copilot') {
     return startCopilotAgentProcess(name, opts)
+  }
+
+  if (readAgentEngine(name) === 'antigravity') {
+    return startAntigravityAgentProcess(name, opts)
   }
 
   const agentProvider = resolveAgentProvider(name)
