@@ -395,8 +395,9 @@ interface AgentSummary {
   runningSince: number | null
   authMode: AuthMode
   securityProfile: string
-  /** Which CLI drives this agent's process: 'claude' (default), 'copilot', or 'antigravity'
-   *  (GitHub Copilot CLI). See agent-config.ts readAgentEngine. */
+  /** Which CLI drives this agent's process: 'claude' (default), 'copilot' (GitHub
+   *  Copilot CLI), or 'antigravity' (Antigravity/Gemini CLI). See agent-config.ts
+   *  readAgentEngine. */
   engine: 'claude' | 'copilot' | 'antigravity'
   /** Named Claude subscription plan id (see claude-plans.ts), or null when the
    *  agent uses the raw claudeConfigDir / default resolution. */
