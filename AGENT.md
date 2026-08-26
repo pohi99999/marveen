@@ -43,17 +43,36 @@ Minden commitot szinkronban pusholunk mind az `origin`, mind a `brunella` távol
 
 ## 5. Csapatösszeállítás (Flotta Roster)
 
+Mindenki közvetlenül **Brunellának** jelent (`reportsTo: marveen`) — egységes,
+lapos hierarchia, a peer-to-peer üzenetküldés emellett mindenkivel mindenkinek
+működik.
+
 1. **Brunella (`marveen`):** Főnök / Koordinátor – Telegram híd (`@BrunellaBossbot`), feladatkiosztás, stratégiai döntéshozatal.
 2. **Aura (`aura`):** Kutató – Piackutatás, forráselemzés, versenytárselemzés, mély keresés, szintetizált jelentések.
 3. **Kenshin (`kenshin`):** Fejlesztő – Szoftverfejlesztés, kódírás, refaktorálás, code review, TDD, Git műveletek (`Z:\001_Workspace\`).
 4. **Iris (`irisz`):** Elemző – Adatmodellezés, SQL/Python szkriptek, táblázatok, riportok, közösségi média és profilépítési analitika.
 5. **Nyomozó (`nyomozo`):** Auditor – Döntési naplók, történeti összefüggések, korábbi beszélgetések visszakeresése, konzisztencia.
 6. **Zeph (`zeph`):** Kísérletező – Új MCP-k tesztelése, skillek generálása, benchmarking, R&D automatizációk.
+7. **Lumen (`lumen`):** Webfejlesztő / Dizájn – UI/UX, frontend fejlesztés, technikai megoldás-választás, Kenshinnel együttműködve design-tól kódig.
+8. **Agy (`agy-test`):** Helyettes-koordinátor, Antigravity CLI motoron (`gemini-2.5-flash`). Ha Brunella (Claude motor) nem elérhető, átveszi a koordinációt és delegálást. A belső azonosító (`agy-test`) technikai okokból változatlan — csak a `displayName` "Agy".
+9. **Pilot (`copilot-test`):** Harmadlagos tartalék motor, GitHub Copilot CLI-n (GPT-5.4) — ha mind Claude, mind Antigravity elérhetetlen. Belső azonosító változatlan (`copilot-test`), `displayName`: "Pilot".
 
 ---
 
 ## 6. Változásnapló
 
+- **2026-08-26 (éjszaka)** — Élő audit alapján flotta-optimalizálás: Aura (le volt állva)
+  újraindítva; **Agy** (`agy-test`, Antigravity, Brunella helyettese) és **Pilot**
+  (`copilot-test`, Copilot, harmadlagos tartalék) formalizálva — displayName +
+  teljesen újraírt CLAUDE.md/SOUL.md (Pilot korábban törött placeholder-sablonon futott);
+  új specialista **Lumen** (webfejlesztő/dizájn) létrehozva; hierarchia egységesítve
+  (mindenki `reportsTo: marveen`); `store/agents-desired.json` crash-recovery lista
+  kibővítve a teljes rosterre (előtte csak 3 ügynök volt rajta); napi `projekt-figyelo`
+  ütemezett feladat telepítve (+ verziókövetett sablon `seed-scheduled-tasks/`-ban);
+  22 aktív projekt felvéve kiválasztható kanban project-tagként. Claude Max-váltás
+  (Opus a mélyebb szerepekhez) tudatosan elhalasztva az előfizetés-aktiválásig. Részletek
+  és a le nem zárt tételek (marveen-oldali `brunella-remote` MCP-hitelesítés) az Obsidian
+  vaultban: `Marveen/2026-08-26-fleet-optimization-agy-pilot-lumen.md`.
 - **2026-08-26 (este)** — A teljes flotta-csapat létrehozva és konfigurálva: **Aura** (Kutató), **Kenshin** (Fejlesztő), **Iris** (Elemző), **Nyomozó** (Auditor), **Zeph** (Kísérletező). Testreszabott `CLAUDE.md`, `SOUL.md`, `.mcp.json` és releváns seed-skillek kiosztva. Obsidian tudásbázis frissítve.
 - **2026-08-26 (délután)** — Antigravity CLI (`agy`) flotta-tag integráció implementálva (Task 1–5), 56/56 teszt zöld, élesítve WSL-ben és élőben validálva (Gemini 3.7 Flash válaszolt a flottaüzenetre).
 - **2026-08-26 (délután)** — GitHub Copilot CLI (`copilot`) flotta-tag integráció befejezve, cherry-pickelve WSL-be és élőben validálva.
