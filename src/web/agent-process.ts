@@ -23,7 +23,7 @@ import {
   detectsModelConsentDialog,
   type FirstRunGateKind,
 } from '../pane-state.js'
-import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation, readAgentEngine } from './agent-config.js'
 import { resolveAgentConfigDir } from './claude-plans.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
@@ -54,6 +54,7 @@ import { resolveOpenRouterModel } from './openrouter-models.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
+import { startCopilotAgentProcess } from './copilot-agent-process.js'
 
 // Lazy so a transient PATH gap at import time (e.g. the 04:00 auto-update
 // restart, where the finalizer omits the bin dir from PATH) cannot hard-crash
@@ -781,7 +782,7 @@ export function shSingleQuote(value: string): string {
 // byte-identical to the prior direct local tmux call. Remote calls get a larger
 // default timeout because an ssh round-trip (handshake + remote exec) is slower
 // than a local fork; ServerAlive/ConnectTimeout in SSH_OPTS bound a dead host.
-function runTmux(host: string | null, tmuxArgs: string[], opts: { timeout?: number } = {}): void {
+export function runTmux(host: string | null, tmuxArgs: string[], opts: { timeout?: number } = {}): void {
   // Ensure the private ControlMaster socket dir exists before ANY remote ssh
   // call (idempotent, ~free). Without this a watcher-first remote call after a
   // marveen restart would lose connection multiplexing and re-handshake each tick.
@@ -956,6 +957,10 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
 
 
   if (isAgentRunning(name)) return { ok: false, error: 'Agent is already running' }
+
+  if (readAgentEngine(name) === 'copilot') {
+    return startCopilotAgentProcess(name, opts)
+  }
 
   const agentProvider = resolveAgentProvider(name)
   const provider = getProvider(agentProvider)
