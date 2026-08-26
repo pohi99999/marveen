@@ -181,6 +181,14 @@ export function readAgentEngine(name: string): 'claude' | 'copilot' {
   }
 }
 
+export function writeAgentEngine(name: string, engine: 'claude' | 'copilot'): void {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
+  config.engine = engine
+  atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+}
+
 // Pure-logic resolver for the optional per-agent claudeConfigDir field.
 // Takes the raw agent-config.json text (or `{}` when no file exists) plus an
 // explicit home-dir, and returns the absolute path to use as

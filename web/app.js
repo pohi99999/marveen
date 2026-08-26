@@ -2731,6 +2731,7 @@ document.getElementById('wizardNextBtn').addEventListener('click', async () => {
         description: desc,
         model: agentModel.value,
         profile: document.getElementById('agentProfile').value,
+        engine: document.getElementById('agentEngine').value,
       }),
     })
 
@@ -3196,12 +3197,13 @@ function renderAgents() {
     const isRunning = agent.running || false
     const runDotClass = isRunning ? 'running' : 'stopped'
     const runLabel = isRunning ? t('agents.status.running') : t('agents.status.stopped')
+    const engineBadgeHtml = agent.engine === 'copilot' ? `<span class="engine-badge engine-badge--copilot">Copilot CLI</span>` : ''
 
     card.innerHTML = `
       <div class="agent-card-top">
         <div class="agent-avatar ${gradientClass}">${avatarHtml}</div>
         <div class="agent-card-info">
-          <div class="agent-name">${escapeHtml(label)}</div>
+          <div class="agent-name">${escapeHtml(label)}${engineBadgeHtml}</div>
           <div class="agent-desc">${escapeHtml(agent.description || '')}</div>
         </div>
       </div>

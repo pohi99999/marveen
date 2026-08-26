@@ -29,6 +29,8 @@ import {
   writeAgentDisplayName,
   readAgentSecurityProfile,
   writeAgentSecurityProfile,
+  readAgentEngine,
+  writeAgentEngine,
   listAgentNames,
   isKnownAgent,
   readAgentChannelProvider,
@@ -393,6 +395,9 @@ interface AgentSummary {
   runningSince: number | null
   authMode: AuthMode
   securityProfile: string
+  /** Which CLI drives this agent's process: 'claude' (default) or 'copilot'
+   *  (GitHub Copilot CLI). See agent-config.ts readAgentEngine. */
+  engine: 'claude' | 'copilot'
   /** Named Claude subscription plan id (see claude-plans.ts), or null when the
    *  agent uses the raw claudeConfigDir / default resolution. */
   claudePlan: string | null
@@ -474,6 +479,7 @@ function getAgentSummary(name: string): AgentSummary {
     runningSince,
     authMode: readAgentAuthMode(name),
     securityProfile: readAgentSecurityProfile(name),
+    engine: readAgentEngine(name),
     claudePlan: readAgentClaudePlan(name),
     team: readAgentTeam(name),
     hasTelegram: tg.hasTelegram,
@@ -813,11 +819,15 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (path === '/api/agents' && method === 'POST') {
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
-    const { description, model: rawModel, profile: rawProfile } = data as { name: string; description: string; model?: string; profile?: string }
+    const { description, model: rawModel, profile: rawProfile, engine: rawEngine } = data as { name: string; description: string; model?: string; profile?: string; engine?: string }
     const rawName = typeof data.name === 'string' ? data.name.trim() : ''
     const name = sanitizeAgentName(rawName)
     const model = resolveModelId(rawModel || DEFAULT_MODEL)
     const profileId = (rawProfile || 'default').trim() || 'default'
+    // Defaults to 'claude' when absent (or any value other than 'copilot') so
+    // old dashboard frontends and direct API callers that never send `engine`
+    // keep creating Claude-engine agents exactly as before.
+    const engine: 'claude' | 'copilot' = rawEngine === 'copilot' ? 'copilot' : 'claude'
 
     if (!name) { json(res, { error: 'Name is required' }, 400); return true }
     if (!description) { json(res, { error: 'Description is required' }, 400); return true }
@@ -827,6 +837,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     writeAgentModel(name, model)
     writeAgentSecurityProfile(name, profileId)
     writeAgentSettingsFromProfile(name, loadProfileTemplate(profileId))
+    writeAgentEngine(name, engine)
     if (rawName && rawName !== name) writeAgentDisplayName(name, rawName)
 
     logger.info({ name, description }, 'Generating agent CLAUDE.md and SOUL.md...')
@@ -2000,7 +2011,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const data = JSON.parse(body.toString()) as {
       claudeMd?: string; soulMd?: string; mcpJson?: string; model?: string
       authMode?: AuthMode; apiKey?: string; claudePlan?: string; memoryIsolation?: boolean
-      modelProfile?: string | null
+      modelProfile?: string | null; engine?: string
     }
 
     // Unknown fields are rejected rather than silently dropped -- see
@@ -2083,6 +2094,13 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         return true
       }
       writeAgentClaudePlan(name, planId)
+    }
+    if (data.engine !== undefined) {
+      if (data.engine !== 'claude' && data.engine !== 'copilot') {
+        json(res, { error: `engine must be one of claude|copilot` }, 400)
+        return true
+      }
+      writeAgentEngine(name, data.engine)
     }
     json(res, { ok: true })
     return true

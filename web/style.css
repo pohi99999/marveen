@@ -1580,6 +1580,20 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   margin-left: 4px;
 }
 
+.engine-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 4px;
+}
+.engine-badge--copilot {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 /* === Telegram status dot === */
 .tg-status {
   display: inline-flex;
