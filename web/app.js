@@ -3197,7 +3197,12 @@ function renderAgents() {
     const isRunning = agent.running || false
     const runDotClass = isRunning ? 'running' : 'stopped'
     const runLabel = isRunning ? t('agents.status.running') : t('agents.status.stopped')
-    const engineBadgeHtml = agent.engine === 'copilot' ? `<span class="engine-badge engine-badge--copilot">Copilot CLI</span>` : ''
+    const engineBadgeHtml = 
+      agent.engine === 'copilot' 
+        ? `<span class="engine-badge engine-badge--copilot">Copilot CLI</span>`
+        : agent.engine === 'antigravity'
+        ? `<span class="engine-badge engine-badge--antigravity">Antigravity CLI</span>`
+        : ''
 
     card.innerHTML = `
       <div class="agent-card-top">

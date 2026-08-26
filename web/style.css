@@ -1593,6 +1593,10 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: var(--accent);
   background: var(--accent-soft);
 }
+.engine-badge--antigravity {
+  color: var(--info);
+  background: var(--info-soft);
+}
 
 /* === Telegram status dot === */
 .tg-status {
