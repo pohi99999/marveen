@@ -1,5 +1,11 @@
 # channel-reply-guard — Stop hook
 
+> **ELAVULT.** Az itt leírt `channel-reply-guard.sh` ezen a telepítésen nem
+> fut élőben. Az utódja a
+> [telegram-reply-enforcement-2026-08-02.md](telegram-reply-enforcement-2026-08-02.md)
+> (`telegram-reply-guard.py` + ledger-rendszer) — ez a hiteles, aktuálisan
+> érvényes leírás. Ez a dokumentum csak történeti/referencia célból marad meg.
+
 ## Problem
 
 A Marveen agent that talks to a user over a channel (Telegram / Slack / Discord)

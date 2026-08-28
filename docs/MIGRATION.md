@@ -1,5 +1,11 @@
 # Migration runbook — moving the fleet to a new machine
 
+> **Megjegyzés erre a telepítésre:** ez a runbook macOS/launchd/Docker-specifikus
+> (upstream keretrendszer-dokumentáció). A mi telepítésünk WSL (Ubuntu) alatt
+> fut, nincs launchd, a szolgáltatáskezelés is máshogy néz ki — ez a leírás
+> tehát NEM alkalmazható 1:1 nálunk, csak háttér-referenciaként hasznos
+> (pl. az adat-leltár és a "one bot = one poller" alapszabály általánosan igaz).
+
 Goal: move the whole Marveen fleet to a stronger host with **zero
 data loss** and minimal downtime. Read this end to end before starting.
 

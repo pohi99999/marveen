@@ -408,7 +408,6 @@ A főbb konfigurációs változók a launchd plist-ben (`~/Library/LaunchAgents/
 ## Kapcsolódó dokumentumok
 
 - [Vault és titkosítás](vault.md)
-- [MCP konfiguráció](mcp-config.md)
 - [Ütemezett feladatok](scheduled-tasks.md)
-- [Biztonsági modell](security.md)
+- [Biztonsági modell](security-hardening.md)
 - [Migrálás](MIGRATION.md)
