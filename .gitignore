@@ -53,6 +53,9 @@ SOUL.md
 # Custom MCP servers and config (user-specific)
 mcp-servers/
 .mcp.json
+# Kezi mentesek az MCP-configrol -- gepfuggo utakat es kulcs-hivatkozasokat
+# tartalmaznak, es a .mcp.json maga sincs verziokezelve.
+.mcp.json.bak-*
 mcp-catalog.local.json
 
 # Personal/project-specific docs (not part of the product)

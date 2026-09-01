@@ -54,6 +54,14 @@ hibrid memóriára ülve rá — nincs külön adatbázis hozzá.
   a felhasználó elkezdi figyelmen kívül hagyni a jelzéseket.
 - Ne végezz teljes, mély auditot minden projekten minden nap (drága és
   felesleges) — elég 2-3 aktív projekt gyors átnézése rotálva.
+- **Nem minden MOC-ból hiányzó mappa hiba.** Élő eset (2026-08-29): a
+  `Pupci videók` mappa (családi videó-felújítás, köztük egy temetés-felvétel)
+  nincs a MOC-ban, mert nyilvánvalóan személyes, nem üzleti projekt — a
+  fájlnevek/tartalom típusa (pl. "temetese", nagy .mp4-ek, nincs git repo)
+  önmagában jelzi ezt. Ilyennél a Telegram-jelzés hangneme legyen tényközlő,
+  ne "hiányosság"-ként keretezve, és ha egyszer már jelezted és a felhasználó
+  nem reagált rá MOC-felvétellel, NE jelezd újra minden futáskor — csak akkor,
+  ha a mappa tartalma vagy célja érdemben változik.
 
 ## Ellenőrzés
 
