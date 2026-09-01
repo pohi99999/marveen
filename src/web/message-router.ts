@@ -25,6 +25,7 @@ import {
   sendPromptToSession,
   sessionExistsOnHost,
   capturePane,
+  clearFeedbackModalAndRecheck,
 } from './agent-process.js'
 import { sendPromptToCopilotSession, formatCopilotInboundMessage } from './copilot-agent-process.js'
 import { sendPromptToAntigravitySession, formatAntigravityInboundMessage } from './antigravity-agent-process.js'
@@ -600,6 +601,24 @@ export async function runMessageRouterTick(): Promise<void> {
       const usesClaudeTuiDelivery = destEngine === 'claude'
 
       if (usesClaudeTuiDelivery && !(await isSessionReadyForPrompt(session, host))) {
+        // MERGE NOTE (v1.36.0 upstream sync): the engine gate above and the
+        // feedback-modal clearance below are independent fixes to the same
+        // branch. Both are kept: non-Claude engines skip the whole block, and
+        // a Claude pane held by its own drafted feedback modal gets cleared
+        // once before the stuck bookkeeping runs.
+        // A self-drafted feedback modal ("Bug report drafted ... 0 to dismiss")
+        // holds the pane in a not-ready state, and the pre-flight dismissal in
+        // sendPromptToSession never runs because this gate short-circuits
+        // first. Measured twice on 2026-08-31 on agent-samu: 10 minutes
+        // not-ready, 10 queued messages, the second time AFTER the pre-flight
+        // dismissal had shipped -- the fix was in the wrong place for this
+        // path. Clear it here and re-read readiness ONCE; only a still-held
+        // pane falls through to the stuck bookkeeping below.
+        if (await clearFeedbackModalAndRecheck(session, host)) {
+          agentStuckSince.delete(msg.to_agent)
+          routerLoggedMisses.delete(msg.id)
+          continue // cleared; deliver on the next tick
+        }
         // ---- session-stuck detection (card 2922e380 thread a) ----
         // Track how long this session has been continuously not-ready.
         const stuckStart = agentStuckSince.get(msg.to_agent)

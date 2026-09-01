@@ -79,6 +79,9 @@ vi.mock('../web/agent-config.js', () => ({
 vi.mock('../web/agent-process.js', () => ({
   agentSessionName: (name: string) => `agent-${name}`,
   isSessionReadyForPrompt: (...a: unknown[]) => mockIsSessionReadyForPrompt(...a),
+  // Upstream v1.35.1 added this ahead of the janitor inside the not-ready
+  // block; false = no modal held the pane, so the branch runs on as before.
+  clearFeedbackModalAndRecheck: vi.fn(() => false),
   clearStaleParkedInput: (...a: unknown[]) => mockClearStaleParkedInput(...a),
   sendPromptToSession: (...a: unknown[]) => mockSendPromptToSession(...a),
   sessionExistsOnHost: (...a: unknown[]) => mockSessionExistsOnHost(...a),

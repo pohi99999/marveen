@@ -21,6 +21,9 @@ import {
   idleConsideringDimGhost,
   detectsFirstRunGate,
   detectsModelConsentDialog,
+  detectsFeedbackDraftModal,
+  detectsFeedbackOptOutPrompt,
+  firstRunAcceptKeys,
   type FirstRunGateKind,
 } from '../pane-state.js'
 import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation, readAgentEngine } from './agent-config.js'
@@ -49,6 +52,7 @@ import { loadProfileTemplate } from './profiles.js'
 import { resolveAgentSecurityProfile } from './agent-team.js'
 import { writeAgentSettingsFromProfile, ensureFleetRosterSection, ensureAutonomySection, ensureSkillsPathTrapSection } from './agent-scaffold.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
+import { recordInjectedPrompt } from './injected-prompt-registry.js'
 import { getSecret } from './vault.js'
 import { resolveOpenRouterModel } from './openrouter-models.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
@@ -808,7 +812,7 @@ export function stampFableOverageConsentSharedRoots(): void {
   }
 }
 
-function resolveAgentProvider(name: string): ChannelProviderType {
+export function resolveAgentProvider(name: string): ChannelProviderType {
   const perAgent = readAgentChannelProvider(name)
   if (perAgent === 'slack' || perAgent === 'telegram' || perAgent === 'discord' || perAgent === 'googlechat' || perAgent === 'teams') return perAgent
   return CHANNEL_PROVIDER
@@ -829,6 +833,68 @@ export function agentSessionName(name: string): string {
  */
 export function shSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * hu: A modell-azonosító alapján eldönti, melyik providerhez tartozik, és felépíti a shell
+ * export-láncot, ami a Claude Code CLI-t az adott provider Anthropic-kompatibilis végpontjára
+ * téríti. Tiszta függvény (nincs I/O) -- a titkot a hívó adja át `secretLookup`-on keresztül,
+ * hogy vault nélkül tesztelhető legyen.
+ * <br />
+ * en: Resolves which provider a model id belongs to and builds the shell export chain that
+ * redirects the Claude Code CLI to that provider's Anthropic-compatible endpoint. Pure function
+ * (no I/O) -- the caller supplies secrets via `secretLookup` so this is testable without a vault.
+ */
+export type ProviderKind = 'claude' | 'deepseek' | 'minimax' | 'openrouter' | 'ollama'
+
+export function resolveProviderEnv(
+  model: string,
+  secretLookup: (id: string) => string | null,
+): { provider: ProviderKind; exportsStr: string } {
+  const isClaude = model.startsWith('claude-')
+  const isDeepseek = model.startsWith('deepseek-')
+  const isMinimax = model.startsWith('minimax-')
+  // OpenRouter model ids are `provider/model` (contain '/'); Ollama tags use
+  // ':' and no '/'. This discriminator keeps OpenRouter ids off the Ollama path.
+  const isOpenRouter = !isClaude && !isDeepseek && !isMinimax && model.includes('/')
+  const isOllama = !isClaude && !isDeepseek && !isMinimax && !isOpenRouter
+
+  if (isDeepseek) {
+    const key = secretLookup('DEEPSEEK_API_KEY') ?? ''
+    return {
+      provider: 'deepseek',
+      exportsStr: `export ANTHROPIC_AUTH_TOKEN="${key}" && export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic && export ANTHROPIC_MODEL=${shSingleQuote(model)} && `,
+    }
+  }
+  if (isMinimax) {
+    const key = secretLookup('MINIMAX_API_KEY') ?? ''
+    // MiniMax's own /anthropic compat layer misreports a 200K context window in
+    // its model metadata instead of M3's real 1M (MiniMax-AI/MiniMax-M2.7#46,
+    // confirmed live 2026-08-19: two independently running fleet agents on
+    // minimax-m3 converged on a measured ~200-203k ceiling). Claude Code trusts
+    // that metadata and auto-compacts at ~167k as a result. This env var is the
+    // vendor-documented workaround -- it tells the CLI the real number instead
+    // of the compat layer's wrong one.
+    return {
+      provider: 'minimax',
+      exportsStr: `export ANTHROPIC_AUTH_TOKEN="${key}" && export ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic && export ANTHROPIC_MODEL=${shSingleQuote(model)} && export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000 && `,
+    }
+  }
+  if (isOpenRouter) {
+    // Anthropic-compatible endpoint at https://openrouter.ai/api (the SDK appends /v1/messages).
+    const key = secretLookup('openrouter-fleet-key') ?? ''
+    return {
+      provider: 'openrouter',
+      exportsStr: `export ANTHROPIC_AUTH_TOKEN="${key}" && export ANTHROPIC_BASE_URL=https://openrouter.ai/api && export ANTHROPIC_MODEL=${shSingleQuote(model)} && `,
+    }
+  }
+  if (isOllama) {
+    return {
+      provider: 'ollama',
+      exportsStr: `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${OLLAMA_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && `,
+    }
+  }
+  return { provider: 'claude', exportsStr: '' }
 }
 
 // All tmux operations route through these two wrappers so the local-vs-remote
@@ -1091,11 +1157,6 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     const model = resolveOpenRouterModel(readAgentModel(name))
     const authMode = readAgentAuthMode(name)
     const isClaude = model.startsWith('claude-')
-    const isDeepseek = model.startsWith('deepseek-')
-    // OpenRouter model ids are `provider/model` (contain '/'); Ollama tags use
-    // ':' and no '/'. This discriminator keeps OpenRouter ids off the Ollama path.
-    const isOpenRouter = !isClaude && !isDeepseek && model.includes('/')
-    const isOllama = !isClaude && !isDeepseek && !isOpenRouter
     // ANTHROPIC_MODEL is REQUIRED for non-Claude models: the interactive TUI
     // validates the `--model` flag against known Anthropic models and silently
     // falls back to the built-in default (claude-opus-...) for an unrecognized
@@ -1103,13 +1164,9 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // the custom ANTHROPIC_BASE_URL ("model does not exist"). The env var is
     // authoritative and bypasses that validation. (`--print` honors --model, but
     // the agents run the TUI.) Single-quoted so a `:` in the tag is shell-safe.
-    const ollamaEnv = isOllama ? `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${OLLAMA_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && ` : ''
-    const deepseekKey = isDeepseek ? (getSecret('DEEPSEEK_API_KEY') ?? '') : ''
-    const deepseekEnv = isDeepseek ? `export ANTHROPIC_AUTH_TOKEN="${deepseekKey}" && export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic && export ANTHROPIC_MODEL=${shSingleQuote(model)} && ` : ''
-    // OpenRouter: Anthropic-compatible endpoint at https://openrouter.ai/api
-    // (the SDK appends /v1/messages). Key from the vault (openrouter-fleet-key).
-    const openrouterKey = isOpenRouter ? (getSecret('openrouter-fleet-key') ?? '') : ''
-    const openrouterEnv = isOpenRouter ? `export ANTHROPIC_AUTH_TOKEN="${openrouterKey}" && export ANTHROPIC_BASE_URL=https://openrouter.ai/api && export ANTHROPIC_MODEL=${shSingleQuote(model)} && ` : ''
+    // Provider discriminator + env-export chain live in resolveProviderEnv (pure,
+    // unit-tested in agent-provider-env.test.ts) so a new provider is one branch there.
+    const { exportsStr: providerEnv } = resolveProviderEnv(model, getSecret)
     // When authMode is 'api', the agent uses its own ANTHROPIC_API_KEY from
     // the vault instead of the host's OAuth. The vault entry ID follows the
     // convention `agent-{name}-api-key`. We inject it as an env var so Claude
@@ -1385,7 +1442,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // values like `claude-opus-4-8[1m]` (1M-context suffix) from being glob-expanded AND makes a `'`
     // in the value inert rather than a quote-break -> command injection. Same escape at the three
     // ANTHROPIC_MODEL env sites above.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${autoUpdaterEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}`.trimEnd()
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${autoUpdaterEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}`.trimEnd()
     runTmux(null, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir }, 'Agent tmux session started')
@@ -1524,6 +1581,64 @@ export async function dismissResumeSummaryModalIfPresent(session: string, host: 
   }
 }
 
+// Claude Code drafts feedback reports on its own and parks them in a bordered
+// modal above the prompt input ("Bug report drafted: …" + "1 to review · 2 to
+// send · 0 to dismiss"). It swallows the next keystroke exactly like the
+// session-rating modal, but it is NASTIER to detect: it leaves the normal idle
+// footer on screen, so detectPaneState() reports the pane idle, deliveries are
+// marked delivered, and the messages pile up in the input box unsent. Measured
+// live on agent-samu 2026-08-31: 10 minutes not-ready, 5 queued messages, and
+// a peer's report parked unsubmitted in the prompt.
+//
+// Dismissal takes TWO steps, measured on that same pane: "0" closes the draft,
+// then Claude Code immediately offers "Turn off Claude-drafted feedback? 0 to
+// turn off · Esc to keep". A second "0" there would silently disable feedback
+// drafting for that agent, so the follow-up is answered with Esc (keep) -- and
+// only when its own detector fires, never blind: a bare Esc into a prompt box
+// that holds a parked delivery is not a keystroke worth firing on spec.
+// The not-ready-path companion to the pre-flight dismissal above, and the
+// reason it exists: every prompt injector asks isSessionReadyForPrompt FIRST
+// and gives up before any send is attempted, so a dismissal that lives only in
+// the send path never runs for the case it was written for (measured twice on
+// 2026-08-31 -- see the detector's note in pane-state.ts). Four injectors share
+// that shape: message-router, schedule-runner, inbox-nudge-watcher and
+// telegram-inbox-wake. They call this on their refusal branch instead of each
+// re-implementing the probe, so the fifth injector added later has one obvious
+// thing to call rather than three lines to remember.
+//
+// Returns true only if the modal was actually there AND the pane became ready
+// after clearing it -- a false keeps the caller on its existing skip path, so
+// nothing about the busy case changes.
+export async function clearFeedbackModalAndRecheck(session: string, host: string | null = null): Promise<boolean> {
+  try {
+    const pane = capturePane(session, host)
+    if (pane == null || !detectsFeedbackDraftModal(pane)) return false
+    logger.warn({ session }, 'pane held by a Claude Code feedback-draft modal on the not-ready path, dismissing')
+    await dismissFeedbackDraftModalIfPresent(session, host)
+    return await isSessionReadyForPrompt(session, host)
+  } catch (err) {
+    logger.warn({ err, session }, 'Failed to clear the feedback-draft modal on the not-ready path')
+    return false
+  }
+}
+
+export async function dismissFeedbackDraftModalIfPresent(session: string, host: string | null = null): Promise<void> {
+  try {
+    const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
+    if (!detectsFeedbackDraftModal(pane)) return
+    runTmux(host, ['send-keys', '-t', session, '0'], { timeout: 5000 })
+    await delay(300)
+    const after = captureTmux(host, ['capture-pane', '-t', session, '-p'])
+    if (detectsFeedbackOptOutPrompt(after)) {
+      runTmux(host, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
+      await delay(300)
+    }
+    logger.info({ session }, 'Dismissed Claude Code feedback-draft modal before sending prompt (feedback drafting left ON)')
+  } catch (err) {
+    logger.warn({ err, session }, 'Failed to probe/dismiss feedback-draft modal')
+  }
+}
+
 // Runtime backstop for the model overage-consent dialog ("Fable 5 now uses
 // usage credits" -- see detectsModelConsentDialog in pane-state.ts for the
 // full anatomy and the drift root cause). The stampFableOverageConsent
@@ -1572,7 +1687,7 @@ const FIRST_RUN_ANSWER_SETTLE_MS = 1500
 export async function answerFirstRunGates(
   session: string,
   host: string | null = null,
-): Promise<'cleared' | 'login' | 'unchanged'> {
+): Promise<'cleared' | 'login' | 'unchanged' | 'blocked'> {
   let acted = false
   for (let i = 0; i < FIRST_RUN_ANSWER_MAX_STEPS; i++) {
     const pane = capturePane(session, host)
@@ -1581,13 +1696,40 @@ export async function answerFirstRunGates(
     if (gate === 'login') return 'login'
     try {
       if (gate === 'trust') {
-        runTmux(host, ['send-keys', '-t', session, '1'], { timeout: 5000 })
-        await delay(150)
-        runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+        // TRUSTGATE901: never by number, never by default. 2.1.252 dropped the
+        // "1."/"2." prefixes AND put "No, exit" first as the highlighted
+        // option, so the old `1` + Enter typed nothing and then CONFIRMED the
+        // exit. The keys come from the pane instead.
+        // `pane` is non-null here (gate came from it), but the narrowing does
+        // not survive the intervening checks -- and a null capture is itself a
+        // reason to park rather than guess.
+        const keys = pane != null ? firstRunAcceptKeys(pane) : null
+        if (keys == null) {
+          // Unrecognised layout. Enter confirms whatever is highlighted and
+          // Escape is "No, exit" by the dialog's own footer, so there is no
+          // safe key to send: park and let the caller alert a human.
+          logger.warn({ session, gate },
+            'first-run trust dialog: no unambiguous "yes" option found -- parking, NO keystrokes sent')
+          return 'blocked'
+        }
+        for (const k of keys) {
+          runTmux(host, ['send-keys', '-t', session, k], { timeout: 5000 })
+          await delay(150)
+        }
       } else if (gate === 'bypass-permissions') {
-        runTmux(host, ['send-keys', '-t', session, '2'], { timeout: 5000 })
-        await delay(150)
-        runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+        // Same rule, same reason as 'trust' above: the accept row sits behind a
+        // first, highlighted "No, exit", so answering by number is one dropped
+        // prefix away from confirming the refusal.
+        const keys = pane != null ? firstRunAcceptKeys(pane) : null
+        if (keys == null) {
+          logger.warn({ session, gate },
+            'first-run bypass dialog: no unambiguous accept option found -- parking, NO keystrokes sent')
+          return 'blocked'
+        }
+        for (const k of keys) {
+          runTmux(host, ['send-keys', '-t', session, k], { timeout: 5000 })
+          await delay(150)
+        }
       } else {
         // theme / welcome: Enter accepts the highlighted default and moves on.
         runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
@@ -1631,6 +1773,7 @@ export async function scheduleIdentitySetup(session: string, displayName: string
         await dismissSurveyModalIfPresent(session, host)
         await dismissResumeSummaryModalIfPresent(session, host)
         await dismissModelConsentDialogIfPresent(session, host)
+        await dismissFeedbackDraftModalIfPresent(session, host)
       } catch (err) {
         logger.warn({ err, session }, 'Post-restart modal dismiss failed')
       }
@@ -1813,6 +1956,7 @@ export async function sendPromptToSession(
     await dismissSurveyModalIfPresent(session, host)
     await dismissResumeSummaryModalIfPresent(session, host)
     await dismissModelConsentDialogIfPresent(session, host)
+    await dismissFeedbackDraftModalIfPresent(session, host)
   } else {
     const releaseDismissLane = tryAcquireSessionSendLane(session, host)
     if (releaseDismissLane) {
@@ -1820,6 +1964,7 @@ export async function sendPromptToSession(
         await dismissSurveyModalIfPresent(session, host)
         await dismissResumeSummaryModalIfPresent(session, host)
         await dismissModelConsentDialogIfPresent(session, host)
+        await dismissFeedbackDraftModalIfPresent(session, host)
       } finally {
         releaseDismissLane()
       }
@@ -1884,6 +2029,11 @@ export async function sendPromptToSession(
   }
 
   const oneLine = text.replace(/\r?\n/g, ' ')
+  // STUCKINPUT827: remember the EXACT byte stream we are about to type. If the
+  // submitting Enter does not land, the stuck-input watcher re-injects THIS
+  // instead of guessing from a lossy screen scrape. Recorded before the send so
+  // a delivery that parks mid-stream is recoverable too.
+  recordInjectedPrompt(session, oneLine)
   const CHUNK = 80
   // Stream oneLine into the pane as CHUNK-sized literal send-keys writes,
   // followed by a submitting Enter. Extracted as a closure so the

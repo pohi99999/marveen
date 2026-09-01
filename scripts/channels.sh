@@ -500,8 +500,17 @@ if [ -n "$_node_bin" ] && [ -f "$INSTALL_DIR/dist/web/agent-process.js" ]; then
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $(cat "$INSTALL_DIR/store/.dashboard-token")" \
         -d "{\"from\":\"channels-sh-guard\",\"to\":\"${MAIN_AGENT_ID:-marveen}\",\"content\":\"[GUARD] A fo agens a KOZOS ~/.claude alol indult, pedig van flotta setup-token (store/.claude-oauth-token). A MAIN_AGENT_ISOLATED_CONFIG nincs beallitva, ezert az auth a rotalodo megosztott credentialbol megy: ez lejarhat, 401-be all a TUI, es a csatorna NEMAN elerhetetlen lesz. Teendo: MAIN_AGENT_ISOLATED_CONFIG=1 beallitasa, majd channels session restart.\"}" \
-        >/dev/null 2>&1 || true
-      unset _guard_port
+        -o /dev/null -w '%{http_code}' 2>>"$INSTALL_DIR/store/channels-failures.log" > "$INSTALL_DIR/store/.channels-guard-http.$$" || true
+      # Honest delivery (NOTIFYVAKSWEEP826 zaro kor): a fenti WARN csak a helyi
+      # logban el -- ha a koordinatornak szolo POST elbukik, az is a logba
+      # kerul, kulonben a riasztas-vesztes lathatatlan.
+      _guard_http="$(cat "$INSTALL_DIR/store/.channels-guard-http.$$" 2>/dev/null || echo 000)"
+      rm -f "$INSTALL_DIR/store/.channels-guard-http.$$"
+      case "$_guard_http" in
+        2*) : ;;
+        *) echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh: WARN guard alert POST failed (HTTP ${_guard_http:-000}) -- a fenti WARN nem erte el a koordinatort" >> "$INSTALL_DIR/store/channels-failures.log" ;;
+      esac
+      unset _guard_port _guard_http
     fi
   fi
   # Trigger 2 (below): an install that HAS run isolated before. Its
@@ -517,8 +526,17 @@ if [ -n "$_node_bin" ] && [ -f "$INSTALL_DIR/dist/web/agent-process.js" ]; then
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $(cat "$INSTALL_DIR/store/.dashboard-token")" \
         -d "{\"from\":\"channels-sh-guard\",\"to\":\"${MAIN_AGENT_ID:-marveen}\",\"content\":\"[GUARD] A channels session most a KOZOS ~/.claude alol indult, pedig letezik izolalt config dir (.channels-config). A MAIN_AGENT_ISOLATED_CONFIG beallitas valoszinuleg elveszett (store/config-overrides.json torlodott es nincs .env kulcs). Az auth a rotalodo shared sessionbol megy, 401-veszely. Teendo: MAIN_AGENT_ISOLATED_CONFIG=1 visszaallitasa, majd channels session restart.\"}" \
-        >/dev/null 2>&1 || true
-      unset _guard_port
+        -o /dev/null -w '%{http_code}' 2>>"$INSTALL_DIR/store/channels-failures.log" > "$INSTALL_DIR/store/.channels-guard-http.$$" || true
+      # Honest delivery (NOTIFYVAKSWEEP826 zaro kor): a fenti WARN csak a helyi
+      # logban el -- ha a koordinatornak szolo POST elbukik, az is a logba
+      # kerul, kulonben a riasztas-vesztes lathatatlan.
+      _guard_http="$(cat "$INSTALL_DIR/store/.channels-guard-http.$$" 2>/dev/null || echo 000)"
+      rm -f "$INSTALL_DIR/store/.channels-guard-http.$$"
+      case "$_guard_http" in
+        2*) : ;;
+        *) echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh: WARN guard alert POST failed (HTTP ${_guard_http:-000}) -- a fenti WARN nem erte el a koordinatort" >> "$INSTALL_DIR/store/channels-failures.log" ;;
+      esac
+      unset _guard_port _guard_http
     fi
   fi
   unset _cfg_line _cfg_mode _cfg_dir
@@ -661,13 +679,46 @@ $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
 # soha nem toltodne be. Tobb fajta dialog elofordulhat:
 #  - "Bypass Permissions mode" (--dangerously-skip-permissions confirmation,
 #    valasz: 2 Enter = "Yes, I accept")
-#  - "Do you trust the files in this folder?" / "trust" prompts (Y Enter)
+#  - a folder-trust dialogus (valasz: 1 Enter). KET szoveget kell nezni, mert
+#    a Claude Code 2.1.246 atirta a panelt: a regi kerdes ("Do you trust the
+#    files in this folder?") ELTUNT, az uj panel a "Quick safety check: ..."
+#    mondattal kezdodik es az opcio szovege "Yes, I trust this folder".
+#    A HORGONY az OPCIO-SZOVEG, mert az a funkcionalis elem; a folotte levo
+#    mondat az, amit a szallito atir (epp most tette). A regi kerdes marad a
+#    regebbi CLI-verziok miatt -- a regi panel opcioja "Yes, proceed" volt,
+#    tehat egyik string sem fedi le onmagaban mindket verziot. (TRUSTGATE901)
+#    FIGYELEM: az uj panel NEM tartalmazza a "Welcome to Claude Code" bannert,
+#    tehat a lenti welcome-ag sem kapta el -- a session csendben parkolt.
 #  - "Welcome to Claude Code" / kezdo vezetes (Enter a folytatashoz)
 # 12 sec timeout ket retry-jal, mert WSL/tmux paint slow lehet first-run-on.
 #
 # EPERM fallback (Claude Code 2.1.183+ regression): launching --channels in a
 # trusted project directory throws EPERM before any dialog appears. Detected
 # below; one auto-restart from /tmp where the trust dialog fires instead.
+# TRUSTGATE901: NEM szamra es NEM alapertelmezesre. A 2.1.252 eldobta az
+# "1."/"2." szamozast (a "1" igy semmit nem valaszt) ES a "No, exit" lett
+# az elso, kijelolt opcio -- a regi "1" + Enter tehat AKTIVAN a kilepest
+# valasztotta egy friss telepitesen. A valaszt a pane-bol olvassuk ki:
+# ha a kurzor sora maga a "yes", eleg a megerosites; ha a KOZVETLENUL
+# alatta levo sor az, egyet lepunk le. Barmi mas alaknal NEM nyomunk
+# semmit -- se Entert, se Escape-et: ezen a panelen egyik sem semleges
+# (az Escape maga a "No, exit"), tehat a nem-cselekves a helyes.
+# Ugyanez a kockazat all a bypass-panelre: ott is a "No, exit" az elso opcio.
+_answer_accept_dialog() {
+  _cur=$(printf '%s\n' "$1" | grep -n "❯" | head -1 | cut -d: -f1)
+  _yes=$(printf '%s\n' "$1" | grep -n "Yes" | grep -v "No, exit" | head -1 | cut -d: -f1)
+  if [ -n "$_cur" ] && [ -n "$_yes" ] && [ "$_yes" = "$_cur" ]; then
+    $TMUX send-keys -t "$SESSION" Enter
+  elif [ -n "$_cur" ] && [ -n "$_yes" ] && [ "$_yes" = "$((_cur + 1))" ]; then
+    $TMUX send-keys -t "$SESSION" Down
+    sleep 1
+    $TMUX send-keys -t "$SESSION" Enter
+  else
+    echo "channels.sh: elfogado dialogus ismeretlen alakban -- nem kuldok billentyut (TRUSTGATE901)" >&2
+  fi
+  unset _cur _yes
+}
+
 _eperm_restarted=0
 for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
   sleep 1
@@ -701,12 +752,12 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
       continue
       ;;
     *"Bypass Permissions mode"*"Yes, I accept"*)
-      $TMUX send-keys -t "$SESSION" "2" Enter
+      _answer_accept_dialog "$pane"
       sleep 1
       continue
       ;;
-    *"Do you trust the files in this folder?"*)
-      $TMUX send-keys -t "$SESSION" "1" Enter
+    *"Do you trust the files in this folder?"*|*"Yes, I trust this folder"*)
+      _answer_accept_dialog "$pane"
       sleep 1
       continue
       ;;
