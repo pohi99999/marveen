@@ -69,12 +69,22 @@ Jogos használni, ha: (a) a working tree állapotát MÁR ellenőrizted (pl.
 dry-run merge-gel), (b) a változás dokumentáltan biztonságos (nincs benne
 titok — a `secret-gate` hook ezt külön ellenőrzi), (c) utána AZONNAL pusholsz.
 
-**Ismert hiányosság**: a WSL checkoutnak NINCS beállítva push-hitelesítés
-GitHub felé (nincs `gh` CLI, nincs credential helper) — csak fetch/pull megy
-hitelesítés nélkül (publikus repó). Ha a WSL-ből kellene pusholni, előbb ezt
-kell megoldani (pl. `gh auth login` + `gh auth setup-git`, vagy PAT +
-`git config credential.helper store`). Egyelőre a push mindig a Windows
-checkoutból megy.
+**A WSL checkout MÁR TUD pusholni** (2026-09-01-én ellenőrizve, a v1.36.0
+upstream-szinkron során). Beállítás: `credential.helper=store` + repo-local
+noreply e-mail (`207359610+pohi99999@users.noreply.github.com`) — ez utóbbi
+oldotta fel a korábbi GH007 push-elutasítást. Ellenőrzés indítás nélkül:
+`git push --dry-run fork main`. A `gh` CLI továbbra sincs telepítve, arra
+nincs is szükség.
+
+Ez felülírja a korábbi „csak a Windows checkoutból lehet pusholni" szabályt:
+mindkét oldal tud, ezért az AZONNALI push alól VÉGKÉPP nincs mentség.
+
+**A gyakorlatban a WSL a biztonságosabb hely a merge-hez**, mert a Windows
+checkout `git status`-a tartósan ~727 fájlt mutat módosítottként — ez NEM
+valódi változás, csak sorvég-konverzió (CRLF/LF): a diff pontosan ugyanannyi
+beszúrás és törlés. Ha ez véletlenül commitba kerül, értelmezhetetlen,
+több százezer soros diffet szül. Ne commitolj a Windows oldalon anélkül,
+hogy előbb `git diff --stat`-tal megnéznéd, valódi-e a változás.
 
 ---
 
