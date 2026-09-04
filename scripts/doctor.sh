@@ -40,10 +40,19 @@ for component in channels dashboard; do
     fi
   else
     svc="${MAIN_AGENT_ID}-${component}"
+    # A komponens KÉT módon futhat: systemd --user unitként, VAGY tmux
+    # session-ként (scripts/channels.sh így indítja). Ha csak a systemd-t
+    # néznénk, egy tökéletesen egészséges tmux-os telepítés MINDEN futásnál
+    # hamis hibát kapna -- élő eset 2026-09-04: a doctor "NOT running"-ot írt
+    # mindkét komponensre, miközben a tmux session futott és a dashboard API
+    # HTTP 200-at adott. Egy állandóan farkast kiáltó health-check rosszabb,
+    # mint a semmi, mert megtanítja az embert figyelmen kívül hagyni.
     if systemctl --user is-active "$svc.service" &>/dev/null; then
-      ok "$svc: running"
+      ok "$svc: running (systemd)"
+    elif tmux has-session -t "$svc" 2>/dev/null; then
+      ok "$svc: running (tmux session)"
     else
-      fail "$svc: NOT running"
+      fail "$svc: NOT running (sem systemd unit, sem tmux session)"
     fi
   fi
 done
