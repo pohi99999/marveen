@@ -40,15 +40,34 @@ const KNOWN_BIN_DIRS = [
 // Resolve a binary to an absolute path, or null if it cannot be found on PATH
 // or in any known install dir. Never throws for a missing binary (only for an
 // invalid name), so callers can decide whether absence is fatal.
+// KNOWN_BIN_DIRS is probed BEFORE `which`, and the order matters more than it
+// looks. `which` answers "what would the CALLING PROCESS get", which makes the
+// resolved binary a property of whoever happened to spawn us rather than of the
+// machine. That is not hypothetical: on 2026-09-07 this box had claude twice --
+// ~/.local/bin/claude (2.1.263, the real native install) and /usr/bin/claude
+// (2.1.228, an orphaned npm-global from August). The dashboard's PATH put
+// ~/.local/bin 2nd and /usr/bin 8th, so the live system resolved correctly; an
+// agent session's PATH put ~/.local/bin 7th, so the SAME call resolved to the
+// August binary and reported a version four releases old. The fallback list
+// below already encoded the right precedence -- user installs before system
+// ones -- but it only ran when `which` FAILED, so the correct list was never
+// consulted while the wrong answer was available.
+//
+// `which` is kept as the last resort, not dropped: it is the only way to find
+// an install in a directory this list does not rank. The trade is deliberate --
+// a binary present in BOTH a known dir and an unranked PATH dir now resolves to
+// the known dir. That is the deterministic answer, and if some install location
+// deserves higher precedence, it belongs in KNOWN_BIN_DIRS where the decision is
+// visible, rather than depending on each caller's environment.
 export function tryResolveFromPath(name: string): string | null {
   if (!/^[a-zA-Z0-9._-]+$/.test(name)) throw new Error('Invalid binary name: ' + name)
+  for (const dir of KNOWN_BIN_DIRS) {
+    const candidate = join(dir, name)
+    if (existsSync(candidate)) return candidate
+  }
   try {
-    return execSync(`which ${name}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return execSync(`which ${name}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null
   } catch {
-    for (const dir of KNOWN_BIN_DIRS) {
-      const candidate = join(dir, name)
-      if (existsSync(candidate)) return candidate
-    }
     return null
   }
 }
