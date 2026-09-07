@@ -81,8 +81,11 @@ if [ "$TOPLEVEL" = "$PROD_ROOT" ] && [ "${MARVEEN_PROD_COMMIT_OK:-0}" != "1" ]; 
   # hint pointed at a ref that does not exist. Use the current branch's
   # upstream when it has one, else the current branch itself.
   BASE="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
-  echo "Work in a worktree instead (base = this branch's upstream, derived from the repo):" >&2
+  echo "Work in a worktree instead (base = this branch's upstream, derived from the repo, verified to exist):" >&2
   echo "  git worktree add ../$(basename "$PROD_ROOT")-wt-<topic> -b <branch> $BASE" >&2
+  # The remote NAMES are reversed between the two checkouts (fork/origin on
+  # WSL, origin/upstream on Windows): never trust a remote name from memory.
+  echo "  (remote names differ per checkout -- confirm with: git remote -v; list bases with: git branch -r)" >&2
   echo "Deliberate override: MARVEEN_PROD_COMMIT_OK=1 git commit ..." >&2
   exit 1
 fi
