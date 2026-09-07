@@ -258,6 +258,88 @@ else
   ok "No failure log"
 fi
 
+# --- MCP endpoints ---
+# Channel endpoints are already covered above (Telegram bridge section, via
+# verify-channels-health.sh). MCP servers were the gap.
+#
+# The inventory is read from the CONFIG FILES, never from `claude mcp list`.
+# Any `claude ...` process started from a live session takes over the channel
+# plugin's MCP connection and silently deafens the Telegram bridge -- that is
+# how the bridge went down on 2026-09-07. See the csatorna-plugin-lecsatlakozas
+# skill.
+#
+# SCOPE, deliberately narrow: this checks that each server's ENTRY POINT is
+# reachable -- an stdio server's command resolves to an existing executable, an
+# http/sse server's URL answers. It does NOT prove the server starts, speaks MCP
+# or exposes tools; a launcher that resolves but then crashes still reports OK
+# here. It catches the deleted-launcher / missing-binary / dead-host class,
+# which is the one that fails silently at 03:00.
+echo -e "\n${BOLD}MCP endpoints${RESET}"
+MCP_TMP=$(mktemp)
+python3 - "$INSTALL_DIR" > "$MCP_TMP" 2>/dev/null <<'PY'
+import json, os, sys, shutil
+root = sys.argv[1]
+sources = [
+    (os.path.join(root, '.mcp.json'), 'project'),
+    (os.path.expanduser('~/.claude.json'), 'user'),
+]
+seen = {}
+for path, origin in sources:
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        continue
+    except Exception as exc:
+        print('PARSE\t%s\t%s' % (path, str(exc)[:80]))
+        continue
+    for name, cfg in (data.get('mcpServers') or {}).items():
+        if name in seen or not isinstance(cfg, dict):
+            continue
+        seen[name] = True
+        url = cfg.get('url')
+        if url:
+            print('HTTP\t%s\t%s\t%s' % (name, origin, url))
+            continue
+        cmd = cfg.get('command')
+        if not cmd:
+            print('ODD\t%s\t%s\tno command and no url' % (name, origin))
+            continue
+        # Absolute path -> must exist and be executable. Bare name -> must be on PATH.
+        if os.path.isabs(cmd):
+            state = 'OK' if os.access(cmd, os.X_OK) else ('NOEXEC' if os.path.exists(cmd) else 'MISSING')
+        else:
+            state = 'OK' if shutil.which(cmd) else 'MISSING'
+        print('STDIO\t%s\t%s\t%s\t%s' % (name, origin, state, cmd))
+PY
+
+MCP_N=0
+while IFS=$'\t' read -r kind name origin a b; do
+  [ -z "$kind" ] && continue
+  case "$kind" in
+    PARSE)  fail "MCP config unparseable: $name -- $origin" ;;
+    ODD)    warn "$name ($origin): $a" ;;
+    STDIO)
+      MCP_N=$((MCP_N+1))
+      case "$a" in
+        OK)      ok "$name (stdio, $origin): command resolves" ;;
+        NOEXEC)  fail "$name (stdio, $origin): $b exists but is NOT executable" ;;
+        MISSING) fail "$name (stdio, $origin): command not found -- $b" ;;
+      esac ;;
+    HTTP)
+      MCP_N=$((MCP_N+1))
+      # Any HTTP status proves the host answered; only a transport failure (000) is a fail.
+      CODE=$(curl -s -o /dev/null -m 8 -w "%{http_code}" "$a" 2>/dev/null)
+      if [ "$CODE" = "000" ] || [ -z "$CODE" ]; then
+        fail "$name (http, $origin): unreachable -- $a"
+      else
+        ok "$name (http, $origin): answers (HTTP $CODE)"
+      fi ;;
+  esac
+done < "$MCP_TMP"
+rm -f "$MCP_TMP"
+[ "$MCP_N" -eq 0 ] && warn "no MCP servers found in .mcp.json or ~/.claude.json"
+
 # --- Summary ---
 echo ""
 if [ "$FAIL" -eq 0 ]; then
