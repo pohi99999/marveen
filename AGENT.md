@@ -51,7 +51,17 @@ git merge upstream/main       # vagy upstream/develop, ha azt követjük
 git push origin main && git push brunella main
 ```
 Utána a MÁSIK checkoutban: `git fetch <sajat-fork-remote-neve> && git reset --hard <ugyanaz>/main`
-— NE `git pull`-t a helyi módosítások miatt, hacsak nem tiszta a `git status`.
+— NE csupasz `git pull`-t. **Ez itt nem óvatosság, hanem tény (2026-09-07-én mérve):
+a WSL checkouton a `main` ág az `origin/main`-t, vagyis a Szotasz UPSTREAMET
+követi, nem a saját forkot.** Ezért egy csupasz `git pull` tiszta fánál is
+csendben az upstreamet húzná a futó fára. Mindig nevezd meg a remote-ot és az
+ágat: `git pull fork main` (a saját munka), vagy szándékos upstream-szinkronnál
+`git merge origin/main`. A követett ágat SZÁNDÉKOSAN nem állítjuk át a forkra:
+így a `git status` "ahead N" száma az upstream-távolságot méri (2026-09-07-én
+39 commit) — az a szám nem hiba, hanem mérőszám, és pont az a csendes
+elcsúszás lenne láthatatlan nélküle, ami 2026-08-26-án órákig tartó
+helyreállítást okozott. Ha valaha a fork lesz a követett ág, az Péterrel
+egyeztetett, tudatos döntés legyen, nem egy mellékesen elvégzett beállítás.
 
 **Ellenőrzés eltérés-gyanúnál** (mielőtt bármit pusholnál/merge-elnél):
 ```bash
