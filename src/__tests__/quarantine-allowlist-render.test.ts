@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { renderQuarantineReader, ownerAllowedDomains, quarantineReaderDomains, isPublicFetchHost } from '../web/agent-scaffold.js'
+import { renderQuarantineReader, ownerAllowedDomains, quarantineReaderDomains, quarantineReaderUnrestricted, isPublicFetchHost } from '../web/agent-scaffold.js'
 
 // The quarantine reader may only fetch from an allowlist, and that list used to
 // exist TWICE: once in this template and once in store/egress-allowlist.json,
@@ -247,5 +247,83 @@ describe('renderQuarantineReader anchoring', () => {
     ].join('\n')
     const out = renderQuarantineReader(tpl, ['claude.com'])
     expect(out.indexOf('- `claude.com`')).toBeLessThan(out.indexOf('## Output format'))
+  })
+})
+
+// The TLD-wide quarantine list never reached the reader. isPublicFetchHost
+// demands at least two labels, so every bare TLD an operator wrote (`com`,
+// `hu`, `org`, ...) was dropped from the render and only `co.uk` survived --
+// the store file read as unlimited while the reader's prompt listed one domain,
+// and nothing reported the gap. The Mac mini price watch was blind for eight
+// days behind exactly that (2026-09-07). The sentinel is the fix: it is read
+// BEFORE the host filter, so it cannot be swallowed the same way.
+describe('the unrestricted quarantine tier', () => {
+  const write = (dir: string, body: unknown) =>
+    writeFileSync(join(dir, 'egress-allowlist.json'), JSON.stringify(body))
+
+  it('detects the sentinel that a TLD list could never express', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'egress-star-'))
+    write(dir, { domains: ['a.com'], quarantine_domains: ['*'] })
+    expect(quarantineReaderUnrestricted(dir)).toBe(true)
+    // And the value it replaces is exactly the one the host filter rejects.
+    expect(isPublicFetchHost('*')).toBe(false)
+  })
+
+  it('is off by default, and a bare TLD does NOT turn it on', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'egress-nostar-'))
+    write(dir, { domains: ['a.com'], quarantine_domains: ['com', 'hu', 'co.uk'] })
+    expect(quarantineReaderUnrestricted(dir)).toBe(false)
+    // The old shape, and the measured damage: 3 entries in, 1 out.
+    expect(quarantineReaderDomains(dir)).toEqual(['a.com', 'co.uk'])
+  })
+
+  it('survives a missing, malformed or keyless file without claiming openness', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'egress-bad-'))
+    expect(quarantineReaderUnrestricted(join(dir, 'nope'))).toBe(false)
+    writeFileSync(join(dir, 'egress-allowlist.json'), '{ not json')
+    expect(quarantineReaderUnrestricted(dir)).toBe(false)
+    write(dir, { note: 'empty for now' })
+    expect(quarantineReaderUnrestricted(dir)).toBe(false)
+  })
+
+  it('renders a sentence, not a list, and says the bullets are not the limit', () => {
+    const out = renderQuarantineReader(TEMPLATE, [], true)
+    expect(out).toContain('open to every public domain')
+    expect(out).toContain('not the limit')
+    // The shipped defaults stay: an open tier adds permission, it never removes.
+    for (const d of ['status.anthropic.com', 'hnrss.org', 'www.reddit.com']) {
+      expect(out).toContain(`- \`${d}\``)
+    }
+  })
+
+  it('still spells out the inward hosts that stay refused', () => {
+    const out = renderQuarantineReader(TEMPLATE, [], true)
+    for (const inward of ['localhost', '.local', '.internal', 'nip.io']) {
+      expect(out).toContain(inward)
+    }
+  })
+
+  it('lands inside the Domain restriction section, like the enumerated block', () => {
+    const out = renderQuarantineReader(TEMPLATE, [], true)
+    expect(out.indexOf('every public domain')).toBeLessThan(out.indexOf('For any other domain'))
+  })
+
+  it('a re-render replaces the block instead of stacking copies', () => {
+    // Both directions: open -> enumerated must not leave the open sentence
+    // behind, or revoking the sentinel would be cosmetic.
+    const open = renderQuarantineReader(TEMPLATE, [], true)
+    const reclosed = renderQuarantineReader(open, ['claude.com'], false)
+    expect(reclosed).not.toContain('every public domain')
+    expect(reclosed).toContain('- `claude.com`')
+    expect(renderQuarantineReader(open, [], true)).toEqual(open)
+  })
+
+  it('does not touch the domains tier, which stays enumerated on purpose', () => {
+    // `domains` puts raw bytes in the MAIN agent's context; only the quarantine
+    // tier wraps its output as untrusted data.
+    const dir = mkdtempSync(join(tmpdir(), 'egress-tier-'))
+    write(dir, { domains: ['a.com'], quarantine_domains: ['*'] })
+    expect(ownerAllowedDomains(dir)).toEqual(['a.com'])
+    expect(quarantineReaderDomains(dir)).toEqual(['a.com'])
   })
 })

@@ -719,6 +719,31 @@ export function ownerAllowedDomains(storeDir = STORE_DIR): string[] {
 // quarantine_domains level is honored by the hook but the reader's own prompt
 // still refuses it before a fetch is ever attempted -- which is exactly what
 // stranded a research task on 2026-08-16 (EGRESSKEY816).
+// The sentinel an operator writes into quarantine_domains to say "research is
+// not domain-limited". It has to be read BEFORE the isPublicFetchHost() filter,
+// because `*` is one of the values that filter exists to reject -- which is why
+// a TLD-wide list could never express this: isPublicFetchHost demands at least
+// two labels, so every bare TLD (`com`, `hu`, ...) was silently dropped from the
+// rendered definition and only `co.uk` survived. The list looked unlimited in
+// the store file and was a one-entry list in the reader's prompt; that gap left
+// the Mac mini price watch blind for eight days (2026-09-07).
+export const QUARANTINE_WILDCARD = '*'
+
+// True when the owner has opened the quarantine tier to every public host.
+// Deliberately scoped to the quarantine tier: `domains` puts raw bytes in the
+// MAIN agent's context, where fetched text is read as instructions, so that tier
+// stays enumerated. The reader wraps its output as untrusted data, which is what
+// makes an open tier safe here and not there.
+export function quarantineReaderUnrestricted(storeDir = STORE_DIR): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(join(storeDir, 'egress-allowlist.json'), 'utf-8'))
+    const list = Array.isArray(raw?.quarantine_domains) ? raw.quarantine_domains : []
+    return list.some((d: unknown) => typeof d === 'string' && d.trim() === QUARANTINE_WILDCARD)
+  } catch {
+    return false
+  }
+}
+
 export function quarantineReaderDomains(storeDir = STORE_DIR): string[] {
   const base = ownerAllowedDomains(storeDir)
   try {
@@ -744,7 +769,7 @@ export function quarantineReaderDomains(storeDir = STORE_DIR): string[] {
 //
 // Marker-delimited so a re-render replaces the previous block instead of
 // stacking copies, and so a reader can see which lines are per-install.
-export function renderQuarantineReader(template: string, domains: string[]): string {
+export function renderQuarantineReader(template: string, domains: string[], unrestricted = false): string {
   const BEGIN = '<!-- BEGIN PER-INSTALL DOMAINS (from store/egress-allowlist.json) -->'
   const END = '<!-- END PER-INSTALL DOMAINS -->'
   // Strip a previous block by literal position, NOT with a regex: the markers
@@ -761,11 +786,32 @@ export function renderQuarantineReader(template: string, domains: string[]): str
       stripped = stripped.slice(0, from) + stripped.slice(e + END.length)
     }
   }
-  const already = new Set(
-    [...stripped.matchAll(/^- `([^`]+)`/gm)].map((m) => m[1].toLowerCase()))
-  const extra = domains.filter((d) => !already.has(d.toLowerCase()))
-  if (!extra.length) return stripped
-  const block = [BEGIN, ...extra.map((d) => `- \`${d}\``), END].join('\n')
+  // An open tier is rendered as a SENTENCE, not as a list. A list of every
+  // domain does not exist, and writing one bullet per host the owner happened to
+  // name would tell the reader the opposite of what the operator decided.
+  let body: string[]
+  if (unrestricted) {
+    body = [
+      '**Per-install: this reader is open to every public domain.** The bullets',
+      'above are the shipped defaults, not the limit. Fetch whatever public URL',
+      'you are pointed at and return it in the wrapped, untrusted shape below;',
+      'do not refuse a host merely because it is not listed.',
+      '',
+      'Still refused, and not negotiable: IP-literal hosts, single-label names',
+      '(`localhost`), anything ending in `.local`, `.internal`, `.lan`, `.home`,',
+      '`.intranet`, `.test` or `.arpa`, and wildcard-DNS names that encode a',
+      'private address (`127.0.0.1.nip.io`). Those resolve back inside this',
+      'machine or its network, and a fetch aimed there is the one thing this',
+      'reader exists to stop.',
+    ]
+  } else {
+    const already = new Set(
+      [...stripped.matchAll(/^- `([^`]+)`/gm)].map((m) => m[1].toLowerCase()))
+    const extra = domains.filter((d) => !already.has(d.toLowerCase()))
+    if (!extra.length) return stripped
+    body = extra.map((d) => `- \`${d}\``)
+  }
+  const block = [BEGIN, ...body, END].join('\n')
   // Anchor on the LAST bullet inside the Domain restriction section, not on the
   // last bullet in the file: the moment a backtick-bullet appears in any later
   // section, a file-wide anchor would silently relocate the per-install block
@@ -867,7 +913,11 @@ export function ensureQuarantineReader(
   const destPath = join(destDir, 'quarantine-reader.md')
   let rendered: string
   try {
-    rendered = renderQuarantineReader(readFileSync(tplPath, 'utf-8'), quarantineReaderDomains(paths?.storeDir))
+    rendered = renderQuarantineReader(
+      readFileSync(tplPath, 'utf-8'),
+      quarantineReaderDomains(paths?.storeDir),
+      quarantineReaderUnrestricted(paths?.storeDir),
+    )
   } catch {
     return false
   }

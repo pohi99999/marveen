@@ -132,6 +132,67 @@ const QUARANTINE_DOMAINS = [
   { domain: 'www.reddit.com', path: (p) => p.endsWith('.rss') },
 ]
 
+// The sentinel an operator writes into quarantine_domains to say "research is
+// not domain-limited". It opens the quarantine tier ONLY -- the `domains` tier
+// (main agent, raw content into the main context) stays enumerated, because
+// there the fetched bytes become instructions the agent reads.
+//
+// It does NOT mean "any URL": a host that resolves back inside this machine or
+// its network is still refused below. The reader's caller is the main agent,
+// and the main agent is exactly what previously fetched content can steer, so
+// the inward guard is the one part of this list that is not the operator's to
+// waive by widening a list.
+const QUARANTINE_WILDCARD = '*'
+
+// Hosts that point inward. Mirrors isPublicFetchHost() in
+// src/web/agent-scaffold.ts -- the two are deliberately duplicated (a hook must
+// run standalone, with no build step and no application imports), and
+// src/__tests__/egress-gate.test.ts pins them to the same verdicts so the copies
+// cannot drift apart unnoticed.
+const INTERNAL_SUFFIXES = new Set([
+  'local', 'internal', 'localdomain', 'lan', 'intranet', 'home',
+  'arpa', 'test', 'invalid', 'localhost', 'svc', 'cluster',
+])
+
+function isInwardIPv4(o) {
+  if (o.length !== 4 || o.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false
+  const [a, b] = o
+  if (a === 0 || a === 127) return true                      // this-host, loopback
+  if (a === 10) return true                                  // RFC1918
+  if (a === 172 && b >= 16 && b <= 31) return true           // RFC1918
+  if (a === 192 && b === 168) return true                    // RFC1918
+  if (a === 169 && b === 254) return true                    // link-local, cloud metadata
+  if (a === 100 && b >= 64 && b <= 127) return true          // CGNAT
+  return false
+}
+
+// True for a hostname safe to point a quarantined fetch at. Exported for the
+// drift test only.
+export function isPublicFetchTarget(value) {
+  const host = String(value ?? '').trim().toLowerCase()
+  if (!host || host.length > 253) return false
+  if (/[^a-z0-9.-]/.test(host)) return false        // IPv6 brackets, userinfo, wildcards
+  if (host.startsWith('.') || host.endsWith('.')) return false
+  if (host.startsWith('-') || host.endsWith('-')) return false
+  if (/^\d+(\.\d+)*$/.test(host)) return false      // IPv4 literal or a bare number
+  const labels = host.split('.')
+  if (labels.length < 2) return false               // localhost and friends
+  if (labels.some((l) => !l || l.length > 63 || l.startsWith('-') || l.endsWith('-'))) return false
+  if (INTERNAL_SUFFIXES.has(labels[labels.length - 1])) return false
+  // Wildcard-DNS services encode the address in the name: 127.0.0.1.nip.io and
+  // 192-168-1-50.sslip.io are public NAMES that resolve to loopback/RFC1918.
+  const dashQuad = (l) => {
+    const m = l.match(/^(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})$/)
+    return m ? isInwardIPv4(m.slice(1).map((p) => parseInt(p, 10))) : false
+  }
+  if (labels.some(dashQuad)) return false
+  for (let i = 0; i + 3 < labels.length; i++) {
+    const quad = labels.slice(i, i + 4)
+    if (quad.every((p) => /^\d{1,3}$/.test(p)) && isInwardIPv4(quad.map((p) => parseInt(p, 10)))) return false
+  }
+  return true
+}
+
 function matchesQuarantineDomain(url, extraDomains = []) {
   let parsed
   try {
@@ -145,6 +206,9 @@ function matchesQuarantineDomain(url, extraDomains = []) {
     if (entry.path && !entry.path(parsed.pathname)) return false
     return true
   }
+  // Operator opened the tier to every public host. The inward guard still runs;
+  // see QUARANTINE_WILDCARD above for why that part is not waivable.
+  if (extraDomains.includes(QUARANTINE_WILDCARD)) return isPublicFetchTarget(parsed.hostname)
   // Operator additions carry no path rule: an entry someone typed into the
   // store file is a deliberate act, and second-guessing its shape here would
   // only make the file's behaviour harder to predict.

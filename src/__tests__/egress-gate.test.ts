@@ -14,7 +14,8 @@
 // side effects.
 import { describe, it, expect } from 'vitest'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { isEgressBlocked, egressDecision, payloadKeySignature } from '../../scripts/hooks/egress-gate.mjs'
+import { isEgressBlocked, egressDecision, payloadKeySignature, isPublicFetchTarget } from '../../scripts/hooks/egress-gate.mjs'
+import { isPublicFetchHost } from '../web/agent-scaffold.js'
 
 const QUARANTINE = 'quarantine-reader'
 const EMPTY = { domains: [], prefixes: [], quarantineDomains: [] }
@@ -142,5 +143,99 @@ describe('what a block records about the caller', () => {
     for (const bad of [null, undefined, 'string', 42, ['a']]) {
       expect(payloadKeySignature(bad as never)).toBe('')
     }
+  })
+})
+
+// The operator sentinel: quarantine_domains: ["*"] opens the QUARANTINE tier to
+// every public host. It exists because the previous attempt at "no limits" -- a
+// list of bare TLDs -- was silently a one-entry list by the time it reached the
+// reader's rendered prompt (see src/__tests__/quarantine-allowlist-render.test.ts).
+describe('the quarantine wildcard', () => {
+  const STAR = { domains: [], prefixes: [], quarantineDomains: ['*'] }
+  const at = (url: string) => egressDecision('WebFetch', { url }, STAR, QUARANTINE)
+
+  it('lets the reader fetch a public host that is on no list', () => {
+    for (const url of ['https://istyle.hu/mac-mini', 'https://sub.example.co.uk/a?b=c', 'http://notebook.hu/']) {
+      expect(at(url).tier).toBe('quarantine')
+    }
+  })
+
+  it('still refuses hosts that point back inside', () => {
+    // The reader's caller is the main agent, and the main agent is what earlier
+    // fetched content can steer -- so this half is not the operator's to waive.
+    for (const url of [
+      'http://169.254.169.254/latest/meta-data/',   // cloud metadata
+      'http://192.168.1.50/',
+      'http://10.0.0.1/', 'http://172.16.4.9/', 'http://100.64.0.1/',
+      'http://box.local/', 'http://svc.internal/', 'http://a.lan/', 'http://x.home/',
+      'http://127.0.0.1.nip.io/', 'http://192-168-1-50.sslip.io/',
+      'http://[::1]:3420/',
+    ]) {
+      expect(at(url).blocked, url).toBe(true)
+    }
+  })
+
+  // Stated as "the sentinel changes no inward verdict" rather than as a list of
+  // blocked URLs, because the built-in prefix tier already allows this install's
+  // OWN dashboard (http://localhost:<port>/) for every agent -- that predates the
+  // sentinel and is deliberate. Asserting a flat "blocked" there would have
+  // pinned the built-in's behaviour to this card by accident; asserting the
+  // DIFFERENCE keeps the claim to what the sentinel is actually responsible for.
+  it('grants nothing inward that was not already reachable without it', () => {
+    for (const url of [
+      'http://127.0.0.1:3420/api/messages', 'http://localhost:3420/',
+      'http://169.254.169.254/latest/meta-data/', 'http://192.168.1.50/',
+      'http://10.0.0.1/', 'http://box.local/', 'http://127.0.0.1.nip.io/',
+      'http://[::1]:3420/',
+    ]) {
+      const withStar = egressDecision('WebFetch', { url }, STAR, QUARANTINE)
+      const without = egressDecision('WebFetch', { url }, EMPTY, QUARANTINE)
+      expect(withStar.blocked, url).toBe(without.blocked)
+      expect(withStar.tier, url).toBe(without.tier)
+    }
+  })
+
+  it('opens nothing for the main agent, which is the whole point of the tier', () => {
+    for (const agent of ['', 'general-purpose', 'main']) {
+      expect(egressDecision('WebFetch', { url: 'https://istyle.hu/' }, STAR, agent).blocked).toBe(true)
+    }
+  })
+
+  it('is a literal sentinel, not a pattern: a stray star does not wildcard a host', () => {
+    const odd = { domains: [], prefixes: [], quarantineDomains: ['*.example.com'] }
+    expect(egressDecision('WebFetch', { url: 'https://a.example.com/' }, odd, QUARANTINE).blocked).toBe(true)
+  })
+
+  it('without the sentinel an unlisted public host is still blocked', () => {
+    expect(egressDecision('WebFetch', { url: 'https://istyle.hu/' }, EMPTY, QUARANTINE).blocked).toBe(true)
+  })
+})
+
+// isPublicFetchTarget here and isPublicFetchHost in src/web/agent-scaffold.ts are
+// the same rule written twice: a hook runs standalone with no build step, so it
+// cannot import the application copy. Duplicated security logic drifts, so this
+// pins both to the same verdict on one corpus -- a change to either that the
+// other does not follow fails here rather than in production.
+describe('the hook guard and the render guard agree', () => {
+  const CORPUS = [
+    'istyle.hu', 'www.apple.com', 'sub.example.co.uk', 'a-b.example.com', 'xn--80ak6aa92e.com',
+    'localhost', 'box', '127.0.0.1', '8.8.8.8', '0.0.0.0', '169.254.169.254', '192.168.1.50',
+    '10.0.0.1', '172.16.4.9', '100.64.0.1', 'box.local', 'svc.internal', 'a.lan', 'x.home',
+    'y.intranet', 'z.test', 'q.arpa', 'w.invalid', 'p.localdomain', 'k.svc', 'm.cluster',
+    '127.0.0.1.nip.io', '192-168-1-50.sslip.io', '10-0-0-1.example.com',
+    '*', '', ' ', '.leading.com', 'trailing.com.', '-dash.com', 'dash-.com',
+    'has space.com', 'has/slash.com', 'has:port.com', 'com', 'hu', 'co.uk',
+  ]
+
+  it('returns the same verdict for every host in the corpus', () => {
+    for (const host of CORPUS) {
+      expect(isPublicFetchTarget(host), host).toBe(isPublicFetchHost(host))
+    }
+  })
+
+  it('and the corpus actually exercises both answers', () => {
+    const yes = CORPUS.filter((h) => isPublicFetchTarget(h))
+    expect(yes.length).toBeGreaterThan(3)
+    expect(yes.length).toBeLessThan(CORPUS.length - 3)
   })
 })
