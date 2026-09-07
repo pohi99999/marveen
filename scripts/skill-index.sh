@@ -59,13 +59,22 @@ index_skills_dir() {
     [ -f "$skill_md" ] || continue
 
     local name
-    name=$(grep -m1 "^name:" "$skill_md" 2>/dev/null | sed 's/^name: *//' | tr -d '"' | tr -d "'")
+    # tr -d '\r': ket globalis SKILL.md CRLF-es (2026-09-07-en merve) -- CR nelkul
+    # az index CRLF-es lesz, es a sorvegek elrontjak a tablazatot.
+    name=$(grep -m1 "^name:" "$skill_md" 2>/dev/null | sed 's/^name: *//' | tr -d '"' | tr -d "'" | tr -d '\r')
     if [ -z "$name" ]; then
       name=$(basename "$skill_dir")
     fi
 
     local desc
-    desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" | cut -c1-120)
+    # NE `cut -c1-120`: a GNU cut BAJTOKAT vag, nem karaktereket, ezert egy ekezetes
+    # karakter kozepen elvag, a fajl ervenytelen UTF-8 lesz, es a grep onnantol
+    # BINARISKENT kezeli -- nema talalat, exit 1, nulla hibauzenet. 2026-09-07-en
+    # pontosan ez tortent: az index "Non-ISO extended-ASCII"-va valt, es a heartbeat
+    # "keress meglevo skillt szoveges keresessel" lepese csendben semmit nem talalt.
+    # A python3 karakter-szinten vag (a telepito fuggosege, mindig van).
+    desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" | tr -d '\r' \
+      | python3 -c 'import sys; s=sys.stdin.readline().rstrip("\n"); print(s[:120])' 2>/dev/null)
     if [ -z "$desc" ]; then
       desc="(nincs leírás)"
     fi
