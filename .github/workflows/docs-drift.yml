@@ -1,0 +1,22 @@
+# Does the documentation still describe the code? The 2026-09-07 docs audit
+# was found by hand; this runs the same check on every push and PR.
+# Read-only: node scripts/docs-drift.mjs --check (exit 1 on drift).
+# Deliberately NOT a required status check at introduction (same reasoning
+# as test.yml): flipping it to required is a separate owner decision.
+name: docs-drift
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  docs-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      # No npm install: the script has zero dependencies.
+      - run: node scripts/docs-drift.mjs --check

@@ -274,6 +274,7 @@ A tokenszám közelítő: az ágens teljes tokenforgalmát összesíti a futtat�
 | `reggeli-napindito` | marveen | `30 7 * * *` | task | Napi reggeli összefoglaló (email, naptár, AI hírek, Dream Engine aznapi top-javaslatai) |
 | `memoria-heartbeat` | marveen | `*/15 * * * *` | heartbeat | Folytonosság-fenntartás: memória mentése, skill-reflexió, csendben marad ha nincs új fejlemény |
 | `dream-engine` | marveen | `7 2 * * *` | dream-engine | Éjszakai elemzés az aznapi memóriákról/naplóról/kanban-állapotról, 4 priorizált akció-javaslat reggelre |
+| `ledger-live-drain` | marveen | `*/2 * * * *` | heartbeat | 2 percenként ellenőrzi, maradt-e megválaszolatlan bejövő üzenet a beszélgetés-ledgerben (`scripts/hooks/ledger-live-drain.py`), és ha igen, felszínre hozza; üres kimenetnél csendben marad |
 | `projekt-figyelo` | marveen | `0 8 * * *` | heartbeat | Napi áttekintés a külső projekt-mappákon és az Obsidian "Projektek MOC"-on; memória-frissítés mindig, Telegram-jelzés csak érdemi találatnál |
 | `ai-heti-felderites` | zeph | `0 7 * * 1` | task | Heti AI/MCP/skill-felderítés hétfőnként — jelentés Brunellának, telepítés nélkül |
 | `ai-heti-jelentes` | marveen | `0 9 * * 1` | task | Heti AI-felderítés összefoglalója Péternek + kanban-javaslatok, jóváhagyás után végrehajtás |

@@ -206,6 +206,20 @@ if [ -x "$GIT_HOOK_DIR/pre-push.d/20-hook-proof" ] && command -v node >/dev/null
   if [ "${NOPROOF:-0}" = "0" ]; then ok "hook-proof: every unpushed commit has pre-commit proof"; else warn "hook-proof: $NOPROOF unpushed commit(s) WITHOUT proof (push will be blocked; see node scripts/hook-proof.mjs status)"; fi
 fi
 
+# --- Docs drift: does the documentation still describe the code? ---
+echo -e "\n${BOLD}Docs drift${RESET}"
+if command -v node >/dev/null 2>&1; then
+  DRIFT_OUT=$(node scripts/docs-drift.mjs --check 2>&1 || true)
+  if echo "$DRIFT_OUT" | grep -q "docs-drift: no drift"; then
+    ok "docs-drift: $(echo "$DRIFT_OUT" | head -1 | sed 's/^docs-drift: //')"
+  else
+    fail "docs-drift: $(echo "$DRIFT_OUT" | grep -c 'DRIFT --') cross-check(s) failing$(echo "$DRIFT_OUT" | grep -q 'STALE\|MISSING' && echo ', managed block stale')"
+    echo "$DRIFT_OUT" | grep 'DRIFT --\|STALE\|MISSING' | sed 's/^/    /'
+  fi
+else
+  warn "docs-drift: node not found, skipped"
+fi
+
 # --- Ledger hook scripts ---
 echo -e "\n${BOLD}Hook scripts${RESET}"
 for f in scripts/hooks/ledger-capture.py scripts/hooks/ledger-outbound.py scripts/hooks/ledger-replay.py; do

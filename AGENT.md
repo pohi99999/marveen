@@ -87,6 +87,19 @@ scripts/hook-proof.mjs attest <range>` kézzel, naplózva igazolja; állapot:
 merge / bypass / attest / node nélkül fail-closed). A `doctor.sh` jelzi, ha a
 hook hiányzik vagy van bizonyíték nélküli, ki nem pusholt commit.
 
+**Docs-drift ellenőrzés (2026-09-07, `scripts/docs-drift.mjs`).** A dokumentáció
+számai és hivatkozásai a kódból mérve: a `docs/README.md` végén egy kezelt
+blokk (DOC_STATS markerek) hozza az ügynök-, route-, hook-, MCP-, seed-feladat-
+és telepítő-számokat, és felsorolja azokat a `docs/` lapokat, amiket az index
+táblázata nem linkel (2026-09-07-én 22 ilyen volt -- kézzel derült ki, ezért
+született a check). `--check` (doctor.sh "Docs drift" blokk és a `docs-drift`
+CI-workflow) elbukik, ha a blokk elavult, az index nem létező lapra mutat, egy
+`.claude/settings.json` hook nem létező szkriptre mutat, vagy egy
+`scheduled-tasks/` seed nincs benne a `docs/scheduled-tasks.md`-ben (első
+találat: `ledger-live-drain`). `--write` csak a blokkot frissíti; a
+keresztellenőrzés emberi javítást kér. Önteszt: `scripts/docs-drift-selftest.sh`
+(10 eset mindkét irányban).
+
 **A WSL checkout MÁR TUD pusholni** (2026-09-01-én ellenőrizve, a v1.36.0
 upstream-szinkron során). Beállítás: `credential.helper=store` + repo-local
 noreply e-mail (`207359610+pohi99999@users.noreply.github.com`) — ez utóbbi
