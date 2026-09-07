@@ -210,11 +210,17 @@ fi
 echo -e "\n${BOLD}Docs drift${RESET}"
 if command -v node >/dev/null 2>&1; then
   DRIFT_OUT=$(node scripts/docs-drift.mjs --check 2>&1 || true)
+  # Cross-check failures are real drift -> fail. A stale statistics block is a
+  # one-command chore (--write) -> warn only, so this line never trains anyone
+  # to skim past red (Brunella's condition, 2026-09-07).
+  CROSS=$(echo "$DRIFT_OUT" | grep -c 'DRIFT --' || true)
   if echo "$DRIFT_OUT" | grep -q "docs-drift: no drift"; then
     ok "docs-drift: $(echo "$DRIFT_OUT" | head -1 | sed 's/^docs-drift: //')"
+  elif [ "${CROSS:-0}" != "0" ]; then
+    fail "docs-drift: $CROSS cross-check(s) failing"
+    echo "$DRIFT_OUT" | grep 'DRIFT --' | sed 's/^/    /'
   else
-    fail "docs-drift: $(echo "$DRIFT_OUT" | grep -c 'DRIFT --') cross-check(s) failing$(echo "$DRIFT_OUT" | grep -q 'STALE\|MISSING' && echo ', managed block stale')"
-    echo "$DRIFT_OUT" | grep 'DRIFT --\|STALE\|MISSING' | sed 's/^/    /'
+    warn "docs-drift: managed block stale -- run: node scripts/docs-drift.mjs --write"
   fi
 else
   warn "docs-drift: node not found, skipped"

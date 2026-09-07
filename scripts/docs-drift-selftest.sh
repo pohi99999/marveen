@@ -30,9 +30,12 @@ run --write >/dev/null && grep -q "DOC_STATS_START" "$TMP/t/docs/README.md" && o
 grep -q "orphan" "$TMP/t/docs/README.md" && ok "unlinked page listed in the block" || bad "unlinked page not listed"
 if run --check >/dev/null; then ok "consistent tree passes --check"; else bad "consistent tree failed --check"; fi
 
-# stale block: a new agent appears, the block still says 1
-mkdir -p "$TMP/t/agents/beta" && echo x > "$TMP/t/agents/beta/CLAUDE.md"
-if grep -q "STALE" <<<"$(out --check)"; then ok "new agent makes the block STALE"; else bad "new agent not detected"; fi
+# host-local things (agents/, .mcp.json) must NOT make the block stale: they differ per checkout
+mkdir -p "$TMP/t/agents/beta" && echo x > "$TMP/t/agents/beta/CLAUDE.md"; printf '{"mcpServers":{"a":{},"b":{}}}' > "$TMP/t/.mcp.json"
+if run --check >/dev/null; then ok "new agent / mcp server does NOT make the block stale (host-local)"; else bad "host-local change made the block stale"; fi
+# stale block: a new route module appears (tracked file), the block still says 1
+printf "const p = '/api/other'\n" > "$TMP/t/src/web/routes/other.ts"
+if grep -q "STALE" <<<"$(out --check)"; then ok "new route module makes the block STALE"; else bad "new route module not detected"; fi
 run --write >/dev/null && run --check >/dev/null && ok "--write brings it current again" || bad "rewrite did not fix staleness"
 
 # dead link in the index

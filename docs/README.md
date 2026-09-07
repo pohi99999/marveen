@@ -32,12 +32,10 @@ Minden lap két szemszögből mutatja be a funkciót:
 <!-- DOC_STATS_START -->
 ## Auto-generált projekt-statisztika
 
-_Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd._
+_Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Ügynökök (`agents/*/CLAUDE.md`): **10** -- agy-test, aura, copilot-test, irisz, kenshin, lokalisadmiralis, lumen, nyomozo, stratega, zeph
 - Route-modulok (`src/web/routes/*.ts`): **44**, egyedi `/api/...` útvonal-literál bennük: **128**
 - Claude Code hookok (`.claude/settings.json`): **5** esemény, **11** bejegyzés, **9** szkript a `scripts/hooks/` alatt
-- MCP-szerverek (`.mcp.json`): **18**
 - Seed ütemezett feladatok (`scheduled-tasks/`): **4** -- dream-engine, ledger-live-drain, memoria-heartbeat, reggeli-napindito
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **7** -- channel-image, git-guard, hook-proof, prod-tree-guard, secret-gate, telegram-image, telegram-progress
 - Dokumentációs lapok a `docs/` alatt: **38**, ebből a fenti táblázat linkel **16**

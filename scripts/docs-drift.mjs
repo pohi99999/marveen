@@ -4,10 +4,13 @@
 //
 // Two things, both measured from the tree, never from memory:
 //   1. A managed statistics block in docs/README.md (between DOC_STATS markers):
-//      counts that drift silently (agents, route modules, API paths, hooks,
-//      MCP servers, seed tasks, git-hook installers) plus the list of docs
-//      pages the index does not link. --check fails if the block is stale;
-//      --write regenerates it.
+//      counts that drift silently (route modules, API paths, hooks, seed tasks,
+//      git-hook installers, docs pages) plus the list of docs pages the index
+//      does not link. --check fails if the block is stale; --write regenerates
+//      it. ONLY TRACKED FILES feed the block: agents/ and .mcp.json are
+//      host-local (gitignored), so a count of them would differ per checkout
+//      and fail on every clean CI clone -- they are printed for information
+//      only (measured 2026-09-07, Brunella's "stable measure" condition).
 //   2. Cross-checks that need a human, so they always fail --check until fixed:
 //      - a docs/README.md link to a file that does not exist
 //      - a .claude/settings.json hook whose script file does not exist
@@ -64,12 +67,10 @@ export function renderBlock(s) {
     START,
     '## Auto-generált projekt-statisztika',
     '',
-    '_Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd._',
+    '_Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._',
     '',
-    `- Ügynökök (\`agents/*/CLAUDE.md\`): **${s.agents.length}** -- ${s.agents.join(', ')}`,
     `- Route-modulok (\`src/web/routes/*.ts\`): **${s.routeModules.length}**, egyedi \`/api/...\` útvonal-literál bennük: **${s.apiPaths.length}**`,
     `- Claude Code hookok (\`.claude/settings.json\`): **${s.hookEvents.length}** esemény, **${s.hookEntries}** bejegyzés, **${s.hookScripts.length}** szkript a \`scripts/hooks/\` alatt`,
-    `- MCP-szerverek (\`.mcp.json\`): **${s.mcp.length}**`,
     `- Seed ütemezett feladatok (\`scheduled-tasks/\`): **${s.seedTasks.length}** -- ${s.seedTasks.join(', ')}`,
     `- Git-hook telepítők (\`scripts/install-*-hook.sh\`): **${s.hookInstallers.length}** -- ${s.hookInstallers.map((f) => f.replace(/^install-|-hook\.sh$/g, '')).join(', ')}`,
     `- Dokumentációs lapok a \`docs/\` alatt: **${s.docsPages.length}**, ebből a fenti táblázat linkel **${s.docsPages.length - s.unlinkedDocs.length}**`,
@@ -113,7 +114,7 @@ function main() {
   if (json) {
     console.log(JSON.stringify({ stats, blockStale, written: write && blockStale, problems, drift }, null, 2));
   } else {
-    console.log(`docs-drift: agents ${stats.agents.length} | route modules ${stats.routeModules.length} | api paths ${stats.apiPaths.length} | hooks ${stats.hookEntries} | mcp ${stats.mcp.length} | seed tasks ${stats.seedTasks.length} | docs ${stats.docsPages.length} (${stats.unlinkedDocs.length} not in the index table)`);
+    console.log(`docs-drift: route modules ${stats.routeModules.length} | api paths ${stats.apiPaths.length} | hooks ${stats.hookEntries} | seed tasks ${stats.seedTasks.length} | docs ${stats.docsPages.length} (${stats.unlinkedDocs.length} not in the index table) | host-local, not in the block: agents ${stats.agents.length}, mcp ${stats.mcp.length}`);
     if (blockStale) console.log(write ? `docs-drift: managed block in ${INDEX} REWRITTEN.` : `docs-drift: managed block in ${INDEX} is ${current === null ? 'MISSING' : 'STALE'} -- run: node scripts/docs-drift.mjs --write`);
     else console.log('docs-drift: managed block is current.');
     for (const p of problems) console.log(`docs-drift: DRIFT -- ${p}`);
