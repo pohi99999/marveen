@@ -75,8 +75,14 @@ if [ "$TOPLEVEL" = "$PROD_ROOT" ] && [ "${MARVEEN_PROD_COMMIT_OK:-0}" != "1" ]; 
   echo "" >&2
   echo "BLOCKED: commit on the running main checkout ($PROD_ROOT)." >&2
   echo "The dashboard serves static files from this tree and host updates pull into it." >&2
-  echo "Work in a worktree instead:" >&2
-  echo "  git worktree add ../$(basename "$PROD_ROOT")-wt-<topic> -b <branch> origin/develop" >&2
+  # Base for the worktree: DERIVED, not assumed. 'origin/develop' was baked in
+  # here until 2026-09-07, but on the WSL checkout 'origin' is the Szotasz
+  # upstream (the fork is 'fork') and there is no develop branch at all -- the
+  # hint pointed at a ref that does not exist. Use the current branch's
+  # upstream when it has one, else the current branch itself.
+  BASE="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+  echo "Work in a worktree instead (base = this branch's upstream, derived from the repo):" >&2
+  echo "  git worktree add ../$(basename "$PROD_ROOT")-wt-<topic> -b <branch> $BASE" >&2
   echo "Deliberate override: MARVEEN_PROD_COMMIT_OK=1 git commit ..." >&2
   exit 1
 fi
