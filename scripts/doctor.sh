@@ -195,6 +195,17 @@ if [ -f "$CREDS" ]; then
   [ "$HOURS_LEFT" != "-1" ] && echo "  (legacy .credentials.json: ${HOURS_LEFT}h left -- not critical alongside the setup-token)"
 fi
 
+# --- Git hooks: the push gate must be installed, or --no-verify commits leave silently ---
+echo -e "\n${BOLD}Git hooks${RESET}"
+GIT_HOOK_DIR="$(git rev-parse --git-common-dir 2>/dev/null)/hooks"
+for h in pre-commit.d/05-prod-tree-guard pre-commit.d/10-secret-gate pre-commit.d/90-hook-proof post-commit.d/50-hook-proof pre-push.d/10-no-force-push-protected pre-push.d/20-hook-proof; do
+  if [ -x "$GIT_HOOK_DIR/$h" ]; then ok "git hook: $h"; else fail "git hook: $h MISSING (run scripts/sync-hooks.sh)"; fi
+done
+if [ -x "$GIT_HOOK_DIR/pre-push.d/20-hook-proof" ] && command -v node >/dev/null 2>&1; then
+  NOPROOF=$(node scripts/hook-proof.mjs status 2>/dev/null | grep -c "NO PROOF" || true)
+  if [ "${NOPROOF:-0}" = "0" ]; then ok "hook-proof: every unpushed commit has pre-commit proof"; else warn "hook-proof: $NOPROOF unpushed commit(s) WITHOUT proof (push will be blocked; see node scripts/hook-proof.mjs status)"; fi
+fi
+
 # --- Ledger hook scripts ---
 echo -e "\n${BOLD}Hook scripts${RESET}"
 for f in scripts/hooks/ledger-capture.py scripts/hooks/ledger-outbound.py scripts/hooks/ledger-replay.py; do

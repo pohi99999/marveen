@@ -69,6 +69,24 @@ Jogos használni, ha: (a) a working tree állapotát MÁR ellenőrizted (pl.
 dry-run merge-gel), (b) a változás dokumentáltan biztonságos (nincs benne
 titok — a `secret-gate` hook ezt külön ellenőrzi), (c) utána AZONNAL pusholsz.
 
+**Push-kapu commit-bizonyítékkal (2026-09-07, `scripts/hook-proof.mjs`).** A
+pre-commit hookok (prod-tree-guard, secret-gate) `--no-verify`-jal megkerülhetők, és
+eddig senki nem vette észre, ha ez megtörtént. Mostantól a pre-push blokkolja
+azt a pusht, amiben olyan commit menne ki ELŐSZÖR (egyetlen remote-on sincs
+még), amelynél nem futott le a pre-commit lánc: a `pre-commit.d/90-hook-proof`
+megjegyzi az ellenőrzött fát, a `post-commit.d/50-hook-proof` rögzíti a commitot
+igazoltként, a `pre-push.d/20-hook-proof` ezt kéri számon. Upstreamből merge-elt
+vagy már a forkon lévő commit nem szorul helyi bizonyítékra; a merge-commit
+mentes (a `git merge` nem futtat pre-commitot), a szülőit viszont ellenőrzi.
+Rebase/cherry-pick után a bizonyíték elvész -- ez szándékos: `node
+scripts/hook-proof.mjs attest <range>` kézzel, naplózva igazolja; állapot:
+`node scripts/hook-proof.mjs status`. Tudatos megkerülés, hangosan:
+`MARVEEN_PUSH_PROOF_SKIP=1 git push ...`. Telepítés: `scripts/install-hook-proof-hook.sh`
+(a `sync-hooks.sh` automatikusan futtatja), önteszt mindkét irányban:
+`scripts/hook-proof-selftest.sh` (9 eset: átenged / blokkol / idegen commit /
+merge / bypass / attest / node nélkül fail-closed). A `doctor.sh` jelzi, ha a
+hook hiányzik vagy van bizonyíték nélküli, ki nem pusholt commit.
+
 **A WSL checkout MÁR TUD pusholni** (2026-09-01-én ellenőrizve, a v1.36.0
 upstream-szinkron során). Beállítás: `credential.helper=store` + repo-local
 noreply e-mail (`207359610+pohi99999@users.noreply.github.com`) — ez utóbbi
