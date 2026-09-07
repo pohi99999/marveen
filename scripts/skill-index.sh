@@ -9,6 +9,15 @@
 #                   <AGENT_DIR>/.claude/skills/.skill-index.md
 #                   (backward-compatible format for no-arg callers)
 
+# A leiras-rovidites python3-at hasznal (karakter-szintu vagas, lasd lentebb).
+# Ha hianyzik, ALLJUNK MEG hangosan: enelkul minden leiras "(nincs leiras)" lenne,
+# es az index csendben hasznalhatatlanna valna -- pontosan az a nema hiba, amit
+# 2026-09-07-en javitottunk.
+command -v python3 >/dev/null 2>&1 || {
+  echo "skill-index: python3 kell a leirasok karakter-szintu rovideteséhez, de nincs a PATH-on" >&2
+  exit 1
+}
+
 GLOBAL_SKILLS_DIR="$HOME/.claude/skills"
 
 if [ $# -ge 1 ]; then
@@ -74,7 +83,7 @@ index_skills_dir() {
     # "keress meglevo skillt szoveges keresessel" lepese csendben semmit nem talalt.
     # A python3 karakter-szinten vag (a telepito fuggosege, mindig van).
     desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" | tr -d '\r' \
-      | python3 -c 'import sys; s=sys.stdin.readline().rstrip("\n"); print(s[:120])' 2>/dev/null)
+      | python3 -c 'import sys; s=sys.stdin.readline().rstrip("\n"); print(s[:120])')
     if [ -z "$desc" ]; then
       desc="(nincs leírás)"
     fi
@@ -96,5 +105,37 @@ fi
 
 echo "" >> "$OUTPUT"
 echo "_${SKILL_COUNT} skill indexelve. Generálva: $(date '+%Y-%m-%d %H:%M')_" >> "$OUTPUT"
+
+# --- ONELLENORZES ---------------------------------------------------------
+# Pont azt a nema hibat fogja meg, ami 2026-09-07-en tortent: az index letrejott,
+# a szkript zoldet mondott, es kozben a grep BINARISKENT kezelte a fajlt (egyetlen
+# ervenytelen UTF-8 bajt miatt), tehat a heartbeat skill-keresese csendben semmit
+# nem talalt. A hibanak ITT kell elbuknia, ne harom retteggel arrebb.
+# python3-mal validalunk, nem iconv-val: a python3 a telepito fuggosege, az iconv nem.
+python3 - "$OUTPUT" <<'VALIDATE' || exit 1
+import sys
+p = sys.argv[1]
+raw = open(p, 'rb').read()
+try:
+    text = raw.decode('utf-8')
+except UnicodeDecodeError as e:
+    print(f"skill-index: az index NEM ervenyes UTF-8 ({e}) -- a grep binariskent kezelne, "
+          f"es a skill-kereses csendben semmit nem talalna", file=sys.stderr)
+    sys.exit(1)
+if b'\r' in raw:
+    print("skill-index: CR van az indexben (CRLF) -- valamelyik SKILL.md Windows-sorvegu", file=sys.stderr)
+    sys.exit(1)
+VALIDATE
+
+# Merged futasnal: ha vannak agens-skillek a lemezen, KELL agens sor is az indexben.
+# Enelkul egy csendben global-only index atmenne az UTF-8 ellenorzesen.
+if [ "$MERGED" = "1" ] && [ -d "$AGENT_SKILLS_DIR" ]; then
+  on_disk=$(find "$AGENT_SKILLS_DIR" -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l)
+  in_index=$(grep -c '| agent |' "$OUTPUT" 2>/dev/null || echo 0)
+  if [ "$on_disk" -gt 0 ] && [ "$in_index" -eq 0 ]; then
+    echo "skill-index: $on_disk agens-skill van a lemezen, de 0 kerult az indexbe" >&2
+    exit 1
+  fi
+fi
 
 echo "Skill index generated: $OUTPUT ($SKILL_COUNT skills)"
