@@ -36,6 +36,7 @@ export type ModelId =
   | 'claude-opus-5[1m]'
   | 'claude-opus-5'
   | 'claude-fable-5'
+  | 'claude-fable-5-1'
   | string
 
 export interface ModelSuggestion {
@@ -92,6 +93,10 @@ const HAIKU_KEYWORDS = [
 ]
 
 // Approximate input-token cost in USD per 1M tokens (mid-2026 pricing).
+// Looked up by PREFIX (see modelCostPerM), so a point-release inherits its
+// family's price and needs no entry of its own -- claude-fable-5-1 resolves via
+// the claude-fable-5 key. Adding a longer key here would be dead code anyway:
+// Object.entries preserves insertion order and the shorter prefix matches first.
 const MODEL_COST_PER_M: Record<string, number> = {
   'claude-opus-4-8': 15,
   'claude-opus-5': 15,
