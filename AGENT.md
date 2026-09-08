@@ -32,6 +32,23 @@ A csapatot **Brunella** (főnök / koordinátor) irányítja.
 checkoutban dolgoztál.** Ne hagyj commitolt, de nem pusholt állapotot
 "majd később" jelszóval — pontosan ez okozta a mai eltérést.
 
+**MELYIK AGENT.md-t olvasod? Mérd meg, ne feltételezd (2026-09-08).** Ez a
+szakasz két checkoutban létezik, és az egyik példány elavulhat. Aznap ez
+élesben meg is történt: a `CLAUDE.md` a Windows checkout AGENT.md-jére
+irányított, az a checkout viszont 79 committal le volt maradva, és a benne
+lévő szöveg azt állította, hogy a WSL-ből nem megy a push ("nincs credential
+helper"). A WSL példánya ekkor már tudta, hogy `credential.helper=store`-ral
+megy -- és élesben ment is. Vakon követve a felesleges (és elavult) checkoutba
+tereltük volna a munkát.
+
+```bash
+git -C <checkout> rev-list --count HEAD..<fork-remote>/main   # 0 = naprakész
+```
+
+Ha nem 0, ennek a fájlnak az ottani példánya is elavult lehet. Olvasd a másik
+checkoutból, vagy közvetlenül a friss ágról:
+`git show <fork-remote>/main:AGENT.md`.
+
 **Remote-nevek FIGYELEM — a két checkoutban FORDÍTOTT az elnevezés:**
 
 | | Windows checkout | WSL checkout |
