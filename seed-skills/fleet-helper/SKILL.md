@@ -64,6 +64,29 @@ only does the judgment + notification. Zero scheduler/runner changes. See
 `scripts/README.md` for the full rationale and two hard-won scheduling lessons
 (avoid cron collisions with other heartbeats; `skipIfBusy` trade-off).
 
+## Pitfalls (all measured, 2026-09-09 and 2026-09-10)
+
+- **The CLI verb is `msg`, not `send_message`.** The importable function is
+  `send_message(from, to, content)`, but the CLI dispatch table takes
+  `msg <from> <to> <content>`. Calling `fleet.py send_message ...` dies with
+  `unknown command: send_message`. Same shape for the others: `mem-save`,
+  `mem-search`, `daily-log`, `agents`, `kanban-due`, `kanban-stuck`,
+  `kanban-status`, `mdv2`.
+- **Prefer the helper over hand-rolled `curl` for WRITES, not just for long
+  messages.** Measured 2026-09-10: a `POST /api/memories` written by hand
+  returned `{"error":"Szerver hiba"}` and saved nothing, while the same content
+  through `fleet.py mem-save` returned `{"ok":true,"id":...}`. The night before,
+  two inter-agent messages were lost to shell quoting (a backtick started
+  command substitution; an inner `"` closed the variable early). Put the body in
+  a file and pass `"$(cat file)"`, or use the module.
+- **Read the output; do not infer success from a missing field.** `daily-log`
+  does not return an `id`, so a parser that prints `id=None` looks like a
+  failure and is not one. Verify by reading the resource back
+  (`GET /api/daily-log?limit=…`), not by trusting the return shape you expected.
+- **A green wrapper can carry zero work.** The memory backfill endpoint answers
+  `{"ok":true,"count":0}` while the embedding pipeline is down. Read `count`,
+  never `ok`.
+
 ## Safety
 - Token is read from `store/.dashboard-token` at call time; never printed or committed.
 - Kanban helpers are READ-ONLY; mutations stay in your own audited flows.
