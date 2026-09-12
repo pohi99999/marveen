@@ -51,6 +51,9 @@ vi.mock('../config.js', async (importOriginal) => ({
 }))
 
 vi.mock('../db.js', () => ({
+  // upstream v1.37.0: the router now counts newer same-sender messages for the
+  // freshness/supersession hint on every non-channel delivery.
+  countNewerMessagesFromSameSender: vi.fn(() => 0),
   getPendingMessages: (toAgent?: string) => {
     if (toAgent) return [] // per-agent query for the reconnect pre-pass
     return mockGetPendingMessages()
