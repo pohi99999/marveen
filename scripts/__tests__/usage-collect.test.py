@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
 import unittest
 import urllib.error
@@ -808,6 +809,26 @@ class TestClaudeTokenSources(unittest.TestCase):
         self._tmp.write("CLAUDE_CODE_OAUTH_TOKEN=env-tok\n")
         self._tmp.close()
         self.addCleanup(os.unlink, self._tmp.name)
+        # Isolate HOME: _read_claude_token opens ~/.claude/.credentials.json
+        # FIRST. On a Linux dev box that file exists and holds the live session
+        # token, so a test that stubs os.path.exists -> True (as
+        # test_keychain_beats_env_file does) read the REAL token and printed it
+        # in the assertion message (measured 2026-09-12). Every "~" lookup in
+        # this class now resolves under an empty temp dir; a test that needs
+        # a credentials file patches expanduser itself (inner patch wins).
+        self._home = tempfile.mkdtemp(prefix="usage-collect-home-")
+        self.addCleanup(shutil.rmtree, self._home, True)
+        real_expanduser = os.path.expanduser
+        fake_home = self._home
+
+        def _isolated_expanduser(path):
+            if path == "~" or path.startswith("~/"):
+                return os.path.join(fake_home, path[2:]) if len(path) > 1 else fake_home
+            return real_expanduser(path)
+
+        home_patch = patch.object(uc.os.path, "expanduser", side_effect=_isolated_expanduser)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
 
     def _security_ok(self, stdout=None):
         return MagicMock(returncode=0, stdout=stdout if stdout is not None else self.KEYCHAIN_PAYLOAD)
