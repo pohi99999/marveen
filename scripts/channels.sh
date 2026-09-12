@@ -151,12 +151,40 @@ resolve_main_model() {
   # WITHOUT this fallback they would silently keep the CLI default forever. We do
   # NOT write the value into a per-install file -- that would pin an inherited
   # default and cut those machines off from the NEXT bump. The shipped TS
-  # constant stays the single source of truth; node reads it (node is already a
-  # hard dependency on this launch path, and the read is ~one-time per restart).
-  # The .env override above still wins, so a hand-set model is untouched.
-  if command -v node >/dev/null 2>&1 && [ -f "$INSTALL_DIR/dist/config-registry.js" ]; then
-    node -e 'try { process.stdout.write(String(require(process.argv[1]).DISTRIBUTION_DEFAULT_AGENT_MODEL || "")) } catch (e) {}' "$INSTALL_DIR/dist/config-registry.js" 2>/dev/null
+  # constant stays the single source of truth; node reads it (~one-time per
+  # restart). The .env override above still wins, so a hand-set model is untouched.
+  #
+  # EVERY failure here is NAMED to store/channels-failures.log, never a silent
+  # empty (Marveen review, the jq-gap's sibling): a missing node, a missing/stale
+  # dist (channels can start before the update rebuilds it), or an empty read all
+  # get a log line so the operator sees WHY the model is unset instead of it
+  # looking like nothing was configured.
+  local _fail_log="$INSTALL_DIR/store/channels-failures.log"
+  # Node may not be on the (narrow launchd) PATH at this point; try the standard
+  # install locations too -- the same ones line ~287 adds to PATH -- so this does
+  # not depend on the launcher having widened PATH before this runs.
+  local _node
+  _node="$(command -v node 2>/dev/null || true)"
+  if [ -z "$_node" ]; then
+    for _c in /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.bun/bin/node" "$HOME/.local/bin/node" /home/linuxbrew/.linuxbrew/bin/node; do
+      [ -x "$_c" ] && { _node="$_c"; break; }
+    done
   fi
+  if [ -z "$_node" ]; then
+    echo "resolve_main_model: node not found on PATH or standard locations; main-agent model left UNSET (would run the CLI default)" >>"$_fail_log" 2>/dev/null || true
+    return 0
+  fi
+  if [ ! -f "$INSTALL_DIR/dist/config-registry.js" ]; then
+    echo "resolve_main_model: dist/config-registry.js missing (build not present yet?); main-agent model left UNSET" >>"$_fail_log" 2>/dev/null || true
+    return 0
+  fi
+  local _def
+  _def="$("$_node" -e 'try { process.stdout.write(String(require(process.argv[1]).DISTRIBUTION_DEFAULT_AGENT_MODEL || "")) } catch (e) { process.exit(3) }' "$INSTALL_DIR/dist/config-registry.js" 2>/dev/null)"
+  if [ -z "$_def" ]; then
+    echo "resolve_main_model: read of DISTRIBUTION_DEFAULT_AGENT_MODEL was empty (stale or broken dist/config-registry.js); main-agent model left UNSET" >>"$_fail_log" 2>/dev/null || true
+    return 0
+  fi
+  printf '%s' "$_def"
 }
 
 # Test seam: print the resolved model and exit before any side effect.
@@ -366,11 +394,38 @@ export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 # AVX-less x86 host: the install pinned a Node-based claude (cli.js entrypoint,
 # see install-linux.sh CLAUDE_PIN) because the Bun standalone binary SIGILLs
 # without AVX. The auto-updater would swap the pin for the latest Bun binary on
-# first run, killing every session -- disable it here so all agent sessions
-# inherit the guard via tmux. No-op on AVX-capable and ARM hosts.
+# first run, killing every session. Recorded here because it also decides WHICH
+# package spec the self-heal below reinstalls: on such a host "latest" is the
+# one thing we must never install.
+CLAUDE_PIN="2.1.110"   # keep in sync with install-linux.sh / scripts/fix-avx.sh
+CLAUDE_PKG="@anthropic-ai/claude-code"
+AVX_LESS=0
 if grep -qE '^flags[[:space:]]*:' /proc/cpuinfo 2>/dev/null && ! grep -qiw avx /proc/cpuinfo 2>/dev/null; then
-  export DISABLE_AUTOUPDATER=1
+  AVX_LESS=1
+  CLAUDE_PKG="@anthropic-ai/claude-code@${CLAUDE_PIN}"
 fi
+
+# Per-session auto-updater OFF on every host, not just the AVX-less one.
+#
+# Each agent session (channels + every worker + every sub-agent) runs its own
+# auto-updater against ONE shared global npm prefix. When two of them decide to
+# update in the same second they race, and npm has no lock across processes:
+# install A rm -rf's .../node_modules/@anthropic-ai/claude-code while install
+# B's postinstall (`node install.cjs`) is cwd'd inside it -> "Error: ENOENT ...
+# uv_cwd", and B then dies on "EEXIST: symlink ... /opt/homebrew/bin/claude".
+# Both abort, and what is left behind is no package dir AND no claude binary.
+#
+# Observed 2026-08-23 10:20:35 on the Mac mini: two concurrent installs 7ms
+# apart wiped claude entirely. The machine was powered off five minutes later,
+# so nothing re-ran the updater, and at the next boot channels.sh could only
+# log "ERROR: claude not found on PATH" into a 30-second KeepAlive loop. The
+# bot was silently, permanently down until a manual `npm install -g` cleared
+# it -- the operator noticed only because the morning messages went nowhere.
+#
+# Updating now happens in exactly ONE place: claude_ensure() below. That is
+# serialized by construction (channels.sh is the single boot entry point, and
+# it runs before the tmux server exists), so the race cannot re-form.
+export DISABLE_AUTOUPDATER=1
 
 # Disable Claude Code's "Prompt Suggestions" (the grayed-out/DIM suggested command
 # shown in the input box, picked from git history / conversation). For headless
@@ -380,6 +435,42 @@ fi
 # source removes the phantom entirely. Inherited by every sub-agent via the tmux
 # global env set below.
 export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+
+# The single, serialized Claude Code install/update point (see the
+# DISABLE_AUTOUPDATER block above).
+#
+# Two jobs, deliberately asymmetric:
+#   * claude MISSING -> reinstall synchronously and block on it. There is
+#     nothing to run otherwise, so waiting costs nothing and this is the
+#     self-heal for an update a power-off or a race left half-finished.
+#   * claude PRESENT -> at most one update per 24h (stamp file), in the
+#     BACKGROUND. A foreground `npm install -g` would hold the Telegram
+#     channel offline for the 20-40s it takes, on every boot.
+# Failures are logged, never fatal: a stale claude still works, and a missing
+# one is retried by the next KeepAlive restart 30 seconds later.
+CLAUDE_UPDATE_STAMP="$INSTALL_DIR/store/.claude-update-stamp"
+claude_install() {
+  local why="$1"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "$(date '+%F %T') claude install SKIPPED ($why): npm not on PATH" >&2
+    return 1
+  fi
+  echo "$(date '+%F %T') claude install START ($why): $CLAUDE_PKG" >&2
+  if npm install -g "$CLAUDE_PKG" >/dev/null 2>&1; then
+    : > "$CLAUDE_UPDATE_STAMP"
+    echo "$(date '+%F %T') claude install OK ($why)" >&2
+  else
+    echo "$(date '+%F %T') claude install FAILED ($why)" >&2
+  fi
+}
+
+if ! command -v claude >/dev/null 2>&1; then
+  claude_install "binary missing -- self-heal"
+elif [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_UPDATE_STAMP" -mtime -1 2>/dev/null)" ]; then
+  # AVX-less hosts are excluded on purpose: their claude is pinned, and
+  # "keep it current" is exactly what breaks them.
+  claude_install "daily check" &
+fi
 
 CLAUDE="$(command -v claude)"
 TMUX="$(command -v tmux)"
@@ -650,6 +741,12 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
 fi
 # Propagate the prompt-suggestion disable to every sub-agent tmux session.
 $TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null || true
+# Same for the auto-updater kill switch. A plain `export` above only reaches
+# sessions that inherit THIS shell, i.e. only when channels.sh happened to
+# create the tmux server first; the dashboard's worker sessions often win that
+# race. -g makes launch order irrelevant, which matters here because it takes
+# exactly two self-updating sessions to wipe the shared global install.
+$TMUX set-environment -g DISABLE_AUTOUPDATER 1 2>/dev/null || true
 
 # Hybrid channel-coordinator model: the native plugin stays the PRIMARY inbound
 # path (it always polls getUpdates here -- never outbound-only). The standalone
@@ -777,7 +874,7 @@ unset _eperm_restarted
 # longer uses Remote Control.)
 _bot_name="${BOT_NAME:-${MAIN_AGENT_ID:-marveen}}"
 sleep 1
-$TMUX send-keys -t "$SESSION" "/name ${_bot_name}" Enter
+$TMUX send-keys -t "$SESSION" "/rename ${_bot_name}" Enter
 unset _bot_name
 
 # Reset the keep-alive watchdog baseline so a session that was just restarted
@@ -1077,6 +1174,13 @@ respawn_log() {
   unset _lines _trimmed
 }
 
+# Watchdog-sajat pane_pid, egyszer felderitve a session eletciklusara (a
+# tmux pane pid-je nem valtozik amig a pane el, es a `while has-session` fent
+# amugy is kileptet ha a session eltunik). A ${SESSION}-hoz tartozo claude
+# process pid-je -- ugyanaz a lekerdezes mint a post-init unlock Check 1-e
+# feljebb.
+_watchdog_claude_pid="$($TMUX list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)"
+
 # Várakozás amíg a session él
 while $TMUX has-session -t "$SESSION" 2>/dev/null; do
   sleep 5
@@ -1091,13 +1195,23 @@ while $TMUX has-session -t "$SESSION" 2>/dev/null; do
   fi
   unset _bot_pid
   # Fallback for plugin builds that never write bot.pid (e.g. telegram@0.0.1):
-  # treat a running plugin poller as alive. The poller is a bun process whose
-  # env CLAUDE_PLUGIN_ROOT points at the <provider> plugin dir. `ps eww -e`
-  # surfaces each process environment on macOS BSD ps (same technique the
-  # orphan-reaper above uses). Without this the watchdog false-restarts every
-  # ~10 min on plugin versions that don't emit a bot.pid.
+  # treat a running plugin poller as alive. The poller is a bun process, and
+  # we check it as a CHILD OF THIS SESSION'S OWN claude pane_pid (same
+  # process-tree check as the post-init unlock Check 1 above), NOT a
+  # host-wide scan.
+  #
+  # FIXED 2026-08-19 (kanban c0390130, found by pedro during a kanban-audit
+  # after his own channel sat silently dead from 07:40 to 08:30): the
+  # previous fallback used a host-global `ps eww -e | grep CLAUDE_PLUGIN_ROOT`,
+  # which matches ANY agent's telegram plugin process anywhere on the machine.
+  # On a multi-agent fleet host (14 telegram plugin processes running under
+  # other agents at the time) that grep ALWAYS found a hit, so _plugin_alive
+  # was always true even though THIS agent's own plugin was dead -- the exact
+  # failure the watchdog exists to catch, silently defeated. Single-agent
+  # installs never saw this because there was only ever one plugin process to
+  # find, and it happened to be the right one.
   if [ "$_plugin_alive" != "true" ]; then
-    if /bin/ps eww -e 2>/dev/null | grep -qE "CLAUDE_PLUGIN_ROOT=[^ ]*/${CHANNEL_PROVIDER}(/|@| |$)"; then
+    if [ -n "$_watchdog_claude_pid" ] && /usr/bin/pgrep -P "$_watchdog_claude_pid" bun >/dev/null 2>&1; then
       _plugin_alive=true
     fi
   fi

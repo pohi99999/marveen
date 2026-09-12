@@ -4,8 +4,10 @@ import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
 import { makeLazyBinResolver } from '../platform.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
-import { listAgentNames, readAgentClaudeConfigDir } from './agent-config.js'
-import { agentSessionName, capturePane, sendPromptToSession } from './agent-process.js'
+import { listAgentNames } from './agent-config.js'
+import { resolveAgentConfigDirForRead } from './claude-plans.js'
+import { agentSessionName, capturePane } from './agent-process.js'
+import { sendSystemDirective } from './system-directive.js'
 import { detectPaneState } from '../pane-state.js'
 import { detectsUsageLimit } from '../model-fallback.js'
 import { readContextTokensFromProjectDir, projectsDirFor } from './active-model.js'
@@ -15,7 +17,7 @@ import { getHardGuardPhase } from './context-guard-runner.js'
 import { readGateConfig, readGateRunState, writeGateRunState } from './context-restart-gate-store.js'
 import {
   getDispatchedPendingStats,
-  hasOpenInboundQuestion,
+  openInboundQuestionMessageId,
   createAgentMessage,
 } from '../db.js'
 import {
@@ -33,8 +35,9 @@ import {
 // This complements the hard context-guard (context-guard-runner.ts), which
 // acts at 90%/97% of the context window via hard process restarts. The soft
 // gate acts much earlier (default 400k tokens) via /clear -- the SessionStart
-// hooks (ledger-replay, taskstate-replay, daily-log-digest) then inject a rich
-// context snapshot into the fresh session automatically.
+// hooks (clear-replay, taskstate-replay, and ledger-replay for the agents whose
+// channel turns are logged) then inject a context snapshot into the fresh
+// session automatically.
 //
 // The runner starts 3 minutes after dashboard boot (offset from context-guard's
 // 4.5 min so the two sweeps do not fire simultaneously) and then sweeps on each
@@ -53,8 +56,8 @@ const INITIAL_DELAY_MS = 3 * 60_000   // 3 min
 export function gateWakePrompt(): string {
   return (
     '[CONTEXT-RESTART-GATE] Friss kontextussal indultal, mert a kapu ujrainditott (/clear). ' +
-    'A visszatoltott blokkokban ott a beszelgetes vege, a napi naplo kivonata es -- ha volt futo munkad -- ' +
-    'a TASK-FOLYTATAS a mar kesz lepesekkel es a kovetkezo akcioval. ' +
+    'A visszatoltott blokkokban ott a torolt szal vege (utolso keresek, utolso valaszod, az atirat utja) ' +
+    'es -- ha volt futo munkad -- a TASK-FOLYTATAS a mar kesz lepesekkel es a kovetkezo akcioval. ' +
     'Olvasd be oket, ellenorizd a kanban tabladat es a hot memoriaidat, es FOLYTASD onnan ahol abbamaradt. ' +
     'Ne kezdd elolrol ami mar kesz, es ne delegald ujra amit mar atadtal. ' +
     'Ha nem volt futo munkad, az is teljes erteku allapot -- olyankor ne talalj ki magadnak feladatot. ' +
@@ -115,6 +118,42 @@ export function isInfrastructureChild(childAgeS: number, claudeAgeS: number): bo
   return false
 }
 
+/**
+ * The last inbound message the ledger drain surfaced for this agent, or null.
+ * The drain (scripts/hooks/ledger-live-drain.py) writes the id into
+ * store/.ledger-drain-<agent> when it puts a lost inbound in front of the
+ * agent; the sanitisation here mirrors its _statefile().
+ */
+function drainSurfacedMessageId(ledgerAgentId: string): string | null {
+  const safe = String(ledgerAgentId).replace(/[^A-Za-z0-9_-]/g, '_')
+  try {
+    const raw = readFileSync(join(PROJECT_ROOT, 'store', `.ledger-drain-${safe}`), 'utf-8').trim()
+    return raw || null
+  } catch { return null }
+}
+
+/**
+ * Does an unanswered inbound still justify holding the gate shut?
+ *
+ * Only until the agent has actually been SHOWN it. Before that, a /clear could
+ * lose a question nobody has read; after it, the agent knows and the decision
+ * to answer is its own -- and some messages rightly get no answer. Laszlo's
+ * "ok" on 2026-09-04 22:24 held the gate for eight hours at 630% of the
+ * threshold, and the only way out would have been to wake him at midnight with
+ * a reply nobody needed (LEDGERACK905, his call: block until surfaced, no
+ * arbitrary timer).
+ *
+ * Pure so the rule is testable without a database or a statefile.
+ */
+export function openQuestionBlocks(
+  openMessageId: string | null,
+  surfacedMessageId: string | null,
+): boolean {
+  if (openMessageId === null) return false      // nothing open
+  if (openMessageId === '') return true         // open, but unidentifiable: hold
+  return openMessageId !== surfacedMessageId    // held until the drain showed it
+}
+
 function sessionFor(name: string): string {
   return name === MAIN_AGENT_ID ? MAIN_CHANNELS_SESSION : agentSessionName(name)
 }
@@ -134,7 +173,12 @@ function workingDirFor(name: string): string {
  * the symptom is a gate that never opens and never says why.
  */
 function configDirFor(name: string): string | undefined {
-  return name === MAIN_AGENT_ID ? undefined : (readAgentClaudeConfigDir(name) ?? undefined)
+  // resolveAgentConfigDirForRead, not readAgentClaudeConfigDir: the launcher
+  // auto-provisions agents/<name>/.claude-config when no field is set, and
+  // reading the host default returns a stale transcript instead of nothing --
+  // which is worse than the null this comment warns about, because the gate
+  // then believes it can see.
+  return name === MAIN_AGENT_ID ? undefined : (resolveAgentConfigDirForRead(name) ?? undefined)
 }
 
 function agentIdForLedger(name: string): string {
@@ -557,7 +601,11 @@ async function deliverPendingWake(name: string, session: string, nowMs: number):
   }
 
   try {
-    const outcome = await sendPromptToSession(session, gateWakePrompt(), null, {
+    // GUARDHITELES903: anchored in agent_messages so the fresh session can
+    // authenticate the "continue from the restored blocks" instruction. Same
+    // outcome contract as sendPromptToSession; a deferred (busy) attempt
+    // marks its anchor row failed and the retry creates a fresh one.
+    const outcome = await sendSystemDirective(name, session, gateWakePrompt(), null, {
       waitForIdle: true, onBusyTimeout: 'abort',
     })
     if (outcome === 'sent') {
@@ -599,7 +647,11 @@ export function gatherGateInputs(name: string, nowMs: number): GateSnapshot {
   })()
 
   const openQuestion = (() => {
-    try { return hasOpenInboundQuestion(agentIdForLedger(name)) }
+    try {
+      const ledgerId = agentIdForLedger(name)
+      return openQuestionBlocks(openInboundQuestionMessageId(ledgerId),
+                                drainSurfacedMessageId(ledgerId))
+    }
     catch { return false }
   })()
 

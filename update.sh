@@ -327,15 +327,26 @@ OLD_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 # of NEW, so reset --hard $OLD_VERSION_FULL reverts without a force-push.
 OLD_VERSION_FULL=$(git rev-parse HEAD 2>/dev/null || echo "")
 
-# Ahead-detect: local commits not on upstream make ff-only refuse. Report it
-# actionably instead of dying silently under set -e (the dominant failure).
+# Divergence-detect: ff-only refuses only when the two sides have BOTH moved.
+# Being merely AHEAD is not a divergence -- it is the normal state of an install
+# that also develops locally, and there is nothing to fast-forward TO, so the
+# pull below is a no-op ("Already up to date") rather than a failure. Refusing
+# on ahead alone locked such an install out of its own updater: the operator's
+# checkout sat 53 commits ahead / 0 behind on 2026-08-30, having just merged
+# upstream, and the updater still would not run -- no build, no migration, no
+# restart, on a tree that was in fact current. Only ahead AND behind together
+# mean the histories have parted and a human has to reconcile them.
 RESULT_PHASE="pull"
 AHEAD=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
-if [ "${AHEAD:-0}" -gt 0 ]; then
-  RESULT_MSG="A helyi checkout ${AHEAD} committal elore van az upstreamhez kepest; a fast-forward frissites nem lehetseges. Nezd meg: git log @{u}..HEAD"
-  echo -e "${RED}HIBA:${NC} a helyi checkout ${AHEAD} committal elore van az upstreamhez kepest; fast-forward nem lehetseges. Nezd: git log @{u}..HEAD"
+BEHIND=$(git rev-list --count 'HEAD..@{u}' 2>/dev/null || echo 0)
+if [ "${AHEAD:-0}" -gt 0 ] && [ "${BEHIND:-0}" -gt 0 ]; then
+  RESULT_MSG="A helyi checkout ${AHEAD} committal elore es ${BEHIND} committal hatra van az upstreamhez kepest (szetvalt elozmeny); a fast-forward frissites nem lehetseges. Nezd meg: git log @{u}..HEAD"
+  echo -e "${RED}HIBA:${NC} a helyi checkout ${AHEAD} committal elore es ${BEHIND} committal hatra van (szetvalt elozmeny); fast-forward nem lehetseges. Nezd: git log @{u}..HEAD"
   restore_stash_before_exit
   exit 5
+fi
+if [ "${AHEAD:-0}" -gt 0 ]; then
+  echo -e "  ${ORANGE}Megjegyzes:${NC} a helyi checkout ${AHEAD} committal elore van, lemaradas nincs -- a letoltes nem hoz ujat, a frissites folytatodik."
 fi
 
 # Pull latest, NON-fatal under set -e so a diverged/network failure is reported.
@@ -647,7 +658,12 @@ fi
 if git diff "$OLD_VERSION" "$NEW_VERSION" --name-only | grep -qE "^package(-lock)?\.json$"; then
   echo -e "  Fuggosegek frissitese (lock-strict)..."
   RESULT_PHASE="npm-ci"
-  if ! retry 3 3 npm ci --silent; then
+  # --include=dev is load-bearing (AUTOUPDNODEENV905): with NODE_ENV=production
+  # in the caller's environment npm defaults to omit=dev, which prunes the
+  # TypeScript compiler and makes the build below fail -> rollback -> the same
+  # failure next run, forever (the rollback also reverts the freshly pulled
+  # update.sh, so a fix can never arrive through this path on its own).
+  if ! retry 3 3 npm ci --silent --include=dev; then
     echo -e "  HIBA: npm ci sikertelen. Valoszinuleg a package-lock.json nincs szinkronban."
     echo -e "  Reszletekert futtasd: npm ci"
     exit 1
@@ -686,6 +702,11 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
     echo -e "${RED}HIBA:${NC} build sikertelen. Visszaallitas a korabbi verziora (${OLD_VERSION})..."
     if [ -n "$OLD_VERSION_FULL" ]; then
       git reset --hard "$OLD_VERSION_FULL" >/dev/null 2>&1 || true
+      # Restore the dependency tree of the OLD version before rebuilding it: the
+      # failed `npm ci` above may have pruned dev deps (NODE_ENV=production),
+      # and without the compiler this rollback build would also fail silently,
+      # leaving git=OLD + node_modules=pruned (AUTOUPDNODEENV905 finding A).
+      npm ci --silent --include=dev 2>/dev/null || true
       npm rebuild better-sqlite3 --build-from-source --silent 2>/dev/null || true
       npm run build --silent 2>/dev/null || true
       [ -d "$INSTALL_DIR/dist" ] && echo "$OLD_VERSION_FULL" > "$BUILT_COMMIT_FILE"
@@ -1076,7 +1097,10 @@ if _health; then _finish success restart 0 ""; fi
 # restart that, so the box ends on a WORKING old version.
 if [ -n "$OLD_FULL" ]; then
   git reset --hard "$OLD_FULL" >/dev/null 2>&1 || true
-  npm ci --silent 2>/dev/null || true
+  # --include=dev: same reason as the main npm ci (AUTOUPDNODEENV905) -- under
+  # NODE_ENV=production a plain ci prunes the compiler and the rebuild below
+  # dies silently, re-creating the pruned tree this rollback tries to escape.
+  npm ci --silent --include=dev 2>/dev/null || true
   npm rebuild better-sqlite3 --build-from-source --silent 2>/dev/null || true
   npm run build --silent 2>/dev/null || true
   [ -d "$INSTALL_DIR/dist" ] && echo "$OLD_FULL" > "$BUILT"

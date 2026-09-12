@@ -267,6 +267,15 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     requiresRestart: true,
   },
   {
+    key: 'AGENT_API_ORIGIN',
+    type: 'string',
+    default: '',
+    description: 'Az a cím, amin az ÜGYNÖKÖK érik el a dashboard API-ját onnan, ahol futnak (pl. http://localhost:3420 egy gépes telepítésnél, vagy egy belső szolgáltatás-név k8s-en). Üres = a régi viselkedés: DASHBOARD_PUBLIC_URL, annak hiányában localhost. Ez NEM a böngészőnek szóló publikus cím.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
     key: 'OLLAMA_URL',
     type: 'string',
     default: 'http://localhost:11434',
@@ -274,6 +283,16 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     module: 'system',
     secret: false,
     requiresRestart: true,
+  },
+  {
+    key: 'TELEGRAM_PROGRESS_MODE',
+    type: 'string',
+    default: 'indicator',
+    valueSet: ['silent', 'indicator', 'verbose'],
+    description: 'Mennyit lásson a tulajdonos Telegramon a munkából. silent = semmi; indicator = egy eltűnő "gondolkodom" üzenet élő token-számlálóval, ami a kör végén törlődik; verbose = ugyanez, plusz a gondolatmenet megmaradó üzenetekben. Ez a flotta alapértelmezése -- egy ügynök felülírhatja a store/progress-config.json-ban.',
+    module: 'channels',
+    secret: false,
+    requiresRestart: false,
   },
   {
     key: 'DASHBOARD_LANG',

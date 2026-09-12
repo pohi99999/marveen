@@ -133,3 +133,8 @@ transcripts/
 .agents/*
 !.agents/product-marketing.md.example
 .worktrees/
+
+# Upload staging area written into the install directory: per-install state,
+# not source. (The UI language marker .lang this commit also added has since
+# landed on develop; kept there, not duplicated here.)
+.uploads/
