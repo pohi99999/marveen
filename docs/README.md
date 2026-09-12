@@ -34,11 +34,11 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **44**, egyedi `/api/...` útvonal-literál bennük: **128**
-- Claude Code hookok (`.claude/settings.json`): **5** esemény, **11** bejegyzés, **9** szkript a `scripts/hooks/` alatt
+- Route-modulok (`src/web/routes/*.ts`): **47**, egyedi `/api/...` útvonal-literál bennük: **134**
+- Claude Code hookok (`.claude/settings.json`): **5** esemény, **15** bejegyzés, **10** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **4** -- dream-engine, ledger-live-drain, memoria-heartbeat, reggeli-napindito
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **7** -- channel-image, git-guard, hook-proof, prod-tree-guard, secret-gate, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **38**, ebből a fenti táblázat linkel **16**
+- Dokumentációs lapok a `docs/` alatt: **41**, ebből a fenti táblázat linkel **16**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
@@ -55,14 +55,17 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [inter-agent-send-reliability](inter-agent-send-reliability.md)
 - [kutatas](kutatas.md)
 - [mobil-dashboard](mobil-dashboard.md)
+- [munkamodszer](munkamodszer.md)
 - [naplo-audit](naplo-audit.md)
 - [onboarding-uj-asszisztens](onboarding-uj-asszisztens.md)
 - [outgoing-copy-gate](outgoing-copy-gate.md)
 - [scheduled-tasks](scheduled-tasks.md)
 - [security-hardening](security-hardening.md)
+- [telegram-live-progress](telegram-live-progress.md)
 - [telegram-progress-indicator](telegram-progress-indicator.md)
 - [telegram-reply-enforcement-2026-08-02](telegram-reply-enforcement-2026-08-02.md)
 - [tippek-trukkok](tippek-trukkok.md)
 - [token-usage](token-usage.md)
+- [upstream-ledger](upstream-ledger.md)
 
 <!-- DOC_STATS_END -->
