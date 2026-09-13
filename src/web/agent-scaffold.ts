@@ -475,7 +475,12 @@ export function ensureAgentHooks(
 const _stalenessScript = join(PROJECT_ROOT, 'scripts', 'hooks', 'staleness-guard.py')
 const STALENESS_HOOK_CMD = `bash -c '[ -f ${_stalenessScript} ] && exec python3 ${_stalenessScript}; exit 0'`
 
-export function ensureAgentStalenessHook(name: string): boolean {
+export function ensureAgentStalenessHook(
+  name: string,
+  // Test seam only, same as ensureAgentHooks: overrides the two settings
+  // scopes the cross-scope guard compares.
+  scopes?: { user: string; project: string },
+): boolean {
   // agentSettingsPath() maps MAIN_AGENT_ID to ~/.claude/settings.json; using
   // agentDir() directly here would create a spurious agents/<main> dir and make
   // the main agent show up as a phantom "down" agent on the dashboard.
@@ -491,6 +496,12 @@ export function ensureAgentStalenessHook(name: string): boolean {
   // Idempotency: already wired if any command entry references the guard script.
   const already = JSON.stringify(ups).includes('staleness-guard.py')
   if (already) return false
+  // XSCOPE913: the SHARED user scope must not gain a second copy of a script
+  // the project scope already runs. ensureAgentHooks has consulted this guard
+  // since 2026-09-04; this writer did not, so the main agent's user-scope
+  // wrapper came back on EVERY dashboard start (measured 2026-09-13 23:18:20,
+  // one second after a restart) and doctor.sh went red again each time.
+  if (hookScriptAlreadyEffectiveInOtherScope(settingsPath, 'UserPromptSubmit', STALENESS_HOOK_CMD, scopes)) return false
   // Registration guard: don't write a /tmp or non-existent path into shared settings.
   if (isUnsafeHookCommand(STALENESS_HOOK_CMD)) return false
   ups.push({ hooks: [{ type: 'command', command: STALENESS_HOOK_CMD, timeout: 10 }] })
@@ -517,7 +528,12 @@ export function ensureAgentStalenessHook(name: string): boolean {
 const _provenanceScript = join(PROJECT_ROOT, 'scripts', 'hooks', 'provenance-gate.py')
 const PROVENANCE_HOOK_CMD = `bash -c '[ -f ${_provenanceScript} ] && exec python3 ${_provenanceScript}; exit 0'`
 
-export function ensureAgentProvenanceHook(name: string): boolean {
+export function ensureAgentProvenanceHook(
+  name: string,
+  // Test seam only, same as ensureAgentHooks: overrides the two settings
+  // scopes the cross-scope guard compares.
+  scopes?: { user: string; project: string },
+): boolean {
   const settingsPath = agentSettingsPath(name)
   let settings: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
@@ -530,6 +546,12 @@ export function ensureAgentProvenanceHook(name: string): boolean {
   // Idempotency: already wired if any command entry references the gate script.
   const already = JSON.stringify(ups).includes('provenance-gate.py')
   if (already) return false
+  // XSCOPE913: the SHARED user scope must not gain a second copy of a script
+  // the project scope already runs. ensureAgentHooks has consulted this guard
+  // since 2026-09-04; this writer did not, so the main agent's user-scope
+  // wrapper came back on EVERY dashboard start (measured 2026-09-13 23:18:20,
+  // one second after a restart) and doctor.sh went red again each time.
+  if (hookScriptAlreadyEffectiveInOtherScope(settingsPath, 'UserPromptSubmit', PROVENANCE_HOOK_CMD, scopes)) return false
   // Registration guard: don't write a /tmp or non-existent path into shared settings.
   if (isUnsafeHookCommand(PROVENANCE_HOOK_CMD)) return false
   ups.push({ hooks: [{ type: 'command', command: PROVENANCE_HOOK_CMD, timeout: 10 }] })
