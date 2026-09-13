@@ -37,7 +37,7 @@ import {
   SCHEDULED_TASKS_DIR,
   type ScheduledTask,
 } from './scheduled-tasks-io.js'
-import { listAgentNames, readFileOr, readAgentRemoteHost, agentDir } from './agent-config.js'
+import { listAgentNames, readFileOr, readAgentRemoteHost, agentDir, readAgentEngine } from './agent-config.js'
 import { resolveAgentConfigDirForRead } from './claude-plans.js'
 import { readTranscriptMtimeFromProjectDir } from './active-model.js'
 import { channelStateDir, getProvider, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
@@ -110,6 +110,56 @@ export const TASK_FIRE_GRACE_MS = 30_000
 // task that legitimately needs longer sets stuckAfterMinutes.
 export const TASK_FIRE_TIMEOUT_MS = 2_700_000
 const TASK_FIRE_MAX_TRACK_MS = 6 * 60 * 60_000
+
+// LOSTLOOP913 -- the fire->lost re-injection loop (measured 2026-09-11..12).
+// napi-b2b-outreach (cron `0 6 * * 1-5`, agent agy-test on the antigravity
+// engine) was recorded 563x 'fired' + 563x 'lost' on Friday and 178x + 178x on
+// SATURDAY: fired, 'lost' 30s later, re-queued, re-fired ~6 min later, all day.
+// The agent had in fact acted on the first injection (10 drafts in
+// outreach_events, the normal daily volume); every later verdict was false.
+// Three gaps combined into the loop:
+//   1. the 'lost' verdict needs turn evidence (pane 'busy' via the Claude Code
+//      footer, or the Claude transcript mtime) -- a copilot/antigravity pane
+//      yields neither, so on those engines idle-without-evidence is the ONLY
+//      thing the watchdog can ever see, and 'lost' is structurally certain;
+//   2. a 'lost' re-queue had no ceiling -- the retry row is deleted on the
+//      next successful fire, so attempt_count never accumulated;
+//   3. the retry sweep never asked whether the cron still applies today, so a
+//      weekday-only task kept re-firing through the weekend.
+// Each gap gets one pure helper below; the runner wires them in.
+export const LOST_REINJECT_MAX = 3
+
+// Gap 1: only the Claude engine exposes the two evidence channels the 'lost'
+// verdict is built on. On any other engine the verdict is blind, so the
+// watchdog must not re-queue on it -- it records the run as 'unverified' and
+// lets go, which is the pre-2026-08-23 behaviour for exactly the engines
+// where that incident's fix cannot see anything.
+export function lostDetectionSupported(engine: 'claude' | 'copilot' | 'antigravity'): boolean {
+  return engine === 'claude'
+}
+
+// Gap 2: `lostCount` is the number of 'lost' verdicts seen for this task@agent
+// since its last observed turn (or its last cron-path fire). The count lives
+// in memory (lostReinjectCounts) -- a dashboard restart resets it, which is
+// acceptable: a restart also replaces the pane, i.e. the situation the count
+// was measuring.
+export function decideLostRequeue(lostCount: number, max: number = LOST_REINJECT_MAX): 'requeue' | 'giveup' {
+  return lostCount >= max ? 'giveup' : 'requeue'
+}
+
+// Gap 3: does the cron have an occurrence on the CURRENT local calendar day
+// (in the scheduler tz)? Used only for re-queues that came from a 'lost'
+// verdict: those belong to a specific occurrence, and once the day has rolled
+// over that occurrence is history -- the next real occurrence will fire on
+// its own. Busy-skip retries keep the never-abandon policy untouched.
+export function cronOccursOnLocalDay(cron: string, nowMs: number, tz: string): boolean {
+  const prev = cronPrevOccurrence(cron, nowMs - 24 * 60 * 60_000, nowMs, tz)
+  if (prev == null) return false
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+  return fmt.format(new Date(prev)) === fmt.format(new Date(nowMs))
+}
+
+const lostReinjectCounts = new Map<string, number>()
 
 export interface TaskInflightEntry {
   taskName: string
@@ -1472,6 +1522,8 @@ export function startScheduleRunner(): NodeJS.Timeout {
           const mtime = readTranscriptMtimeFromProjectDir(entry.workingDir, entry.configDir)
           if (mtime != null && mtime > entry.injectedAt) entry.sawTurn = true
         }
+        // Positive turn evidence ends any lost-streak for this task@agent.
+        if (entry.sawTurn) lostReinjectCounts.delete(key)
       }
       const decision = decideTaskTimeout(entry, state, now, {
         graceMs: TASK_FIRE_GRACE_MS,
@@ -1488,6 +1540,41 @@ export function startScheduleRunner(): NodeJS.Timeout {
         sendTaskTimeoutAlert(entry, now - entry.injectedAt)
         entry.ownerAlerted = true
       } else if (decision === 'lost') {
+        // LOSTLOOP913 gap 1: on a non-Claude engine the verdict is blind (no
+        // footer state, no transcript) -- do not undo the success bookkeeping
+        // and do not re-queue; record it as unverified and let go.
+        const engine = readAgentEngine(entry.agentName)
+        if (!lostDetectionSupported(engine)) {
+          logger.warn(
+            { task: entry.taskName, agent: entry.agentName, engine, session: entry.session, elapsedMs: now - entry.injectedAt },
+            'Scheduled injection shows no turn evidence, but this engine exposes none -- recording as unverified, NOT re-queueing (LOSTLOOP913)',
+          )
+          appendTaskRun(entry.taskName, entry.agentName, 'unverified')
+          taskInflightMap.delete(key)
+          continue
+        }
+        // LOSTLOOP913 gap 2: bounded re-queue. The count is per task@agent and
+        // resets on observed turn evidence or on the next cron-path fire.
+        const lostCount = (lostReinjectCounts.get(key) ?? 0) + 1
+        if (decideLostRequeue(lostCount) === 'giveup') {
+          lostReinjectCounts.delete(key)
+          logger.error(
+            { task: entry.taskName, agent: entry.agentName, session: entry.session, lostCount },
+            'Scheduled injection lost repeatedly -- giving up re-queueing this occurrence (LOSTLOOP913)',
+          )
+          appendTaskRun(entry.taskName, entry.agentName, 'lost-giveup')
+          try {
+            createAgentMessage('system', MAIN_AGENT_ID, [
+              `[scheduler] A(z) "${entry.taskName}" (${entry.agentName}) ütemezett feladat ${lostCount}x lett elveszett kézbesítésként rögzítve egymás után -- az újraküldést leállítottam erre az előfordulásra.`,
+              'A session elfogadja a billentyűket, de nem indít kört. Ellenőrizd az ágenst (100% context? más motor?); a következő cron-előfordulás magától indul.',
+            ].join('\n'))
+          } catch (err) {
+            logger.warn({ err, task: entry.taskName }, 'lost-giveup main-agent notice failed')
+          }
+          taskInflightMap.delete(key)
+          continue
+        }
+        lostReinjectCounts.set(key, lostCount)
         // The prompt was typed into a session that never acted on it. Undo the
         // success bookkeeping: overwrite the run record and drop the lastRun
         // stamp so the occurrence is no longer considered served, then queue
@@ -1495,7 +1582,7 @@ export function startScheduleRunner(): NodeJS.Timeout {
         // already refuses to inject into a session that is not ready and keeps
         // the row (with its aged-retry alert) until the session is rescued.
         logger.warn(
-          { task: entry.taskName, agent: entry.agentName, session: entry.session, elapsedMs: now - entry.injectedAt },
+          { task: entry.taskName, agent: entry.agentName, session: entry.session, elapsedMs: now - entry.injectedAt, lostCount },
           'Scheduled injection never started a turn (session accepted the keystrokes but stayed idle) -- recording as lost and re-queueing',
         )
         appendTaskRun(entry.taskName, entry.agentName, 'lost')
@@ -1535,6 +1622,21 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // Register the key only once we know the retry is live, so the cron
       // loop below doesn't treat a dead row as a reason to skip.
       const key = `${row.task_name}@${row.agent_name}`
+
+      // LOSTLOOP913 gap 3: a re-queue that came from a 'lost' verdict belongs
+      // to one occurrence; once the local day has rolled past a day the cron
+      // does not name, that occurrence is history. Only lost-origin rows are
+      // subject to this -- busy-skip retries keep the never-abandon policy.
+      if (lostReinjectCounts.has(key) && !cronOccursOnLocalDay(taskDef.schedule, now, cronTz)) {
+        lostReinjectCounts.delete(key)
+        deletePendingTaskRetry(row.task_name, row.agent_name)
+        appendTaskRun(row.task_name, row.agent_name, 'lost-expired')
+        logger.warn(
+          { task: row.task_name, agent: row.agent_name, schedule: taskDef.schedule, tz: cronTz },
+          'Dropping a lost-injection retry: the cron has no occurrence on the current day (LOSTLOOP913)',
+        )
+        continue
+      }
       pendingKeys.add(key)
 
       // Re-run pre-check on retry: state may have changed since the task
@@ -1746,6 +1848,7 @@ export function startScheduleRunner(): NodeJS.Timeout {
         // the retry handler -- don't re-queue or double-fire.
         if (pendingKeys.has(key)) continue
         const result = await attemptFireTask(task, agentName, now, cronPc.prefix, lateCatchUpMs)
+        if (result === 'fired') lostReinjectCounts.delete(`${task.name}@${agentName}`)
         if (result === 'starting') {
           // Agent was auto-started this tick. ALWAYS enqueue the retry that
           // delivers the prompt once the session is ready -- skipIfBusy must
