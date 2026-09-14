@@ -357,6 +357,10 @@ if ! retry 3 3 git pull --ff-only origin "$CURRENT_BRANCH"; then
   restore_stash_before_exit
   exit 5
 fi
+# SKILLSGIT914: the skills tree is its own (private) git checkout at
+# .claude/skills -- bring it current right after the code pull, and never let
+# a skills problem fail the code update (exit 2 = not a checkout: say so).
+bash scripts/skills-sync.sh || echo "update: skills-sync jelzett (lasd fent), a kod-frissites folytatodik" >&2
 NEW_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 # Full SHA for the build-marker (dist/.built-commit). HEAD does not change
 # again in this script (no checkout), so this is the commit any build below

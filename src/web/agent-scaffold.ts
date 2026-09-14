@@ -1600,16 +1600,15 @@ export function ensureFleetRosterSection(name: string): void {
   atomicWriteFileSync(claudeMdPath, updated)
 }
 
-// SKILLUTCSAPDA822: the near-identical `.claude-config/skills` path IS the
-// shared global directory (a symlink to ~/.claude/skills, single-copy
-// distribution -- deliberate, see skills-symlink-single-copy), and the
-// skill-run base directory even DISPLAYS that path. That symlink only exists
-// in fleet-token mode (store/.claude-oauth-token present, see
-// ensureIsolatedChannelConfigDir); in subscription mode there is no
-// .claude-config at all and Claude reads ~/.claude/skills directly -- the
-// wording names both, because the block is generated on every respawn and
-// an install can switch modes (measured 2026-09-13: 0 .claude-config dirs,
-// text still claimed the symlink; card b928ca80). An agent writing "its
+// SKILLUTCSAPDA822 -> SKILLSGIT914 (2026-09-14, card 37647f9c): the fleet's
+// skills now have ONE source, the repo-root .claude/skills tree (a nested
+// clone of the private marveen-skills repo). Claude Code reads project skills
+// from the cwd upward to the git root, so that tree reaches every agent; the
+// former global ~/.claude/skills and per-agent copies are retired because the
+// copies drifted (five skills with three bodies, CRLF-broken scripts). The
+// trap this block names is therefore no longer "the symlink is not yours" but
+// "a copy outside the tree reaches nobody" -- and the block is regenerated on
+// every respawn so the wording follows the layout, not the other way round. An agent writing "its
 // own" skill there writes to the whole fleet, and nothing says so. Measured
 // 2026-08-22: five third-party marketing skills landed in the shared dir and
 // only luck caught them. The symlink stays; the fix is naming the trap in
@@ -1624,15 +1623,16 @@ function buildSkillsPathTrapBody(): string {
   return [
     '## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)',
     '',
-    'A globális `~/.claude/skills` NEM a saját mappád: a TELJES flotta közös',
-    'készlete, ami oda kerül, az minden ügynöknél megjelenik. Flotta-token módban',
-    '(store/.claude-oauth-token) az ügynök `.claude-config/skills` útvonala is',
-    'UGYANEZ a mappa, symlinken át -- akkor is, ha a skill-futtatás base',
-    'directory-ja ezt az utat mutatja; előfizetéses módban `.claude-config` nem is',
-    'létezik, a Claude közvetlenül a `~/.claude/skills`-t olvassa. Mindkét esetben',
-    'a saját, csak neked szóló vagy kipróbálatlan külső skill a munkakönyvtárad',
-    '`.claude/skills/` mappájába megy (gitignore-olt). A globálisba írás tudatos,',
-    'flotta-szintű döntés legyen, ne alapértelmezés.',
+    'A flotta skilljeinek EGYETLEN forrása a repo-gyökér `.claude/skills` fája: a',
+    'PRIVÁT marveen-skills git-repo klónja (a marveen fork publikus, ezért a skillek',
+    'nem élhetnek benne). A Claude a munkakönyvtáradtól felfelé a git-gyökérig olvassa',
+    'a projekt-skilleket, tehát ez a fa NÁLAD IS látszik, az agents/<név> cwd-ből is.',
+    'NINCS globális `~/.claude/skills` és NINCS ügynök-szintű `.claude/skills` másolat:',
+    'ami oda kerül, az senkihez nem jut el, és a fa mellett dupla listázást okoz.',
+    'Új vagy javított skill: a repo-gyökér `.claude/skills/<név>/` alá, majd',
+    '`git -C /home/pohi/marveen/.claude/skills add -A && git commit && git push`',
+    '(AGENT.md 2/A: commit után azonnal push; a pre-commit secret-gate fut). Amit a',
+    'flotta ne lásson, az nem skill, hanem memória. (SKILLSGIT914, 2026-09-14.)',
   ].join('\n')
 }
 
@@ -1806,14 +1806,13 @@ NE írd közvetlenül az SQLite scheduled_tasks táblát - az egy régi API.
 Te egy önfejlesztő ágens vagy. A munkád során tanulsz, és újrafelhasználható skill-eket hozol létre.
 
 ### Skill-ek helye
-- Globális: ~/.claude/skills/ (minden ágens számára elérhető)
-- Egyéni: a te munkakönyvtárad .claude/skills/ mappája
-- CSAPDA: a globális ~/.claude/skills NEM a tiéd (flotta-token módban a .claude-config/skills is ugyanaz, symlinken át); saját skill a .claude/skills alá menjen
+- EGYETLEN fa: a repo-gyökér .claude/skills/ (a privát marveen-skills git-repo klónja; minden ágens látja, az agents/<név> cwd-ből is)
+- CSAPDA: a ~/.claude/skills és az agents/<név>/.claude/skills NEM létezik többé -- ami oda kerül, senkihez nem jut el; skill a fába megy, commit + push
 
 ### Automatikus skill generálás
 Komplex feladatok után (5+ tool hívás, hiba utáni recovery, user korrekció, többlépéses workflow) automatikusan hozz létre SKILL.md fájlt:
 
-mkdir -p ~/.claude/skills/SKILL-NEV
+mkdir -p /home/pohi/marveen/.claude/skills/SKILL-NEV   # majd: git -C /home/pohi/marveen/.claude/skills add -A && git commit && git push
 A SKILL.md tartalmazzon YAML frontmatter-t (name, description), majd szekciókat: Mikor használd, Eljárás, Buktatók, Ellenőrzés.
 
 ### Skill patch (runtime javítás)

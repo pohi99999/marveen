@@ -35,8 +35,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SLUG = _ROOT.replace("/", "-").replace(".", "-")
 DEFAULT_DIR = os.path.join(_ROOT, ".channels-config", "projects", _SLUG, "memory")
 SKILL_DIRS = [
-    os.path.expanduser("~/.claude/skills"),
+    os.path.join(_ROOT, ".claude", "skills"),          # SKILLSGIT914: the single git-backed tree
     os.path.expanduser("~/.claude/scheduled-tasks"),
+    os.path.expanduser("~/.claude/skills"),            # legacy global copy; empty after the migration
 ]
 
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")

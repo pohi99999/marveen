@@ -262,14 +262,12 @@ for (const ag of agents) {
     fs.writeFileSync(memFile, `# ${ag.displayName} - Memória\n\n- Ügynök inicializálva: ${ag.title}\n`);
   }
 
-  // 7. Seed skills
-  for (const skName of ag.skills) {
-    const srcSk = path.join(SEED_SKILLS_DIR, skName);
-    const dstSk = path.join(agDir, ".claude", "skills", skName);
-    if (fs.existsSync(srcSk)) {
-      fs.cpSync(srcSk, dstSk, { recursive: true });
-    }
-  }
+  // 7. Seed skills -- RETIRED (SKILLSGIT914, 2026-09-14). Skills are no longer
+  // copied per agent: the single tree at <repo>/.claude/skills (a nested clone
+  // of the private marveen-skills repo) is visible to every agent, because
+  // Claude Code reads project skills from the cwd upward to the git root.
+  // `ag.skills` stays as documentation of the agent's intended focus only.
+  if (ag.skills.length) console.log(`[skills] ${ag.id}: ${ag.skills.length} focus skill(s) come from the shared tree, nothing copied`);
 
   console.log(`[OK] Agent configured: ${ag.id} (${ag.displayName})`);
 }

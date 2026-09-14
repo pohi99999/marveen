@@ -59,9 +59,9 @@ describe('ensureSkillsPathTrapSection', () => {
     const out = read('agent-b')
     expect(out).toContain(MARKER_BEGIN)
     expect(out).toContain(MARKER_END)
-    expect(out).toContain('.claude-config/skills')
-    expect(out).toContain('NEM a saját mappád')
-    expect(out).toContain('.claude/skills/')
+    expect(out).toContain('marveen-skills')
+    expect(out).toContain('EGYETLEN forrása')
+    expect(out).toContain('.claude/skills')
     // Existing content untouched.
     expect(out).toContain('Some persona.')
   })
@@ -82,7 +82,7 @@ describe('ensureSkillsPathTrapSection', () => {
     const out = read('agent-b')
     expect(out).not.toContain('RÉGI SZÖVEG')
     expect(out).toContain('Kézzel írt lábjegyzet.')
-    expect(out).toContain('.claude-config/skills')
+    expect(out).toContain('marveen-skills')
   })
 
   it('skips silently when there is no CLAUDE.md', () => {
@@ -108,6 +108,6 @@ describe('wiring contracts', () => {
 
   it('the generated template names the trap inline too', () => {
     const src = readFileSync(join(__dirname, '../../src/web/agent-scaffold.ts'), 'utf-8')
-    expect(src).toContain('CSAPDA: a globális ~/.claude/skills NEM a tiéd')
+    expect(src).toContain('CSAPDA: a ~/.claude/skills és az agents/<név>/.claude/skills NEM létezik többé')
   })
 })

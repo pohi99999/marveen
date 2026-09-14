@@ -38,7 +38,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - Claude Code hookok (`.claude/settings.json`): **5** esemény, **15** bejegyzés, **10** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **4** -- dream-engine, ledger-live-drain, memoria-heartbeat, reggeli-napindito
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **7** -- channel-image, git-guard, hook-proof, prod-tree-guard, secret-gate, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **41**, ebből a fenti táblázat linkel **16**
+- Dokumentációs lapok a `docs/` alatt: **42**, ebből a fenti táblázat linkel **16**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
@@ -61,6 +61,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [outgoing-copy-gate](outgoing-copy-gate.md)
 - [scheduled-tasks](scheduled-tasks.md)
 - [security-hardening](security-hardening.md)
+- [skills-git-forras](skills-git-forras.md)
 - [telegram-live-progress](telegram-live-progress.md)
 - [telegram-progress-indicator](telegram-progress-indicator.md)
 - [telegram-reply-enforcement-2026-08-02](telegram-reply-enforcement-2026-08-02.md)

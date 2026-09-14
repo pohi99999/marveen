@@ -11,15 +11,16 @@
 
 ## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)
 
-A globális `~/.claude/skills` NEM a saját mappád: a TELJES flotta közös
-készlete, ami oda kerül, az minden ügynöknél megjelenik. Flotta-token módban
-(store/.claude-oauth-token) az ügynök `.claude-config/skills` útvonala is
-UGYANEZ a mappa, symlinken át -- akkor is, ha a skill-futtatás base
-directory-ja ezt az utat mutatja; előfizetéses módban `.claude-config` nem is
-létezik, a Claude közvetlenül a `~/.claude/skills`-t olvassa. Mindkét esetben
-a saját, csak neked szóló vagy kipróbálatlan külső skill a munkakönyvtárad
-`.claude/skills/` mappájába megy (gitignore-olt). A globálisba írás tudatos,
-flotta-szintű döntés legyen, ne alapértelmezés.
+A flotta skilljeinek EGYETLEN forrása a repo-gyökér `.claude/skills` fája: a
+PRIVÁT marveen-skills git-repo klónja (a marveen fork publikus, ezért a skillek
+nem élhetnek benne). A Claude a munkakönyvtáradtól felfelé a git-gyökérig olvassa
+a projekt-skilleket, tehát ez a fa NÁLAD IS látszik, az agents/<név> cwd-ből is.
+NINCS globális `~/.claude/skills` és NINCS ügynök-szintű `.claude/skills` másolat:
+ami oda kerül, az senkihez nem jut el, és a fa mellett dupla listázást okoz.
+Új vagy javított skill: a repo-gyökér `.claude/skills/<név>/` alá, majd
+`git -C /home/pohi/marveen/.claude/skills add -A && git commit && git push`
+(AGENT.md 2/A: commit után azonnal push; a pre-commit secret-gate fut). Amit a
+flotta ne lásson, az nem skill, hanem memória. (SKILLSGIT914, 2026-09-14.)
 <!-- END GENERATED: skills-path-trap -->
 
 <!-- Kézzel írt szakasz. NEM generált -- az agent-scaffold.ts csak a fenti

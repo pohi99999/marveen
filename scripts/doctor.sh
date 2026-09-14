@@ -293,6 +293,35 @@ else
 fi
 
 # --- Recent failures log ---
+echo -e "\n${BOLD}Skills (git-forrás, SKILLSGIT914)${RESET}"
+SKILLS_DIR="$INSTALL_DIR/.claude/skills"
+if [ -d "$SKILLS_DIR/.git" ]; then
+  ok "skills-fa git-checkout: $SKILLS_DIR ($(git -C "$SKILLS_DIR" rev-parse --short HEAD 2>/dev/null))"
+  if timeout 15 git -C "$SKILLS_DIR" fetch -q origin main 2>/dev/null; then
+    S_BEHIND="$(git -C "$SKILLS_DIR" rev-list --count HEAD..origin/main 2>/dev/null || echo ?)"
+    S_AHEAD="$(git -C "$SKILLS_DIR" rev-list --count origin/main..HEAD 2>/dev/null || echo ?)"
+    if [ "$S_AHEAD" = "0" ]; then ok "skills: nincs pusholatlan commit"; else fail "skills: $S_AHEAD helyi commit nincs pusholva a marveen-skills-be (AGENT.md 2/A)"; fi
+    if [ "$S_BEHIND" = "0" ]; then ok "skills: naprakesz az origin/main-nel"; else warn "skills: $S_BEHIND committal az origin mogott -- scripts/skills-sync.sh"; fi
+  else
+    warn "skills: fetch sikertelen (offline?), a szinkron nem merheto"
+  fi
+  S_CRLF="$(grep -rlI $'\r' "$SKILLS_DIR" --exclude-dir=.git 2>/dev/null | wc -l)"
+  if [ "$S_CRLF" = "0" ]; then ok "skills: CRLF-es fajl 0"; else fail "skills: $S_CRLF CRLF-es fajl a faban (eol=lf a .gitattributes-ban, a checkout serult?)"; fi
+  S_DIRS="$(ls -d "$SKILLS_DIR"/*/ 2>/dev/null | wc -l)"
+  if [ -f "$SKILLS_DIR/.skill-index.md" ]; then
+    S_IDX="$(grep -oE '^_[0-9]+ skill indexelve' "$SKILLS_DIR/.skill-index.md" | grep -oE '[0-9]+' | head -1)"
+    if [ "${S_IDX:-x}" = "$S_DIRS" ]; then ok "skills: index friss ($S_DIRS skill)"; else warn "skills: index elavult (index ${S_IDX:-?} vs $S_DIRS mappa) -- scripts/skill-index.sh"; fi
+  else
+    warn "skills: nincs .skill-index.md -- scripts/skill-index.sh"
+  fi
+else
+  fail "skills-fa NEM git-checkout: $SKILLS_DIR (klonozd: scripts/skills-sync.sh utmutatoja)"
+fi
+S_GLOBAL="$(ls -d "$HOME"/.claude/skills/*/ 2>/dev/null | wc -l)"
+if [ "$S_GLOBAL" = "0" ]; then ok "nincs globalis ~/.claude/skills masolat"; else fail "$S_GLOBAL globalis skill-masolat a ~/.claude/skills alatt (dupla listazas; a fa a forras, a masolat torlendo)"; fi
+S_AGENT="$(ls -d "$INSTALL_DIR"/agents/*/.claude/skills/*/ 2>/dev/null | wc -l)"
+if [ "$S_AGENT" = "0" ]; then ok "nincs agens-szintu skill-masolat"; else fail "$S_AGENT agens-szintu skill-masolat az agents/*/.claude/skills alatt (megszunt reteg, torlendo)"; fi
+
 echo -e "\n${BOLD}Failures (last 24h)${RESET}"
 if [ -f "store/channels-failures.log" ]; then
   RECENT=$(find store/channels-failures.log -mmin -1440 2>/dev/null)

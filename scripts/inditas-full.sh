@@ -5,6 +5,8 @@
 # stdout so the caller can grab it.
 set -u
 cd /home/pohi/marveen || exit 1
+# SKILLSGIT914: skills tree pull + index at startup (never blocks the start)
+bash scripts/skills-sync.sh >> store/skills-sync.log 2>&1 || true
 
 http_code() {
   curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://127.0.0.1:3420 2>/dev/null
