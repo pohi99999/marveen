@@ -10885,7 +10885,7 @@ function renderSkillsSidebar() {
   sidebar.innerHTML = `
     <div class="skills-cat-title">${t('skills.category.title')}</div>
     <button class="skills-cat-btn${skillsActiveCategory === 'all' ? ' active' : ''}" data-cat="all">
-      ${t('skills.filter.all')} <span class="skills-cat-count">${sourceFiltered.length}</span>
+      ${t('skills.category.all')} <span class="skills-cat-count">${sourceFiltered.length}</span>
     </button>
     ${cats.map(([cat, count]) => `
       <button class="skills-cat-btn${skillsActiveCategory === cat ? ' active' : ''}" data-cat="${escapeHtml(cat)}">

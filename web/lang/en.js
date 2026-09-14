@@ -530,6 +530,7 @@ window._i18n.en = {
   'skills.agents.label':         'Agents:',
   'skills.agents.count':         'agents',
   'skills.category.title':       'Categories',
+  'skills.category.all':         'All categories',
   'skills.health.ok':            'OK',
   'skills.health.nodesc':        'Missing description',
   'skills.health.empty':         'Empty',
