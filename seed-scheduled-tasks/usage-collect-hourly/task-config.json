@@ -1,0 +1,10 @@
+{
+  "schedule": "17 * * * *",
+  "agent": "{{MAIN_AGENT_ID}}",
+  "enabled": true,
+  "type": "command",
+  "command": "cd /home/pohi/marveen && python3 scripts/usage-collect.py",
+  "timeoutMs": 60000,
+  "failThreshold": 3,
+  "description": "Max-kvota ablakok oras merese (usage-collect.py): store/usage-latest.json + usage-history.jsonl. CSAK MERES, nincs LLM, nincs beavatkozas -- a per-ugynok keret (5715dad4) kalibracios adatforrasa."
+}
