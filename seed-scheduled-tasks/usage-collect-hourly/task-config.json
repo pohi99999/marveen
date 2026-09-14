@@ -3,8 +3,8 @@
   "agent": "{{MAIN_AGENT_ID}}",
   "enabled": true,
   "type": "command",
-  "command": "cd /home/pohi/marveen && python3 scripts/usage-collect.py",
+  "command": "cd /home/pohi/marveen && python3 scripts/usage-collect.py; python3 scripts/usage-quota-gate.py",
   "timeoutMs": 60000,
   "failThreshold": 3,
-  "description": "Max-kvota ablakok oras merese (usage-collect.py): store/usage-latest.json + usage-history.jsonl. CSAK MERES, nincs LLM, nincs beavatkozas -- a per-ugynok keret (5715dad4) kalibracios adatforrasa."
+  "description": "Max-kvota ablakok oras merese (usage-collect.py): store/usage-latest.json + usage-history.jsonl. CSAK MERES, nincs LLM, nincs beavatkozas -- a per-ugynok keret (5715dad4) kalibracios adatforrasa Utana usage-quota-gate.py: heti 80%/90% kuszobnel EGYSZER [KVOTA] uzenet marveennek + Telegram Peternek (6d9de12c), csak olvas es uzen."
 }

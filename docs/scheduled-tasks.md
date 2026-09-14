@@ -278,7 +278,7 @@ A tokenszám közelítő: az ágens teljes tokenforgalmát összesíti a futtat�
 | `projekt-figyelo` | marveen | `0 8 * * *` | heartbeat | Napi áttekintés a külső projekt-mappákon és az Obsidian "Projektek MOC"-on; memória-frissítés mindig, Telegram-jelzés csak érdemi találatnál |
 | `ai-heti-felderites` | zeph | `0 7 * * 1` | task | Heti AI/MCP/skill-felderítés hétfőnként — jelentés Brunellának, telepítés nélkül |
 | `ai-heti-jelentes` | marveen | `0 9 * * 1` | task | Heti AI-felderítés összefoglalója Péternek + kanban-javaslatok, jóváhagyás után végrehajtás |
-| `usage-collect-hourly` | fő ügynök (command) | `17 * * * *` | command | Max-kvóta ablakok (5h / heti / Fable-heti) óránkénti mérése a `scripts/usage-collect.py`-ból a `store/usage-latest.json`-ba és a `usage-history.jsonl`-be; csak mérés, a per-ügynök keret (5715dad4) kalibrációs forrása. |
+| `usage-collect-hourly` | fő ügynök (command) | `17 * * * *` | command | Max-kvóta ablakok (5h / heti / Fable-heti) óránkénti mérése a `scripts/usage-collect.py`-ból a `store/usage-latest.json`-ba és a `usage-history.jsonl`-be; csak mérés, a per-ügynök keret (5715dad4) kalibrációs forrása. Utána `scripts/usage-quota-gate.py`: heti 80%/90% küszöbnél EGYSZER `[KVOTA]` üzenet a fő ügynöknek + Telegram Péternek, állapot `store/usage-alert-state.json`, a reset után újraélesedik (6d9de12c). |
 
 ---
 
