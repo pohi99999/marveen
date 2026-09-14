@@ -1603,7 +1603,13 @@ export function ensureFleetRosterSection(name: string): void {
 // SKILLUTCSAPDA822: the near-identical `.claude-config/skills` path IS the
 // shared global directory (a symlink to ~/.claude/skills, single-copy
 // distribution -- deliberate, see skills-symlink-single-copy), and the
-// skill-run base directory even DISPLAYS that path. An agent writing "its
+// skill-run base directory even DISPLAYS that path. That symlink only exists
+// in fleet-token mode (store/.claude-oauth-token present, see
+// ensureIsolatedChannelConfigDir); in subscription mode there is no
+// .claude-config at all and Claude reads ~/.claude/skills directly -- the
+// wording names both, because the block is generated on every respawn and
+// an install can switch modes (measured 2026-09-13: 0 .claude-config dirs,
+// text still claimed the symlink; card b928ca80). An agent writing "its
 // own" skill there writes to the whole fleet, and nothing says so. Measured
 // 2026-08-22: five third-party marketing skills landed in the shared dir and
 // only luck caught them. The symlink stays; the fix is naming the trap in
@@ -1618,12 +1624,15 @@ function buildSkillsPathTrapBody(): string {
   return [
     '## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)',
     '',
-    'A `.claude-config/skills` NEM a saját mappád: symlink a globális',
-    '`~/.claude/skills`-re, tehát ami oda kerül, az a TELJES flottánál megjelenik',
-    '-- akkor is, ha a skill-futtatás base directory-ja ezt az utat mutatja.',
-    'A saját, csak neked szóló vagy kipróbálatlan külső skill a munkakönyvtárad',
-    '`.claude/skills/` mappájába megy. A globálisba írás tudatos, flotta-szintű',
-    'döntés legyen, ne alapértelmezés.',
+    'A globális `~/.claude/skills` NEM a saját mappád: a TELJES flotta közös',
+    'készlete, ami oda kerül, az minden ügynöknél megjelenik. Flotta-token módban',
+    '(store/.claude-oauth-token) az ügynök `.claude-config/skills` útvonala is',
+    'UGYANEZ a mappa, symlinken át -- akkor is, ha a skill-futtatás base',
+    'directory-ja ezt az utat mutatja; előfizetéses módban `.claude-config` nem is',
+    'létezik, a Claude közvetlenül a `~/.claude/skills`-t olvassa. Mindkét esetben',
+    'a saját, csak neked szóló vagy kipróbálatlan külső skill a munkakönyvtárad',
+    '`.claude/skills/` mappájába megy (gitignore-olt). A globálisba írás tudatos,',
+    'flotta-szintű döntés legyen, ne alapértelmezés.',
   ].join('\n')
 }
 
@@ -1799,7 +1808,7 @@ Te egy önfejlesztő ágens vagy. A munkád során tanulsz, és újrafelhasznál
 ### Skill-ek helye
 - Globális: ~/.claude/skills/ (minden ágens számára elérhető)
 - Egyéni: a te munkakönyvtárad .claude/skills/ mappája
-- CSAPDA: a .claude-config/skills NEM a tiéd -- az a globális mappa symlinken át; saját skill a .claude/skills alá menjen
+- CSAPDA: a globális ~/.claude/skills NEM a tiéd (flotta-token módban a .claude-config/skills is ugyanaz, symlinken át); saját skill a .claude/skills alá menjen
 
 ### Automatikus skill generálás
 Komplex feladatok után (5+ tool hívás, hiba utáni recovery, user korrekció, többlépéses workflow) automatikusan hozz létre SKILL.md fájlt:

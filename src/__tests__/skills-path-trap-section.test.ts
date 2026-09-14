@@ -108,6 +108,6 @@ describe('wiring contracts', () => {
 
   it('the generated template names the trap inline too', () => {
     const src = readFileSync(join(__dirname, '../../src/web/agent-scaffold.ts'), 'utf-8')
-    expect(src).toContain('CSAPDA: a .claude-config/skills NEM a tiéd')
+    expect(src).toContain('CSAPDA: a globális ~/.claude/skills NEM a tiéd')
   })
 })

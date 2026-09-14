@@ -11,12 +11,15 @@
 
 ## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)
 
-A `.claude-config/skills` NEM a saját mappád: symlink a globális
-`~/.claude/skills`-re, tehát ami oda kerül, az a TELJES flottánál megjelenik
--- akkor is, ha a skill-futtatás base directory-ja ezt az utat mutatja.
-A saját, csak neked szóló vagy kipróbálatlan külső skill a munkakönyvtárad
-`.claude/skills/` mappájába megy. A globálisba írás tudatos, flotta-szintű
-döntés legyen, ne alapértelmezés.
+A globális `~/.claude/skills` NEM a saját mappád: a TELJES flotta közös
+készlete, ami oda kerül, az minden ügynöknél megjelenik. Flotta-token módban
+(store/.claude-oauth-token) az ügynök `.claude-config/skills` útvonala is
+UGYANEZ a mappa, symlinken át -- akkor is, ha a skill-futtatás base
+directory-ja ezt az utat mutatja; előfizetéses módban `.claude-config` nem is
+létezik, a Claude közvetlenül a `~/.claude/skills`-t olvassa. Mindkét esetben
+a saját, csak neked szóló vagy kipróbálatlan külső skill a munkakönyvtárad
+`.claude/skills/` mappájába megy (gitignore-olt). A globálisba írás tudatos,
+flotta-szintű döntés legyen, ne alapértelmezés.
 <!-- END GENERATED: skills-path-trap -->
 
 <!-- Kézzel írt szakasz. NEM generált -- az agent-scaffold.ts csak a fenti
