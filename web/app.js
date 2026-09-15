@@ -3090,6 +3090,15 @@ const CG_PHASE_LABELS = {
   cooldown: 'cooldown',
 }
 
+// One-sentence tooltips for the phase badge (CGBADGE908) -- the context badge
+// already had one (agents.context_tip), the phase badge had none, and the
+// owner had to ask what "cooldown" meant.
+const CG_PHASE_TIPS = {
+  'await-handoff': 'agents.guard_phase_tip_handoff',
+  'await-ready': 'agents.guard_phase_tip_restarting',
+  cooldown: 'agents.guard_phase_tip_cooldown',
+}
+
 async function setupContextGuardUI(agentName) {
   const cgEnabled = document.getElementById('cgEnabled')
   const cgAdvancedWrap = document.getElementById('cgAdvancedWrap')
@@ -3172,8 +3181,20 @@ function updateContextGuardLiveStatus(agentName) {
             const footer = card.querySelector('.agent-card-footer')
             if (footer) footer.appendChild(badge)
           }
-          const pctStr = typeof entry.pct === 'number' ? ' ' + Math.round(entry.pct * 100) + '%' : ''
-          badge.textContent = (CG_PHASE_LABELS[entry.phase] || entry.phase) + pctStr
+          // CGBADGE908: the phase badge never appends the context pct -- the
+          // card already has its own context badge, and "cooldown 19%" read as
+          // a cooldown position while 19 was the context fill measured at a
+          // different poll instant (so the same number appeared twice on one
+          // card with two values). In cooldown the number is what the word
+          // promises: the remaining time.
+          let cgLabel = CG_PHASE_LABELS[entry.phase] || entry.phase
+          if (entry.phase === 'cooldown' && typeof entry.cooldownUntilMs === 'number') {
+            const minLeft = Math.max(0, Math.ceil((entry.cooldownUntilMs - Date.now()) / 60000))
+            cgLabel += ` ${minLeft}m`
+          }
+          badge.textContent = cgLabel
+          const cgTipKey = CG_PHASE_TIPS[entry.phase]
+          badge.title = cgTipKey ? t(cgTipKey) : ''
         })
         if (currentAgent && document.getElementById('cgLiveStatus')) {
           updateContextGuardLiveStatus(currentAgent.autoRestartId || currentAgent.name)
@@ -4779,7 +4800,6 @@ document.getElementById('saveAutoRestartBtn').addEventListener('click', async ()
     mode: document.getElementById('arMode').value === 'fresh' ? 'fresh' : 'continue',
     dailyTime: schedKind === 'daily' ? document.getElementById('arDailyTime').value : null,
     intervalHours: schedKind === 'interval' ? Number(document.getElementById('arIntervalHours').value) : null,
-    handoff: false,
   }
   try {
     const res = await fetch(`/api/agents/${encodeURIComponent(id)}/auto-restart`, {
@@ -11956,6 +11976,88 @@ function formatRelative(ts) {
   return t('common.time.day_abbr', { n: day })
 }
 
+// Forward-looking duration, reusing the same abbreviations formatRelative uses
+// so the strip does not invent a second time vocabulary.
+function formatDurationShort(sec) {
+  if (sec < 60) return t('common.time.min_abbr', { n: 1 })
+  const min = Math.floor(sec / 60)
+  if (min < 60) return t('common.time.min_abbr', { n: min })
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return t('common.time.hour_abbr', { h: hr })
+  return t('common.time.day_abbr', { n: Math.floor(hr / 24) })
+}
+
+// Same thresholds as the status line's rl_pct(): >=80 danger, >=60 caution.
+// The dashboard palette has no yellow token, so the accent stands in for it.
+function quotaLevelClass(pct) {
+  if (pct >= 80) return 'danger'
+  if (pct >= 60) return 'warn'
+  return ''
+}
+
+// Render the subscription quota strip from /api/overview's `quota` block.
+//
+// The rule this follows: a quota reading is only worth showing while it is
+// fresh, and an absent strip must never look like a healthy one. So a missing
+// file still renders the strip -- with one quiet line saying why there is no
+// data -- and a stale or already-reset reading keeps its numbers but drops the
+// colour, because a green bar from six hours ago reassures exactly as much as
+// a green bar from six seconds ago.
+function renderQuotaStrip(q) {
+  const strip = document.getElementById('quotaStrip')
+  const bars = document.getElementById('quotaBars')
+  const note = document.getElementById('quotaStripNote')
+  const age = document.getElementById('quotaStripAge')
+  if (!strip || !bars || !note || !age) return
+  strip.hidden = false
+  bars.innerHTML = ''
+  note.hidden = true
+  note.className = 'quota-strip-note'
+  age.textContent = ''
+
+  if (!q || q.status === 'missing') {
+    const reason = q && q.reason ? q.reason : 'no-file'
+    note.textContent = t('overview.quota.none.' + reason.replace(/-/g, '_'))
+    note.hidden = false
+    return
+  }
+
+  const stale = q.status === 'stale'
+  const nowSec = Math.floor(Date.now() / 1000)
+  const windows = [
+    ['overview.quota.five_hour', q.fiveHour],
+    ['overview.quota.seven_day', q.sevenDay],
+  ]
+  for (const [labelKey, w] of windows) {
+    if (!w) continue
+    const pct = Math.max(0, Math.min(100, Math.round(w.usedPercentage)))
+    const muted = stale || w.expired
+    const row = document.createElement('div')
+    row.className = 'quota-bar' + (muted ? ' muted' : '')
+    let tail = ''
+    if (w.expired) {
+      tail = ' · ' + t('overview.quota.expired')
+    } else if (typeof w.resetsAt === 'number' && w.resetsAt > nowSec) {
+      tail = ' · ' + t('overview.quota.resets_in', { d: formatDurationShort(w.resetsAt - nowSec) })
+    }
+    row.innerHTML = `
+      <div class="quota-bar-label">${escapeHtml(t(labelKey))}</div>
+      <div class="quota-bar-track"><div class="quota-bar-fill ${muted ? '' : quotaLevelClass(pct)}" style="width:${pct}%"></div></div>
+      <div class="quota-bar-value">${pct}%<span class="quota-bar-reset">${escapeHtml(tail)}</span></div>
+    `
+    bars.appendChild(row)
+  }
+
+  if (typeof q.ageSec === 'number') {
+    age.textContent = t('overview.quota.measured', { age: formatRelative(Date.now() - q.ageSec * 1000) })
+  }
+  if (stale) {
+    note.textContent = t('overview.quota.stale')
+    note.className = 'quota-strip-note warn'
+    note.hidden = false
+  }
+}
+
 async function loadOverview() {
   try {
     const res = await fetch('/api/overview')
@@ -11971,6 +12073,7 @@ async function loadOverview() {
     document.getElementById('statMemoriesSub').textContent = `${t('overview.stat.sub.memories')} · ${d.memories.categories} category`
     document.getElementById('statSkills').textContent = d.skills.count
     document.getElementById('statSkillsSub').textContent = d.skills.today > 0 ? t('overview.stat.skills_today', { n: d.skills.today }) : ''
+    renderQuotaStrip(d.quota)
     // Team: reuse the hierarchy graph renderer so the overview card shows
     // exactly what the Csapat page does (avatars + reports-to tree).
     try {
@@ -13519,7 +13622,7 @@ window.addEventListener('beforeunload', (e) => {
 // entry never requires a frontend change just to render a sane heading.
 function settingsModuleLabel(mod) {
   const key = `settings.module.${mod}`
-  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, channels: true, security: true, autonomy: true }
+  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, channels: true, security: true, autonomy: true, 'claude-plans': true }
   return known[mod] ? t(key) : (mod.charAt(0).toUpperCase() + mod.slice(1))
 }
 
@@ -13960,7 +14063,13 @@ async function loadSettings() {
     const securityDefs = byModule.get('security') ?? []
     byModule.delete('security')
 
-    const allModules = [...byModule.keys(), 'security', 'autonomy']
+    // module:'claude-plans' is just the CLAUDE_ROTATION_ENABLED toggle (PR2b)
+    // -- it renders below the plan-list widget in the synthetic Claude Plans
+    // tab, same pattern as securityDefs above.
+    const claudePlansDefs = byModule.get('claude-plans') ?? []
+    byModule.delete('claude-plans')
+
+    const allModules = [...byModule.keys(), 'security', 'autonomy', 'claude-plans']
     const savedTab = localStorage.getItem(SETTINGS_ACTIVE_TAB_KEY) || allModules[0]
     const activeTab = allModules.includes(savedTab) ? savedTab : allModules[0]
 
@@ -14067,6 +14176,45 @@ async function loadSettings() {
         renderAutonomyContent(grid, footer)
       }
     }
+
+    // Claude Plans tab (PR2b): synthetic like autonomy/security -- a hand-built
+    // plan-list + add-form widget, with the CLAUDE_ROTATION_ENABLED toggle
+    // (claudePlansDefs) appended below it exactly like security appends its
+    // registry keys after the auth card.
+    {
+      const mod = 'claude-plans'
+      const btn = document.createElement('button')
+      btn.className = 'tab-btn' + (mod === activeTab ? ' active' : '')
+      btn.dataset.tab = mod
+      btn.textContent = settingsModuleLabel(mod)
+      btn.addEventListener('click', () => activateSettingsTab(mod))
+      tabNav.appendChild(btn)
+
+      const panel = document.createElement('div')
+      panel.className = 'tab-panel'
+      panel.id = `settings-panel-${mod}`
+      panel.hidden = mod !== activeTab
+
+      const body = document.createElement('div')
+      body.className = 'settings-group'
+      body.id = 'claudePlansBody'
+      panel.appendChild(body)
+
+      if (claudePlansDefs.length) {
+        const group = document.createElement('div')
+        group.className = 'settings-group'
+        for (const def of claudePlansDefs) {
+          group.appendChild(buildSettingRow(def))
+        }
+        panel.appendChild(group)
+      }
+
+      tabPanels.appendChild(panel)
+
+      if (mod === activeTab) {
+        renderClaudePlansPanel(body)
+      }
+    }
   } catch (err) {
     tabPanels.innerHTML = `<p style="padding:24px;color:var(--danger)">${t('settings.error')}</p>`
   }
@@ -14085,6 +14233,169 @@ function activateSettingsTab(mod) {
     const grid = document.getElementById('settingsAutonomyGrid')
     const footer = document.getElementById('settingsAutonomyUpdatedAt')
     if (grid && !grid.innerHTML.trim()) renderAutonomyContent(grid, footer)
+  }
+
+  if (mod === 'claude-plans') {
+    const body = document.getElementById('claudePlansBody')
+    if (body && !body.innerHTML.trim()) renderClaudePlansPanel(body)
+  }
+}
+
+// Claude Plans tab (PR2b): plan-list + add-form widget over
+// store/claude-plans.json, plus GET /api/claude-plans/state for the
+// active-plan / last-known-usage badges. The "active" dot reflects the MAIN
+// agent's entry in activePlanByAgent (PR2c, design decision #1: the state is
+// per-agent, but this tab only shows the one that also drives the dashboard
+// header). There is still no manual rotate button here: this tab lets the
+// operator view and hand-edit the registry, the same way it already lets
+// them for store/claude-plans.json by hand; actual rotation is triggered by
+// the heartbeat script or POST /api/claude-plans/rotate directly.
+async function renderClaudePlansPanel(body) {
+  body.innerHTML = `
+    <p style="color:var(--text-muted);font-size:13px;margin:0 0 16px">${t('settings.claude_plans.intro')}</p>
+    <div id="claudePlansList"></div>
+    <div class="claude-plans-add-form">
+      <div class="form-row">
+        <div class="form-group" style="flex:1">
+          <label>${t('settings.claude_plans.form.id')}</label>
+          <input class="input" id="cpFormId" placeholder="personal-2">
+        </div>
+        <div class="form-group" style="flex:1">
+          <label>${t('settings.claude_plans.form.label')}</label>
+          <input class="input" id="cpFormLabel" placeholder="Second Pro">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group" style="flex:2">
+          <label>${t('settings.claude_plans.form.config_dir')}</label>
+          <input class="input" id="cpFormConfigDir" placeholder="~/.claude-second">
+        </div>
+        <div class="form-group" style="flex:1">
+          <label>${t('settings.claude_plans.form.type')}</label>
+          <select class="input" id="cpFormType">
+            <option value="personal">${t('settings.claude_plans.form.type_personal')}</option>
+            <option value="team">${t('settings.claude_plans.form.type_team')}</option>
+          </select>
+        </div>
+      </div>
+      <label class="claude-plans-checkbox-row">
+        <input type="checkbox" id="cpFormChannelsAllowed" checked>
+        <span>${t('settings.claude_plans.form.channels_allowed')}</span>
+      </label>
+      <div id="cpFormError" class="settings-row-error" hidden></div>
+      <button class="btn-secondary btn-compact" id="cpFormAddBtn" style="margin-top:12px">${t('settings.claude_plans.form.add_btn')}</button>
+    </div>
+  `
+
+  document.getElementById('cpFormAddBtn').addEventListener('click', () => addClaudePlan())
+  for (const id of ['cpFormId', 'cpFormLabel', 'cpFormConfigDir']) {
+    document.getElementById(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') addClaudePlan() })
+  }
+
+  await loadClaudePlansList()
+}
+
+async function addClaudePlan() {
+  const errEl = document.getElementById('cpFormError')
+  errEl.hidden = true
+  const id = document.getElementById('cpFormId').value.trim()
+  const label = document.getElementById('cpFormLabel').value.trim()
+  const configDir = document.getElementById('cpFormConfigDir').value.trim()
+  const planType = document.getElementById('cpFormType').value
+  const channelsAllowed = document.getElementById('cpFormChannelsAllowed').checked
+
+  if (!id || !label || !configDir) {
+    errEl.textContent = t('settings.claude_plans.form.error_required')
+    errEl.hidden = false
+    return
+  }
+
+  try {
+    const res = await fetch('/api/claude-plans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, label, configDir, planType, channelsAllowed }),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      errEl.textContent = data.error || t('settings.claude_plans.form.error_generic')
+      errEl.hidden = false
+      return
+    }
+    document.getElementById('cpFormId').value = ''
+    document.getElementById('cpFormLabel').value = ''
+    document.getElementById('cpFormConfigDir').value = ''
+    document.getElementById('cpFormChannelsAllowed').checked = true
+    await loadClaudePlansList()
+  } catch {
+    errEl.textContent = t('settings.claude_plans.form.error_generic')
+    errEl.hidden = false
+  }
+}
+
+async function deleteClaudePlan(id) {
+  if (!confirm(t('settings.claude_plans.confirm_delete', { id }))) return
+  await fetch(`/api/claude-plans/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  await loadClaudePlansList()
+}
+
+async function loadClaudePlansList() {
+  const list = document.getElementById('claudePlansList')
+  if (!list) return
+  list.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('common.loading')}</p>`
+  try {
+    const [plansRes, stateRes] = await Promise.all([
+      fetch('/api/claude-plans'),
+      fetch('/api/claude-plans/state'),
+    ])
+    const plans = plansRes.ok ? await plansRes.json() : []
+    const state = stateRes.ok ? await stateRes.json() : { activePlanByAgent: {}, plans: {} }
+
+    if (!plans.length) {
+      list.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('settings.claude_plans.empty')}</p>`
+      return
+    }
+
+    list.innerHTML = ''
+    for (const plan of plans) {
+      const observed = state.plans?.[plan.id]
+      const fiveHour = observed?.windows?.five_hour
+      const isActive = state.activePlanByAgent?.[mainAgentId()] === plan.id
+
+      const row = document.createElement('div')
+      row.className = 'claude-plan-row'
+
+      const main = document.createElement('div')
+      main.style.flex = '1'
+      const mainLine = document.createElement('div')
+      mainLine.className = 'claude-plan-row-main'
+      mainLine.innerHTML = `
+        ${isActive ? `<span class="claude-plan-active-dot" title="${t('settings.claude_plans.active')}"></span>` : ''}
+        <strong>${escapeHtml(plan.label)}</strong>
+        <span class="claude-plan-badge">${plan.planType === 'team' ? t('settings.claude_plans.form.type_team') : t('settings.claude_plans.form.type_personal')}</span>
+        ${!plan.channelsAllowed ? `<span class="claude-plan-badge claude-plan-badge-muted">${t('settings.claude_plans.no_channels')}</span>` : ''}
+        ${fiveHour ? `<span class="claude-plan-badge">${t('settings.claude_plans.last_known', { pct: Math.round(fiveHour.usedPercent) })}</span>` : ''}
+      `
+      main.appendChild(mainLine)
+
+      const meta = document.createElement('div')
+      meta.className = 'claude-plan-row-meta'
+      meta.textContent = `${plan.id} · ${plan.configDir}`
+      main.appendChild(meta)
+
+      row.appendChild(main)
+
+      const delBtn = document.createElement('button')
+      delBtn.className = 'claude-plan-delete'
+      delBtn.title = t('common.btn.delete')
+      delBtn.textContent = '×'
+      delBtn.addEventListener('click', () => deleteClaudePlan(plan.id))
+      row.appendChild(delBtn)
+
+      list.appendChild(row)
+    }
+  } catch {
+    list.innerHTML = `<p style="color:var(--danger);font-size:13px">${t('settings.error')}</p>`
   }
 }
 

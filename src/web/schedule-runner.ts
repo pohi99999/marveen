@@ -1,5 +1,6 @@
 import { join, isAbsolute } from 'node:path'
 import { checkTaskMcpRequirements } from './schedule-mcp-precheck.js'
+import { collectHeartbeatMetricsBlock } from './heartbeat-metrics-inject.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { atomicWriteFileSync } from './atomic-write.js'
@@ -15,6 +16,9 @@ import {
 import { resolveOwnerChatId, configuredOwnerChatFor } from '../owner-chat.js'
 import {
   appendTaskRun,
+  markTaskRunCompleted,
+  reconcileOpenTaskRuns,
+  getTaskRunMedianDurationMs,
   listPendingTaskRetries,
   deletePendingTaskRetry,
   updatePendingTaskRetry,
@@ -54,6 +58,7 @@ import {
   resolveAgentProvider,
   clearFeedbackModalAndRecheck,
 } from './agent-process.js'
+import { isRestartInFlight } from './restart-lock.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { runCommandTask } from './command-task.js'
 import { decideQuotaAction, type QuotaWorkClass } from '../quota-gate.js'
@@ -192,6 +197,10 @@ export interface TaskInflightEntry {
   // during the sweep so an edit to the schedule mid-run cannot move the
   // goalposts under an already-running injection.
   timeoutMs: number
+  // task_runs row id of the dispatch that opened this entry, so the sweep can
+  // close the SAME row it started. null only if the insert failed (non-fatal by
+  // design -- bookkeeping must never block a task from running).
+  runId: number | null
 }
 
 // How long a fired task may stay busy before the watchdog calls it stuck.
@@ -223,7 +232,21 @@ export function resolveStuckTimeoutMs(
 // Active task/heartbeat injections keyed by `${taskName}@${agentName}`.
 const taskInflightMap = new Map<string, TaskInflightEntry>()
 
-export type TaskTimeoutDecision = 'clear' | 'alert' | 'escalate' | 'hold' | 'lost'
+// 'done'      -- the pane went idle after a turn was seen: the run FINISHED.
+// 'abandoned' -- max tracking age reached; we stop watching without knowing.
+// 'alert'     -- still busy past the threshold; one-shot operator alert.
+// 'hold'      -- no conclusion this tick.
+// 'lost'      -- the session took the keystrokes but never started a turn.
+//
+// 'done' and 'abandoned' were one value ('clear') until 2026-08-26. They are
+// opposites -- one is success, the other is giving up -- and merging them meant
+// the only moment the system KNEW a task had finished was spent deleting a map
+// entry. Splitting them is what makes a completion recordable at all.
+// 'escalate' -- stage 2: the main agent was already told and the session is
+//                STILL busy after the extra owner window; alert the owner
+//                directly. Added upstream after this branch forked, so the
+//                rebase has to keep it alongside the done/abandoned split.
+export type TaskTimeoutDecision = 'done' | 'abandoned' | 'alert' | 'escalate' | 'hold' | 'lost'
 
 // Pure: decide what the watchdog should do for a single in-flight entry this
 // tick. Exported so it can be unit-tested without tmux I/O.
@@ -281,9 +304,9 @@ export function decideTaskTimeout(
   opts: { graceMs: number; timeoutMs: number; maxTrackMs: number; ownerExtraMs: number },
 ): TaskTimeoutDecision {
   const elapsed = now - entry.injectedAt
-  if (elapsed >= opts.maxTrackMs) return 'clear'
+  if (elapsed >= opts.maxTrackMs) return 'abandoned'
   if (paneState === 'idle') {
-    if (entry.sawTurn) return 'clear'
+    if (entry.sawTurn) return 'done'
     // Idle, and nothing ever showed the prompt being picked up. Inside the
     // grace window that is just the normal pre-turn lag, so hold; past it the
     // delivery is gone.
@@ -740,6 +763,15 @@ async function attemptFireTask(
   // rather than widening that function's return type for this one caller.
   const isMainAgent = agentName === MAIN_AGENT_ID
 
+  // A managed restart (context-guard rescue, auto-restart, model fallback) owns
+  // this agent for the length of its stop+start. Delivering into a session that
+  // is about to be killed loses the prompt, and the missing-session branch below
+  // would go further and START the agent with OUR default options -- overtaking
+  // the restarter, because stopAgentProcess's ~2s tmux wait makes isAgentRunning
+  // report false while the restart is only half done (see restart-lock.ts).
+  // 'busy' is the honest answer: the normal retry path delivers once it is over.
+  if (isRestartInFlight(agentName)) return 'busy'
+
   if (!sessionExistsOnHost(host, session)) {
     // The main channels session is service-managed (systemd/launchd via
     // channels.sh), not a directory under AGENTS_BASE_DIR -- startAgentProcess
@@ -914,9 +946,24 @@ async function attemptFireTask(
     // Use the scheduled-task framing instead: tags are still scrubbed (so a
     // poisoned body cannot smuggle a fake security tag) but the preamble marks
     // it as a task-to-execute with the standard escalate-if-dangerous guard.
-    const taskBody = preCheckPrefix
-      ? `[Pre-check eredmeny]\n${preCheckPrefix}\n\n[Feladat]\n${task.prompt}`
+    //
+    // HBMETRICSWIRE910: for a heartbeat task flagged injectMetrics, the
+    // runner executes the on-disk instrument NOW and appends its output in
+    // final report form. Inside the scrubbed body on purpose: the block
+    // carries kanban titles (operator-adjacent but free text), so it gets the
+    // same tag-scrub as the rest of the task body. collectHeartbeatMetricsBlock
+    // never throws and never returns empty -- an instrument failure arrives as
+    // a muszer-hiba block, which is a result to deliver, not a reason to skip.
+    let metricsBlock: string | null = null
+    if (task.type === 'heartbeat' && task.injectMetrics) {
+      metricsBlock = await collectHeartbeatMetricsBlock()
+    }
+    const promptWithMetrics = metricsBlock
+      ? `${task.prompt}\n\n${metricsBlock}`
       : task.prompt
+    const taskBody = preCheckPrefix
+      ? `[Pre-check eredmeny]\n${preCheckPrefix}\n\n[Feladat]\n${promptWithMetrics}`
+      : promptWithMetrics
     const fullPrompt =
       SCHEDULED_TASK_PREAMBLE + '\n' +
       prefix.trimEnd() + '\n\n' +
@@ -938,14 +985,16 @@ async function attemptFireTask(
     // history) surfaces exactly which tasks were missed and had to be
     // caught up, without any new alert/polling path that could race other
     // running tasks. Read-only w.r.t. everything else in this function.
+    // Bookkeeping id for the run we are about to open; the watchdog closes it.
+    let firedRunId: number | null = null
     if (lateCatchUpMs != null) {
-      appendTaskRun(task.name, agentName, 'fired_late')
+      firedRunId = appendTaskRun(task.name, agentName, 'fired_late')
       logger.warn(
         { task: task.name, agent: agentName, session, lateCatchUpMinutes: Math.round(lateCatchUpMs / 60000) },
         'Scheduled task fired via restart catch-up window -- missed its normal tick',
       )
     } else {
-      appendTaskRun(task.name, agentName, 'fired')
+      firedRunId = appendTaskRun(task.name, agentName, 'fired')
     }
     logger.info({ task: task.name, agent: agentName, session }, 'Scheduled task fired')
 
@@ -979,6 +1028,7 @@ async function attemptFireTask(
       // amplification running unnoticed since 2026-08-27.
       configDir: agentName === MAIN_AGENT_ID ? undefined : (resolveAgentConfigDirForRead(agentName) ?? undefined),
       timeoutMs: resolveStuckTimeoutMs(task),
+      runId: firedRunId,
     })
 
     // Post-send verify: if the agent started a new turn during our chunk
@@ -1032,8 +1082,10 @@ async function attemptFireTask(
             // is off because the box is 'typing', not idle -- the pre-flight gate
             // would otherwise burn its whole budget and time out every attempt.
             // lockMode 'held': we are already inside this pane's lane; taking
-            // the lock again would deadlock the promise-chain mutex.
-            if (await clearStaleParkedInput(session, host)) {
+            // the lock again would deadlock the promise-chain mutex. That goes
+            // for the clear too (PANEWRITERS910): its own acquire would see
+            // OUR lane busy and skip, so this call site must say it holds it.
+            if (await clearStaleParkedInput(session, host, { lockMode: 'held' })) {
               await sendPromptToSession(session, fullPrompt, host, { waitForIdle: false, lockMode: 'held' })
               logger.info({ task: task.name, session, attempt }, 'Scheduled prompt re-injected after swallowed Enter')
             } else {
@@ -1401,8 +1453,20 @@ function sendTaskTimeoutAlert(entry: TaskInflightEntry, elapsedMs: number): void
   // judge: a long-running analysis task that legitimately needs more time is
   // then one config line away, instead of a recurring 3am mystery.
   const thresholdMinutes = Math.round(entry.timeoutMs / 60000)
+  // "Running 5 minutes" is not actionable on its own; "running 5 minutes, normally
+  // finishes in 40 s" is. The median comes from this task's own completed runs,
+  // which only exist because completions are now recorded.
+  const medianMs = (() => {
+    try { return getTaskRunMedianDurationMs(entry.taskName) } catch { return null }
+  })()
+  const typical = medianMs == null
+    ? null
+    : medianMs < 60_000
+      ? `${Math.round(medianMs / 1000)} másodperc`
+      : `${Math.round(medianMs / 60_000)} perc`
   const text = [
     `[${BOT_NAME} scheduler] A(z) "${entry.taskName}" (${entry.agentName}) ütemezett feladat ${ageMinutes} perce fut -- lehetséges beakadás. A(z) fő-agent mar ertesitve volt errol, de nem oldodott meg.`,
+    ...(typical ? [`Ez a feladat általában ${typical} alatt lefut (a korábbi befejezett futások mediánja).`] : []),
     `A riasztási küszöb ennél a feladatnál ${thresholdMinutes} perc; ha ez a feladat jogosan fut ennél tovább, allitsd a task-config.json "stuckAfterMinutes" mezojet.`,
     'Az ágensben megtekintheted; a dashboard /Ütemezések oldalán visszavonható ha kell.',
   ].join('\n')
@@ -1422,6 +1486,19 @@ function sendTaskTimeoutAlert(entry: TaskInflightEntry, elapsedMs: number): void
 export const SCHEDULE_TICK_MS = 15_000
 
 export function startScheduleRunner(): NodeJS.Timeout {
+  // Close runs that the previous process was still watching when it stopped.
+  // taskInflightMap is in memory, so a restart loses every open entry and those
+  // rows would stay open for ever -- the same "cannot tell running from
+  // finished" hole this bookkeeping exists to close, just in a smaller window.
+  // They are recorded as 'interrupted', not 'done': we do not know whether they
+  // finished, and saying so beats guessing either way.
+  try {
+    const closed = reconcileOpenTaskRuns(TASK_FIRE_MAX_TRACK_MS)
+    if (closed > 0) logger.info({ closed }, 'Closed task runs orphaned by a restart (outcome=interrupted)')
+  } catch (err) {
+    logger.warn({ err }, 'task-run restart reconcile failed (non-fatal)')
+  }
+
   // Reload the persisted last-run times so a restart inside a task's catch-up
   // window does not re-fire an already-run task.
   loadScheduleLastRun()
@@ -1531,7 +1608,25 @@ export function startScheduleRunner(): NodeJS.Timeout {
         maxTrackMs: TASK_FIRE_MAX_TRACK_MS,
         ownerExtraMs: OWNER_ESCALATION_EXTRA_MS,
       })
-      if (decision === 'clear') {
+      if (decision === 'done' || decision === 'abandoned') {
+        // The one moment the system knows how the run ended. Before 2026-08-26
+        // this branch only deleted the map entry, so the knowledge died here and
+        // task_runs kept every row open for ever.
+        if (entry.runId != null) {
+          try {
+            markTaskRunCompleted(entry.runId, decision, now)
+          } catch (err) {
+            // Bookkeeping must never take down the sweep: the next tick still
+            // needs to watch the remaining entries.
+            logger.warn({ err, task: entry.taskName, runId: entry.runId }, 'Failed to record task-run completion')
+          }
+        }
+        if (decision === 'abandoned') {
+          logger.info(
+            { task: entry.taskName, agent: entry.agentName, elapsedMs: now - entry.injectedAt },
+            'Task-run tracking aged out before the session went idle -- recorded as abandoned, NOT as completed',
+          )
+        }
         taskInflightMap.delete(key)
       } else if (decision === 'alert') {
         sendTaskInflightMainAgentNotice(entry, now - entry.injectedAt)
@@ -1585,6 +1680,11 @@ export function startScheduleRunner(): NodeJS.Timeout {
           { task: entry.taskName, agent: entry.agentName, session: entry.session, elapsedMs: now - entry.injectedAt, lostCount },
           'Scheduled injection never started a turn (session accepted the keystrokes but stayed idle) -- recording as lost and re-queueing',
         )
+        // Close the run this injection opened before recording the loss, so the
+        // original row does not stay open for ever alongside its own 'lost' row.
+        if (entry.runId != null) {
+          try { markTaskRunCompleted(entry.runId, 'lost', now) } catch { /* non-fatal */ }
+        }
         appendTaskRun(entry.taskName, entry.agentName, 'lost')
         if (scheduleLastRun.get(entry.taskName) === entry.injectedAt) {
           scheduleLastRun.delete(entry.taskName)

@@ -103,6 +103,33 @@ const IDLE_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\)| �
 // prevent prose-quoting false positives. A future Claude Code release
 // that renames the spinner labels will miss the label regex but still
 // be caught by the tokens pattern.
+
+// Elapsed-time shape inside the turn marker. Claude Code does NOT render a
+// flat second count once a turn passes a minute: it switches to `1m 16s`, and
+// the seconds-only pattern that used to sit in both regexes below simply
+// stopped matching there. Measured on a live fleet pane 2026-09-06:
+//
+//   seconds form   "(52s · ↓ 2.6k tokens)"     -> matched before and still does
+//   minute form    "(1m 16s · ↓ 4.0k tokens)"  -> did NOT match before this fix
+//
+// The minute form above is the verbatim capture from a busy fleet pane, not a
+// retyped lookalike.
+//
+// The gap was not cosmetic. These patterns exist to cover the frame-level
+// window where the footer has not yet re-rendered `· esc to interrupt`, so
+// for the whole of a turn longer than 60 seconds the pane had ONE busy signal
+// instead of two -- and a long turn is exactly when a mis-detected 'idle'
+// costs the most (a prompt injected into a working pane).
+//
+// The hour segment is defensive, not measured: no live pane in the fleet ran
+// long enough to render one. It widens nothing dangerous, because every use
+// still requires the `· ↓N` chrome tail that prose cannot produce.
+//
+// One fragment, one definition: both patterns below and all eight busy-scan
+// call sites read the same shape, so the next rendering change is a one-line
+// edit rather than a hunt for copies.
+const TURN_ELAPSED = String.raw`(?:\d+h\s*)?(?:\d+m\s*)?\d+s`
+
 const BUSY_INDICATORS: RegExp[] = [
   // NOTE: /\besc to interrupt\b/ is NOT in this list.
   // It is checked separately via BUSY_ESC_TO_INTERRUPT_RX scoped to the
@@ -120,13 +147,15 @@ const BUSY_INDICATORS: RegExp[] = [
   // 2026-06-30). The live spinner/token line renders just above the input
   // box during a real turn, so the bottom-region scope still catches it.
   //
-  // Tokens-down-arrow counter: "(52s · ↓ 2.6k tokens ..."
-  /\(\s*\d+s\s*·\s*↓\s*\d/,
+  // Tokens-down-arrow counter: "(52s · ↓ 2.6k tokens ...", "(1m 16s · ↓ 4.0k tokens)"
+  new RegExp(String.raw`\(\s*${TURN_ELAPSED}\s*·\s*↓\s*\d`),
   // Known spinner labels paired with the turn-scoped `(Ns · ↓` tail on
   // the same line. The tail requirement kills the "Thinking…" prose
   // false positive. Non-exhaustive by design; the bare tokens pattern
   // above is the authoritative fallback.
-  /\b(?:Combobulating|Beaming|Thinking|Pondering|Reticulating|Configuring|Noodling|Ruminating|Percolating|Cogitating|Deliberating|Contemplating|Musing|Brewing|Synthesizing|Distilling|Refining|Simmering|Crafting|Formulating|Consulting|Unfurling|Unspooling|Unraveling)…\s*\(\s*\d+s\s*·\s*↓/,
+  new RegExp(
+    String.raw`\b(?:Combobulating|Beaming|Thinking|Pondering|Reticulating|Configuring|Noodling|Ruminating|Percolating|Cogitating|Deliberating|Contemplating|Musing|Brewing|Synthesizing|Distilling|Refining|Simmering|Crafting|Formulating|Consulting|Unfurling|Unspooling|Unraveling)…\s*\(\s*${TURN_ELAPSED}\s*·\s*↓`,
+  ),
 ]
 
 // `esc to interrupt` is a footer-region-only busy signal: Claude Code
@@ -559,12 +588,29 @@ export function detectsBlockingMenu(pane: string): boolean {
 // The tmux-visible selection marker Claude Code draws on the active option.
 const CURSOR_GLYPH = '\u276f'
 
-export type FirstRunGateKind = 'trust' | 'bypass-permissions' | 'login' | 'theme' | 'welcome'
+export type FirstRunGateKind = 'trust' | 'bypass-permissions' | 'login' | 'theme' | 'welcome' | 'mcp-trust'
 
 // Ordered: the login picker and theme screen render UNDER the "Welcome to
 // Claude Code" banner, so the more specific matches must win before the
 // generic welcome fallback.
 const FIRST_RUN_GATES: Array<{ kind: FirstRunGateKind; rx: RegExp }> = [
+  // MCP server-approval dialog (2026-09-03, PR #1099 review). A worksource
+  // agent gets its queue as a project-scope MCP server, and on the first start
+  // after that server appears Claude Code parks the TUI on:
+  //   New MCP server found in this project: worksource
+  //   ❯ 1. Use this MCP server
+  //     2. Use this and all future MCP servers in this project
+  //     3. Continue without using this MCP server
+  // Measured by the reviewer in a real tmux pane: detectPaneState read
+  // 'unknown', detectsFirstRunGate returned null and detectsBlockingMenu was
+  // false -- so nothing answered it and nothing alerted, while the router kept
+  // writing items into pending/. That is the exact failure the worksource PR
+  // exists to remove, reintroduced by its own launch path.
+  //
+  // Anchored on the OPTION TEXT for the same reason as the trust gate: the
+  // heading is vendor copy (it just changed once for trust), the option is the
+  // functional element the dialog cannot drop.
+  { kind: 'mcp-trust', rx: /Use this MCP server/i },
   // TRUSTGATE901 (2026-09-01): ALTERNATION, not a replacement. Claude Code
   // 2.1.246 rewrote this dialog -- the old question is GONE and the panel now
   // opens with a marketing line ("Quick safety check: Is this a project you
@@ -619,6 +665,42 @@ const FIRST_RUN_GATES: Array<{ kind: FirstRunGateKind; rx: RegExp }> = [
  * "No, exit" by the dialog's own footer, and Enter confirms whatever happens
  * to be highlighted. On an unrecognised shape, not acting is the correct move.
  */
+// Cursor-relative keys that select "Use this MCP server" on the MCP
+// server-approval dialog. Same discipline as firstRunAcceptKeys and for the
+// same reason: never by number. The dialog's option prefixes are vendor copy,
+// and a dropped "1." would make a blind `1` type nothing and then let Enter
+// confirm whatever happens to be highlighted.
+//
+// Deliberately targets option 1 (THIS server) and never option 2 ("all future
+// MCP servers in this project"). Option 2 would stop the dialog returning, but
+// it pre-approves servers nobody has seen yet; a new server appearing IS a
+// decision, and this code may not make it. Option 3 ("Continue without") is
+// excluded explicitly so a reworded layout cannot land on the refusal.
+export function mcpTrustAcceptKeys(pane: string): string[] | null {
+  if (!pane || !pane.trim()) return null
+  const lines = pane.split('\n')
+  const cursorIdx = lines.findIndex(l => l.includes(CURSOR_GLYPH))
+  if (cursorIdx < 0) return null
+  let first = cursorIdx
+  while (first > 0 && lines[first - 1].trim() !== '') first--
+  let last = cursorIdx
+  while (last < lines.length - 1 && lines[last + 1].trim() !== '') last++
+  const block = lines.slice(first, last + 1)
+
+  const isTarget = (l: string) =>
+    /use this MCP server/i.test(l) && !/all future/i.test(l) && !/continue without/i.test(l)
+  const idx = block.findIndex(isTarget)
+  if (idx < 0) return null
+  // Ambiguity is a reason to stop, not to guess.
+  if (block.filter(isTarget).length !== 1) return null
+
+  const delta = idx - (cursorIdx - first)
+  const keys: string[] = []
+  for (let i = 0; i < Math.abs(delta); i++) keys.push(delta > 0 ? 'Down' : 'Up')
+  keys.push('Enter')
+  return keys
+}
+
 export function firstRunAcceptKeys(pane: string): string[] | null {
   if (!pane || !pane.trim()) return null
   const lines = pane.split('\n')
@@ -1802,7 +1884,9 @@ export interface StuckInputActionFacts {
  *   - A TRUNCATED <channel> block (chat_id unrecoverable) must not be
  *     re-injected; multi-row truncated holds (awaiting the keystroke fix),
  *     single-row keeps the harmless legacy Enter.
- *   - Otherwise a bare Enter is the swallowed-Enter remedy, but only single-row.
+ *   - A bare Enter is the swallowed-Enter remedy, but only single-row AND only
+ *     with positive machine origin: an unidentified park may be the operator's
+ *     own draft, and Enter would submit it half-typed (GH #717).
  */
 export function decideStuckInputAction(f: StuckInputActionFacts): StuckInputAction {
   const multiRow = f.rowCount > 1
@@ -1850,10 +1934,36 @@ export function decideStuckInputAction(f: StuckInputActionFacts): StuckInputActi
   // Truncated safety preamble: clear only (never re-inject a stale preamble).
   if (f.truncatedPreamble && f.escalate) return 'clear-preamble'
   // Truncated <channel> block: hold a multi-row (Enter would corrupt; re-inject
-  // would answer the wrong chat_id), keep the harmless legacy Enter single-row.
+  // would answer the wrong chat_id), keep the Enter single-row. The Enter is
+  // safe here for the same reason the branches above are: a <channel> block,
+  // even a truncated one, IS positive evidence that we put the text there.
   if (f.blockTruncated) return multiRow ? 'hold' : 'enter'
-  // Default swallowed-Enter remedy -- never on multi-row.
-  return multiRow ? 'hold' : 'enter'
+  // Nothing above identified the park. GH #717: this default used to bare-Enter
+  // any single-row box, which submits an operator's half-typed draft the moment
+  // they pause past the confirm window. The reporter measured it repeatedly from
+  // a `tmux attach` on the main session; the remaining text is lost from the
+  // prompt and the agent answers a fragment.
+  //
+  // Every branch above establishes origin before it acts -- a channel block, a
+  // scheduled-task tick, a registry match, or an explicit machine-origin marker
+  // -- and the plain re-inject path already refuses to touch an uncertain park
+  // for exactly this reason ("a human's text has no re-delivery"). That rule was
+  // applied to the branches that clear or re-type and not to the one that
+  // presses Enter, even though submitting a half-typed draft destroys the same
+  // work. This closes that gap: no positive origin, no keystroke.
+  //
+  // What this costs, stated plainly: a genuine swallowed-Enter delivery whose
+  // parked text carries no recognisable marker is no longer rescued by the
+  // watcher. That failure is a DELAY and it has a safety net -- the ledger
+  // live-drain returns unanswered inbound to the running session on its own
+  // cycle. Submitting an operator's unfinished sentence is irreversible and
+  // goes out under the owner's name. The two are not the same weight.
+  //
+  // The hard-restart busy-guard is unaffected: applyStuckRestartBusyGuard only
+  // allows a restart on a 'typing' pane when machineOrigin is true, so an
+  // unidentified park (a suspected human draft) still yields 'skip' there --
+  // the same signal now gates both paths, which is the point.
+  return !multiRow && f.machineOrigin ? 'enter' : 'hold'
 }
 
 // Would the soft stuck-input recovery have ANY submitting/clearing move for
@@ -2137,8 +2247,22 @@ export function decideStuckToolCallRecovery(
 // little wider than LIVE_FOOTER_REGION_LINES (which anchors on the footer line
 // itself); still tail-scoped, so a scrollback quote of the same phrase does
 // not trip it.
+// "100% context used" is the phrasing Claude Code uses while AUTO-COMPACT IS
+// ENABLED. With auto-compact off it renders a different string entirely --
+// `Context low (N% remaining)` in red -- and never reaches the "used" wording
+// at all (verified against the shipped CLI 2.1.247: one branch prints
+// `${100-pct}% context used`, the other `Context low (${pctLeft}% remaining)`,
+// and only the first was matched here). A pane in that state is just as
+// unreachable, so the net has to recognise it too.
+//
+// Deliberately capped at 0-2% REMAINING, not at any "context low". The banner
+// appears from well above the danger zone (a session at 30% remaining is
+// working fine), and the net's action is a FRESH RESTART -- the most expensive
+// thing the guard can do to a live agent. Matching the whole low band would
+// turn a warning into a restart trigger; matching only the last two percent
+// keeps this a saturation predicate.
 const CTX_SAT_FOOTER_REGION_LINES = 8
-const CTX_SAT_RX = /100% context used|context (?:is |limit reached|window )?full\b|context limit|auto-?compact required/i
+const CTX_SAT_RX = /100% context used|context (?:is |limit reached|window )?full\b|context limit|auto-?compact required|context low \([0-2]% remaining\)/i
 
 export function paneShowsContextSaturation(capture: string): boolean {
   if (!capture || !capture.trim()) return false

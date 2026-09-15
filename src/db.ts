@@ -270,19 +270,49 @@ export function initDatabase(dbPathOverride?: string): void {
       created_at INTEGER NOT NULL,
       attachment_kind TEXT,
       attachment_file_id TEXT,
+      reply_to_message_id TEXT,
       UNIQUE(agent_id, chat_id, direction, message_id)
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_convlog_agent ON conversation_log(agent_id, created_at)`)
   // Migration for pre-existing DBs: transcript-less voice/video_note inbounds
   // keep their attachment identity so a respawned session can still download
-  // and transcribe them (mirrors _MIGRATION_COLUMNS in scripts/hooks/ledger_lib.py).
-  for (const col of ['attachment_kind', 'attachment_file_id']) {
+  // and transcribe them; reply_to_message_id lets an inbound quote be
+  // retraced after the fact (df3b48a7) (mirrors _MIGRATION_COLUMNS in
+  // scripts/hooks/ledger_lib.py).
+  for (const col of ['attachment_kind', 'attachment_file_id', 'reply_to_message_id']) {
     const cols = db.prepare("PRAGMA table_info(conversation_log)").all() as { name: string }[]
     if (!cols.some(c => c.name === col)) {
       db.exec(`ALTER TABLE conversation_log ADD COLUMN ${col} TEXT`)
     }
   }
+
+  // --- Fleet PR-throughput ledger (PRLEDGER907) ----------------------------
+  // One row per CLOSED pull request across the owner's repos; the collector
+  // (scripts/pr-ledger-collect.mjs) upserts daily and re-derives is_live,
+  // because a release retroactively makes earlier develop merges live. The
+  // schema is defined in TWO places on purpose (same dual-writer contract as
+  // conversation_log / ledger_lib.py): the collector may run standalone before
+  // the dashboard ever migrated. Kept in sync by pr-ledger-schema.test.ts.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pr_ledger (
+      repo TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      closed_date TEXT NOT NULL,
+      base_branch TEXT NOT NULL,
+      author TEXT,
+      additions INTEGER,
+      deletions INTEGER,
+      files INTEGER,
+      state TEXT NOT NULL,
+      title TEXT,
+      is_live INTEGER NOT NULL DEFAULT 0,
+      live_since TEXT,
+      measured_at INTEGER NOT NULL,
+      UNIQUE(repo, number)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_pr_ledger_date ON pr_ledger(closed_date)`)
 
   // Migration: hot/warm/cold/shared tier system with an enforced CHECK.
   // Rebuilds the table whenever its current schema doesn't include the
@@ -458,6 +488,42 @@ export function initDatabase(dbPathOverride?: string): void {
     END
   `)
 
+  // KARTYAFRISSMEZO912: the bump above covered ONLY status, so a title edit
+  // (or assignee/priority/description/project/due_date) left updated_at
+  // untouched -- measured on MIOORSZEM831: title rewritten 2026-09-12, the
+  // card still dated 2026-09-08. Audits and cleanups bucket on this column
+  // ("fresh / 7-30d / 30d+"), so the half-maintained field lied in both
+  // directions. Same self-healing shape as the status trigger.
+  //
+  // Deliberately NOT a blanket AFTER UPDATE: sort_order changes are drag
+  // reordering (whole columns get renumbered at once -- bumping would make
+  // every card look fresh), and archived_at is the archive sweep itself,
+  // which MEASURES updated_at to pick its victims; bumping there would
+  // reward the sweep with fake freshness. Column comparisons use IS NOT,
+  // not !=: assignee/description/project/due_date are nullable, and
+  // NULL != 'x' is NULL, which would silently skip every NULL<->value edit.
+  //
+  // No recursion: the bump's own UPDATE touches only updated_at, which is
+  // not in the OF list. The title-gate truncation (an UPDATE OF title from
+  // inside a trigger) can re-fire this one under PRAGMA recursive_triggers=ON,
+  // but that truncation only ever follows a real title edit, so the extra
+  // bump lands on an already-fresh timestamp -- same value, no loop.
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS kanban_cards_fields_bump_updated_at
+    AFTER UPDATE OF title, description, assignee, priority, project, due_date ON kanban_cards
+    FOR EACH ROW WHEN (
+      NEW.title IS NOT OLD.title OR
+      NEW.description IS NOT OLD.description OR
+      NEW.assignee IS NOT OLD.assignee OR
+      NEW.priority IS NOT OLD.priority OR
+      NEW.project IS NOT OLD.project OR
+      NEW.due_date IS NOT OLD.due_date
+    ) AND NEW.updated_at = OLD.updated_at
+    BEGIN
+      UPDATE kanban_cards SET updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = NEW.id;
+    END
+  `)
+
   // KANBANCTXDEAD824 follow-up: paragraph-length card titles cost tokens in
   // every agent that reads the board, and the 2026-08-24 sweep moved ~1.3 MB
   // of accreted title text into comments by hand. These triggers automate that
@@ -516,6 +582,99 @@ export function initDatabase(dbPathOverride?: string): void {
     AFTER UPDATE OF title ON kanban_cards
     FOR EACH ROW WHEN NEW.title != OLD.title AND length(NEW.title) > 300
     ${titleGateBody}
+  `)
+
+  // Timestamp TYPE gate. SQLite's INTEGER affinity converts a numeric string
+  // ('1788721449') on the way in, so strftime('%s','now') lands as an integer
+  // and nobody notices the difference -- but datetime('now') yields
+  // '2026-08-29 18:29:48', which is not a well-formed integer, so it is stored
+  // AS TEXT in a column declared INTEGER NOT NULL.
+  //
+  // Why that is not cosmetic: every sweep and every audit detector on this
+  // table compares a timestamp with an integer (`updated_at < strftime(...)`),
+  // and SQLite compares a TEXT value with an INTEGER by TYPE ORDER, not by
+  // value -- text always sorts above numbers. So a TEXT row silently lands on
+  // the same side of EVERY such comparison: it always looks fresh, never looks
+  // stuck, and quietly drops out of the stale-card sweeps and the audit
+  // instead of raising anything. The failure has no exception and no log line,
+  // which is why it survived from 2026-08-29 to 2026-09-07 unnoticed.
+  //
+  // The write path cannot be fixed at a call site: the application writers all
+  // pass Date.now()/1000, and the rows that went wrong were written by an
+  // agent's own ad-hoc `sqlite3 ... INSERT` with datetime('now') -- measured
+  // 2026-09-07, twelve cards and fifteen comments from one evening, all
+  // carrying UTC datetime strings. The writer is "anyone with a shell", so the
+  // guard belongs to the table.
+  //
+  // Self-healing rather than a CHECK constraint, for the reason already stated
+  // above the title gate: agents write this table with raw sqlite3 and rarely
+  // inspect exit codes, so a rejected INSERT would lose the card silently.
+  // Normalising keeps the row AND makes it comparable.
+  //
+  // Loop safety, same argument as the title gate: the corrective UPDATE writes
+  // integers, so the re-fired WHEN clause is false even with
+  // PRAGMA recursive_triggers=ON.
+  //
+  // A REAL is cast, not parsed: strftime() would read a bare number as a
+  // Julian day and turn 1788721449 into a date in the year 4.8 million. Text
+  // that strftime cannot parse falls back to now() rather than to NULL, which
+  // the NOT NULL column would reject -- losing the whole write to save a
+  // timestamp.
+  const tsNormalise = (col: string) => `
+    CASE typeof(NEW.${col})
+      WHEN 'integer' THEN NEW.${col}
+      WHEN 'real' THEN CAST(NEW.${col} AS INTEGER)
+      ELSE CAST(COALESCE(strftime('%s', NEW.${col}), strftime('%s','now')) AS INTEGER)
+    END`
+  const tsGateWhen = `typeof(NEW.created_at) != 'integer' OR typeof(NEW.updated_at) != 'integer'`
+  const tsGateBody = `
+    BEGIN
+      UPDATE kanban_cards SET
+        created_at = ${tsNormalise('created_at')},
+        updated_at = ${tsNormalise('updated_at')}
+      WHERE id = NEW.id;
+    END
+  `
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS kanban_cards_timestamp_type_gate_insert
+    AFTER INSERT ON kanban_cards
+    FOR EACH ROW WHEN ${tsGateWhen}
+    ${tsGateBody}
+  `)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS kanban_cards_timestamp_type_gate_update
+    AFTER UPDATE OF created_at, updated_at ON kanban_cards
+    FOR EACH ROW WHEN ${tsGateWhen}
+    ${tsGateBody}
+  `)
+
+  // Same defect, same evening, same writer: kanban_comments.created_at carried
+  // fifteen TEXT rows next to the twelve card rows -- one agent's ad-hoc
+  // sqlite3 session, not an application path. Gating only the cards would leave
+  // the protection half-built against a hazard that is demonstrably table-wide,
+  // and a comment timestamp is what orders a card's history and dates its
+  // entries; a TEXT one sorts above every integer sibling, so the newest
+  // comment on such a card is whichever one went in wrong.
+  //
+  // Comments have no updated_at, so the gate is single-column; everything else
+  // (self-healing over CHECK, loop safety, CAST for REAL, now() fallback over
+  // NULL) is the argument written above, unchanged.
+  const commentTsGateBody = `
+    BEGIN
+      UPDATE kanban_comments SET created_at = ${tsNormalise('created_at')} WHERE id = NEW.id;
+    END
+  `
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS kanban_comments_timestamp_type_gate_insert
+    AFTER INSERT ON kanban_comments
+    FOR EACH ROW WHEN typeof(NEW.created_at) != 'integer'
+    ${commentTsGateBody}
+  `)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS kanban_comments_timestamp_type_gate_update
+    AFTER UPDATE OF created_at ON kanban_comments
+    FOR EACH ROW WHEN typeof(NEW.created_at) != 'integer'
+    ${commentTsGateBody}
   `)
 
   // --- Kanban labels (tags) -----------------------------------------------
@@ -684,6 +843,21 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_ts ON task_runs(ts)`)
   // Migration: add status column to task_runs (introduced 2026-06-13)
   try { db.exec(`ALTER TABLE task_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'fired'`) } catch { /* already present */ }
+  // Migration: completion bookkeeping (introduced 2026-08-26).
+  //
+  // `status` records how the DISPATCH went (fired / skipped / lost / ...) and is
+  // stamped once, at injection time. It was the only column, so a run that had
+  // been delivered and a run that had finished looked identical for ever --
+  // 3269 'fired' rows on this install, zero completions. These two columns
+  // record how the run ENDED, and are written by the post-fire watchdog sweep
+  // that already computes exactly that and then threw the answer away.
+  //
+  // Deliberately additive: `status` keeps its meaning, so every existing query
+  // and the historical rows stay valid. A NULL completed_at means "not closed",
+  // which is the honest reading for every row written before this migration.
+  try { db.exec(`ALTER TABLE task_runs ADD COLUMN completed_at INTEGER`) } catch { /* already present */ }
+  try { db.exec(`ALTER TABLE task_runs ADD COLUMN outcome TEXT`) } catch { /* already present */ }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_open ON task_runs(completed_at, ts)`)
 
   // --- Pending Scheduled Task Retries ---
   // Busy-skipped scheduled tasks used to live in an in-memory Map. On a
@@ -1280,7 +1454,7 @@ export function saveMemory(
 // search terms. We also cap the number and length of tokens to bound query
 // cost (the sanitizer previously allowed an arbitrary-length prefix expansion
 // that could make a single request scan the entire index).
-export function buildFtsMatchExpression(query: string): string {
+export function buildFtsMatchExpression(query: string, join: 'AND' | 'OR' = 'AND'): string {
   const MAX_TOKENS = 20
   const MAX_TOKEN_LEN = 64
   const sanitized = query
@@ -1296,7 +1470,35 @@ export function buildFtsMatchExpression(query: string): string {
     .filter((t) => t.length > 0)
     .slice(0, MAX_TOKENS)
     .map((t) => t.slice(0, MAX_TOKEN_LEN) + '*')
-  return tokens.join(' ')
+  // A space between FTS5 terms is an implicit AND, so the default keeps the
+  // strict behaviour. 'OR' is the relaxed pass used by ftsWithOrFallback.
+  return join === 'OR' ? tokens.join(' OR ') : tokens.join(' ')
+}
+
+/**
+ * Run an FTS query strictly first, and only if that finds nothing, run it again
+ * with the tokens ORed together.
+ *
+ * Why a fallback and not a plain OR: joining with a space makes every word of
+ * the question mandatory, so a naturally phrased question returns zero rows
+ * while its keywords return the right memory at rank 1 (GH #1025 measured
+ * "meddig tart a felmondasi ido" -> 0 results, "felmondasi ido" -> the correct
+ * memory, first place; the store contained the answer, and the word "meddig"
+ * simply appears in no memory). Switching to OR outright would relax every
+ * query that works today, including the ones AND already answers well. This
+ * keeps AND's precision where AND has an answer and only relaxes where the
+ * alternative is nothing at all, which is what the caller was getting.
+ *
+ * A single-token query has nothing to relax, so it runs once.
+ */
+function ftsWithOrFallback<T>(query: string, run: (terms: string) => T[]): { rows: T[]; relaxed: boolean } {
+  const strict = buildFtsMatchExpression(query)
+  if (!strict) return { rows: [], relaxed: false }
+  const rows = run(strict)
+  if (rows.length > 0) return { rows, relaxed: false }
+  const relaxedTerms = buildFtsMatchExpression(query, 'OR')
+  if (relaxedTerms === strict) return { rows, relaxed: false }
+  return { rows: run(relaxedTerms), relaxed: true }
 }
 
 // -- Recency-weighted retrieval (Roitman 17.4.2) --
@@ -1353,19 +1555,19 @@ function withoutRank<T extends { rank: number }>(rows: T[]): Omit<T, 'rank'>[] {
 }
 
 export function searchMemories(query: string, chatId: string, limit = 3): Memory[] {
-  const terms = buildFtsMatchExpression(query)
-  if (!terms) return []
   try {
-    const candidates = db
-      .prepare(
-        `SELECT m.*, f.rank AS rank FROM memories m
-         JOIN memories_fts f ON m.id = f.rowid
-         WHERE f.content MATCH ? AND m.chat_id = ?
-         ORDER BY rank
-         LIMIT ?`
-      )
-      .all(terms, chatId, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
-    return withoutRank(reRankByRecency(candidates, limit)) as Memory[]
+    const { rows } = ftsWithOrFallback(query, (terms) =>
+      db
+        .prepare(
+          `SELECT m.*, f.rank AS rank FROM memories m
+           JOIN memories_fts f ON m.id = f.rowid
+           WHERE f.content MATCH ? AND m.chat_id = ?
+           ORDER BY rank
+           LIMIT ?`
+        )
+        .all(terms, chatId, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
+    )
+    return withoutRank(reRankByRecency(rows, limit)) as Memory[]
   } catch {
     return []
   }
@@ -1404,10 +1606,15 @@ export function decayMemories(): void {
   db.prepare('UPDATE memories SET salience = MAX(salience * 0.995, 0.01) WHERE created_at < ?').run(oneWeekAgo)
 }
 
-export function getMemoriesForChat(chatId: string, limit = 10): Memory[] {
+export function getMemoriesForChat(chatId: string, limit = 10, offset = 0): Memory[] {
+  // id DESC tie-break (#947): accessed_at has 1-second granularity, so a bulk
+  // import leaves hundreds of rows sharing one value; without a stable
+  // secondary sort SQLite may order the ties differently between queries, and
+  // LIMIT/OFFSET over them can repeat a row on one page and never return
+  // another. id is the unique insertion order, so it makes paging total.
   return db
-    .prepare('SELECT * FROM memories WHERE chat_id = ? ORDER BY accessed_at DESC LIMIT ?')
-    .all(chatId, limit) as Memory[]
+    .prepare('SELECT * FROM memories WHERE chat_id = ? ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?')
+    .all(chatId, limit, offset) as Memory[]
 }
 
 // --- In-process memory cache (TTL-based) ---
@@ -1494,32 +1701,37 @@ export function saveAgentMemory(
 // accessed memories" instead of "the N most recent <category> memories", so an
 // older-but-still-active memory would drop out of the list with no truncation
 // signal -- invisible to the caller, and worst right after a restart.
-export function getAgentMemories(agentId: string, limit: number = 20, category?: string): Memory[] {
-  const key = `${agentId}:${limit}:${category ?? ''}`
+export function getAgentMemories(agentId: string, limit: number = 20, category?: string, offset: number = 0): Memory[] {
+  // offset is part of the cache key (#947): without it page 2 would be served
+  // page 1's cached rows for up to MEMORY_CACHE_TTL_MS. id DESC tie-break for
+  // the same reason getMemoriesForChat has one -- accessed_at ties are common
+  // after a bulk import and make LIMIT/OFFSET non-total without it.
+  const key = `${agentId}:${limit}:${category ?? ''}:${offset}`
   const cached = memoryCacheGet(key)
   if (cached) return cached
   const result = (category
     ? db.prepare(
-        "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND category = ? ORDER BY accessed_at DESC LIMIT ?"
-      ).all(agentId, category, limit)
+        "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND category = ? ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?"
+      ).all(agentId, category, limit, offset)
     : db.prepare(
-        "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') ORDER BY accessed_at DESC LIMIT ?"
-      ).all(agentId, limit)) as Memory[]
+        "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?"
+      ).all(agentId, limit, offset)) as Memory[]
   memoryCacheSet(key, result)
   return result
 }
 
-export function searchAgentMemories(agentId: string, query: string, limit: number = 10): Memory[] {
-  const terms = buildFtsMatchExpression(query)
-  if (!terms) return []
+export function searchAgentMemories(agentId: string, query: string, limit: number = 10, trace?: { relaxed: boolean }): Memory[] {
   try {
-    const candidates = db.prepare(
-      `SELECT m.*, f.rank AS rank FROM memories m
-       JOIN memories_fts f ON m.id = f.rowid
-       WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')
-       ORDER BY rank LIMIT ?`
-    ).all(terms, agentId, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
-    return withoutRank(reRankByRecency(candidates, limit)) as Memory[]
+    const { rows, relaxed } = ftsWithOrFallback(query, (terms) =>
+      db.prepare(
+        `SELECT m.*, f.rank AS rank FROM memories m
+         JOIN memories_fts f ON m.id = f.rowid
+         WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')
+         ORDER BY rank LIMIT ?`
+      ).all(terms, agentId, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
+    )
+    if (trace) trace.relaxed = relaxed
+    return withoutRank(reRankByRecency(rows, limit)) as Memory[]
   } catch {
     return db.prepare(
       "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?"
@@ -1633,10 +1845,9 @@ export function recallByDateRange(from: string, to: string, agentId?: string): R
 }
 
 export function recallSearch(query: string, agentId?: string, limit = 50): RecallResult {
-  const terms = buildFtsMatchExpression(query)
   let memories: Memory[] = []
   const escaped = escapeLike(query)
-  if (terms) {
+  if (buildFtsMatchExpression(query)) {
     try {
       // Was ORDER BY created_at DESC (pure recency, relevance ignored); now the
       // same λ-blend as the other search paths, so a strongly matching older
@@ -1644,10 +1855,12 @@ export function recallSearch(query: string, agentId?: string, limit = 50): Recal
       const sql = agentId
         ? `SELECT m.*, f.rank AS rank FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared') ORDER BY rank LIMIT ?`
         : `SELECT m.*, f.rank AS rank FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? ORDER BY rank LIMIT ?`
-      const candidates = agentId
-        ? db.prepare(sql).all(terms, agentId, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
-        : db.prepare(sql).all(terms, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
-      memories = withoutRank(reRankByRecency(candidates, limit)) as Memory[]
+      const { rows } = ftsWithOrFallback(query, (terms) =>
+        agentId
+          ? db.prepare(sql).all(terms, agentId, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
+          : db.prepare(sql).all(terms, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
+      )
+      memories = withoutRank(reRankByRecency(rows, limit)) as Memory[]
     } catch {
       const sql = agentId
         ? "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ?"
@@ -1976,6 +2189,16 @@ export function createKanbanCard(card: {
 // agent and every script uses -- wrote none. Measured 2026-08-29: 8 events in
 // the whole table, the newest 6 weeks old, so "when did this card become
 // in_progress" was unanswerable for essentially every card on the board.
+// The columns updateKanbanCard actually writes. Exported so the HTTP boundary
+// (PUT /api/kanban/:id) can validate a body against exactly this set instead of
+// duplicating the list -- a field that is not here is silently dropped by the
+// spread below, which is the #1023 data-loss bug when the caller believed it
+// was writing one (e.g. `description_append`).
+export const KANBAN_WRITABLE_FIELDS = [
+  'title', 'description', 'status', 'assignee', 'priority', 'project',
+  'parent_id', 'due_date', 'sort_order', 'archived_at',
+] as const
+
 export function updateKanbanCard(
   id: string,
   fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>,
@@ -1985,6 +2208,14 @@ export function updateKanbanCard(
   if (!card) return false
   const now = Math.floor(Date.now() / 1000)
   const f = { ...card, ...fields, updated_at: now }
+  // #1023: bump updated_at ONLY when a writable column actually changes. The
+  // UPDATE below always matches the row, so a no-op PUT (an unknown field, or a
+  // known field echoed back unchanged) used to stamp updated_at=now and report
+  // success -- destroying the exact "this card is stale, go look" signal the
+  // failed write should have preserved. A no-op is not a failure: return true
+  // (the card exists) but touch nothing.
+  const realChange = KANBAN_WRITABLE_FIELDS.some((k) => f[k] !== card[k])
+  if (!realChange) return true
   const changed = db.prepare(
     `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?
      WHERE id=?`
@@ -2891,21 +3122,92 @@ export function getAgentConversationThreads(): AgentThread[] {
 
 export interface TaskRunEntry { name: string; agent: string; ts: number; status: string }
 
-export interface TaskRunHistoryEntry { ts: number; status: string; tokens_est: number | null }
+export interface TaskRunHistoryEntry {
+  ts: number
+  status: string
+  tokens_est: number | null
+  // Completion bookkeeping (2026-08-26). null = the run was never closed:
+  // either it is still in flight, or it predates this migration. The UI must
+  // render that as 'unknown', NOT as 'still running' -- the two are different
+  // claims and conflating them is how a finished task kept looking stuck.
+  completed_at: number | null
+  outcome: string | null
+  duration_ms: number | null
+}
 
 const TASK_RUN_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
-export function appendTaskRun(name: string, agent: string, status = 'fired'): void {
+/**
+ * Record that a run was dispatched. Returns the row id so the caller can close
+ * the run later with markTaskRunCompleted -- without it there is no way to
+ * attach an ending to a beginning, which is why completions were never written.
+ */
+export function appendTaskRun(name: string, agent: string, status = 'fired'): number {
   const now = Date.now()
-  db.prepare('INSERT INTO task_runs (name, agent, ts, status) VALUES (?, ?, ?, ?)').run(name, agent, now, status)
+  const info = db.prepare('INSERT INTO task_runs (name, agent, ts, status) VALUES (?, ?, ?, ?)').run(name, agent, now, status)
   // Opportunistic TTL prune: cheap indexed DELETE, keeps the table bounded.
   db.prepare('DELETE FROM task_runs WHERE ts < ?').run(now - TASK_RUN_TTL_MS)
+  return Number(info.lastInsertRowid)
+}
+
+/** How a run ENDED. Distinct from `status`, which is how it was dispatched. */
+export type TaskRunOutcome = 'done' | 'abandoned' | 'lost' | 'interrupted'
+
+/**
+ * Close a run. Idempotent by design: the WHERE clause refuses to overwrite an
+ * already-closed row, so a duplicate sweep (or a reconcile racing a live sweep)
+ * cannot turn a 'done' into an 'abandoned'. First writer wins.
+ */
+export function markTaskRunCompleted(runId: number, outcome: TaskRunOutcome, completedAt = Date.now()): boolean {
+  const info = db.prepare(
+    'UPDATE task_runs SET completed_at = ?, outcome = ? WHERE id = ? AND completed_at IS NULL'
+  ).run(completedAt, outcome, runId)
+  return info.changes > 0
+}
+
+/**
+ * Close runs that a restart orphaned.
+ *
+ * The watchdog's in-flight map lives in memory, so a dashboard restart loses
+ * every open run it was tracking and those rows would stay open for ever --
+ * re-introducing the exact "cannot tell running from finished" problem this
+ * change removes, just in a smaller window. Rows older than maxAgeMs with no
+ * completed_at are closed as 'interrupted': we genuinely do not know whether
+ * they finished, and saying so is more useful than either optimistic 'done'
+ * or alarming 'abandoned'.
+ */
+export function reconcileOpenTaskRuns(maxAgeMs: number, now = Date.now()): number {
+  const info = db.prepare(
+    `UPDATE task_runs SET completed_at = ?, outcome = 'interrupted'
+     WHERE completed_at IS NULL AND ts < ? AND status IN ('fired', 'fired_late')`
+  ).run(now, now - maxAgeMs)
+  return info.changes
+}
+
+/**
+ * Median wall-clock duration of the recent COMPLETED runs of a task, in ms.
+ * Returns null until there is enough history to be meaningful.
+ *
+ * This is what turns the stuck-task alert from a bare threshold into a
+ * judgement the operator can make: "running 5 min, typically finishes in 40 s"
+ * says something; "running 5 min" alone does not.
+ */
+export function getTaskRunMedianDurationMs(name: string, minSamples = 5, limit = 50): number | null {
+  const rows = db.prepare(
+    `SELECT (completed_at - ts) AS d FROM task_runs
+     WHERE name = ? AND outcome = 'done' AND completed_at IS NOT NULL
+     ORDER BY ts DESC LIMIT ?`
+  ).all(name, limit) as { d: number }[]
+  const ds = rows.map(r => r.d).filter(d => Number.isFinite(d) && d >= 0).sort((a, b) => a - b)
+  if (ds.length < minSamples) return null
+  const mid = Math.floor(ds.length / 2)
+  return ds.length % 2 === 0 ? Math.round((ds[mid - 1] + ds[mid]) / 2) : ds[mid]
 }
 
 export function listTaskRunHistory(name: string, limit: number): TaskRunHistoryEntry[] {
   const rows = db.prepare(
-    'SELECT ts, status, agent FROM task_runs WHERE name = ? ORDER BY ts DESC LIMIT ?'
-  ).all(name, limit) as { ts: number; status: string; agent: string }[]
+    'SELECT ts, status, agent, completed_at, outcome FROM task_runs WHERE name = ? ORDER BY ts DESC LIMIT ?'
+  ).all(name, limit) as { ts: number; status: string; agent: string; completed_at: number | null; outcome: string | null }[]
 
   // token_usage.timestamp is in seconds; task_runs.ts is in ms -- divide by 1000
   const tokenStmt = db.prepare(
@@ -2919,7 +3221,15 @@ export function listTaskRunHistory(name: string, limit: number): TaskRunHistoryE
     const newerTs = i > 0 ? rows[i - 1].ts : undefined
     const windowEnd = newerTs !== undefined ? Math.min(row.ts + 3600000, newerTs) : row.ts + 3600000
     const tokenRow = tokenStmt.get(row.agent, Math.floor(row.ts / 1000), Math.floor(windowEnd / 1000)) as { total: number }
-    return { ts: row.ts, status: row.status, tokens_est: tokenRow.total > 0 ? tokenRow.total : null }
+    const completedAt = row.completed_at ?? null
+    return {
+      ts: row.ts,
+      status: row.status,
+      tokens_est: tokenRow.total > 0 ? tokenRow.total : null,
+      completed_at: completedAt,
+      outcome: row.outcome ?? null,
+      duration_ms: completedAt != null ? completedAt - row.ts : null,
+    }
   })
 }
 
@@ -3113,15 +3423,50 @@ function vectorSearch(agentId: string, queryEmbedding: number[], limit: number =
   return scored.slice(0, limit).map(s => s.memory)
 }
 
-export async function hybridSearch(agentId: string, query: string, limit: number = 10): Promise<Memory[]> {
+/**
+ * What a hybrid search actually did. GH #1025: when the FTS branch returns
+ * nothing, RRF does not return nothing -- the vector branch fills the whole
+ * result list on its own, and the caller gets confident-looking rows with no
+ * lexical support and no sign that half the search failed. The trace makes that
+ * case observable instead of leaving the caller to infer it.
+ */
+export interface HybridSearchTrace {
+  ftsHits: number
+  vectorHits: number
+  /** The FTS branch found nothing with AND and was retried with OR. */
+  ftsRelaxed: boolean
+  /** Every returned row came from the vector branch alone. */
+  vectorOnly: boolean
+}
+
+export async function hybridSearch(
+  agentId: string,
+  query: string,
+  limit: number = 10,
+  trace?: HybridSearchTrace,
+): Promise<Memory[]> {
   const k = 60 // RRF constant
 
   // FTS5 results
-  const ftsResults = searchAgentMemories(agentId, query, limit * 2)
+  const ftsTrace = { relaxed: false }
+  const ftsResults = searchAgentMemories(agentId, query, limit * 2, ftsTrace)
 
   // Vector results
   const queryEmbedding = await generateEmbedding(query)
   const vecResults = queryEmbedding ? vectorSearch(agentId, queryEmbedding, limit * 2) : []
+
+  if (trace) {
+    trace.ftsHits = ftsResults.length
+    trace.vectorHits = vecResults.length
+    trace.ftsRelaxed = ftsTrace.relaxed
+    trace.vectorOnly = ftsResults.length === 0 && vecResults.length > 0
+  }
+  if (ftsResults.length === 0 && vecResults.length > 0) {
+    logger.warn(
+      { agentId, query, vectorHits: vecResults.length },
+      'hybrid search: the keyword branch found nothing, the answer comes from the vector branch alone',
+    )
+  }
 
   // Reciprocal Rank Fusion
   const scores: Map<number, number> = new Map()
@@ -3828,6 +4173,99 @@ export function pruneTokenUsage(): number {
   return info.changes
 }
 
+// The decay-sweep cadence. Lives HERE, beside the prune it drives, because
+// db.ts is what needs it for the lag tolerance below and memory.ts already
+// imports from db.ts -- putting it there would close an import cycle.
+// index.ts sweeps once at boot AND on this interval, so a restart only ever
+// SHORTENS the gap between two sweeps.
+export const DECAY_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * HBDBKUSZOB823: whether the daily token_usage prune is still running.
+ *
+ * WHY THIS AND NOT A DB-SIZE THRESHOLD. The heartbeat carried a
+ * `dbSize > 100 MB` warning. Measured 2026-09-13: the DB is 481.7 MB and about
+ * 65 % of it IS the token ledger, which this sweep holds at exactly
+ * TOKEN_USAGE_RETENTION_DAYS (oldest row: 90.01 days against a 90-day
+ * retention). The size is bounded BY DESIGN and can never fall under such a
+ * threshold, so the warning can never go quiet -- and the one failure it
+ * claims to watch, the prune silently stopping, is invisible to it, because
+ * "the DB is big" is already permanently true.
+ *
+ * WHAT THE LAG MEASURES. Rows below `now - retention` are deleted, so the
+ * oldest surviving row's overshoot past that cutoff IS the time since the last
+ * successful sweep. No separate last-run bookkeeping, and a sweep that ran but
+ * deleted nothing cannot fake it.
+ *
+ * WHY TWO SWEEP CYCLES AND NOT A ROUND NUMBER. Measured on the live DB the
+ * same day: 50 rows sat past the cutoff, the oldest overshooting by 16.4
+ * MINUTES -- rows that merely aged past it since the last sweep. So a naive
+ * "oldest row older than retention" test is true almost always and would die
+ * of false positives exactly the way the size threshold died of always-true.
+ * The tolerance is derived from DECAY_SWEEP_INTERVAL_MS so it cannot drift
+ * from the real cadence; two cycles means two consecutive missed sweeps with
+ * no restart in between, which is not jitter.
+ *
+ * A STATE, never a bare number: 'empty' (no rows yet) is a fresh install with
+ * nothing to judge, and must read as neither healthy nor broken.
+ */
+export const TOKEN_PRUNE_OLDEST_SQL = 'SELECT MIN(timestamp) AS oldest FROM token_usage'
+
+export const TOKEN_PRUNE_TOLERANCE_CYCLES = 2
+
+export interface TokenPruneLag {
+  state: 'ok' | 'stale' | 'empty'
+  retention_days: number
+  tolerance_hours: number
+  /** Hours the oldest row overshoots the cutoff = time since the last sweep. */
+  lag_hours: number | null
+  oldest_age_days: number | null
+}
+
+/**
+ * The verdict itself, as a PURE function: three lines of decision inside a
+ * DB-reading wrapper is exactly the place a later refactor drops in silence,
+ * with only an end-to-end run left to notice. Exported so the controls run
+ * against the SHIPPED decision and not a re-typed equivalent.
+ */
+export function classifyTokenPruneLag(
+  oldestTimestamp: number | null,
+  retentionDays: number,
+  nowSeconds: number,
+  toleranceHours: number,
+): TokenPruneLag {
+  if (oldestTimestamp == null) {
+    return {
+      state: 'empty',
+      retention_days: retentionDays,
+      tolerance_hours: toleranceHours,
+      lag_hours: null,
+      oldest_age_days: null,
+    }
+  }
+  const ageSeconds = nowSeconds - oldestTimestamp
+  const lagHours = (ageSeconds - retentionDays * 86400) / 3600
+  return {
+    // A negative lag (nothing has aged past the cutoff yet) is healthy, not a
+    // finding -- it only means the sweep ran recently.
+    state: lagHours > toleranceHours ? 'stale' : 'ok',
+    retention_days: retentionDays,
+    tolerance_hours: toleranceHours,
+    lag_hours: Math.round(lagHours * 100) / 100,
+    oldest_age_days: Math.round((ageSeconds / 86400) * 100) / 100,
+  }
+}
+
+export function getTokenPruneLag(): TokenPruneLag {
+  const row = db.prepare(TOKEN_PRUNE_OLDEST_SQL).get() as { oldest: number | null } | undefined
+  return classifyTokenPruneLag(
+    row?.oldest ?? null,
+    Number(getEffectiveSettingValue('TOKEN_USAGE_RETENTION_DAYS')),
+    Math.floor(Date.now() / 1000),
+    (TOKEN_PRUNE_TOLERANCE_CYCLES * DECAY_SWEEP_INTERVAL_MS) / 3_600_000,
+  )
+}
+
 // --- Vault SSH Keys (shared key pool) ---
 // Each key is independent of any server -- one key may be assigned to many
 // servers. The private key blob lives in the AES-256-GCM vault (vault.ts);
@@ -4124,4 +4562,39 @@ export function listOtelTraces(limit = 50): OtelTraceSummary[] {
     ORDER BY s.start_ms DESC
     LIMIT ?
   `).all(limit) as OtelTraceSummary[]
+}
+
+// --- Fleet PR-throughput ledger (PRLEDGER907) --------------------------------
+
+export interface PrLedgerRow {
+  repo: string
+  number: number
+  closed_date: string
+  base_branch: string
+  author: string | null
+  additions: number | null
+  deletions: number | null
+  files: number | null
+  state: 'merged' | 'closed'
+  title: string | null
+  is_live: number
+  live_since: string | null
+  measured_at: number
+}
+
+export interface PrLedgerSummary { closed: number; merged: number; rejected: number; live: number }
+
+/**
+ * Read-only window query over the ledger: inclusive [from, to] on closed_date
+ * (YYYY-MM-DD), optional repo filter. The summary is derived from the SAME
+ * row set the caller gets, so the numbers and the list cannot disagree.
+ */
+export function listPrLedger(from: string, to: string, repo?: string): { rows: PrLedgerRow[]; summary: PrLedgerSummary } {
+  const rows = (repo
+    ? db.prepare('SELECT * FROM pr_ledger WHERE closed_date BETWEEN ? AND ? AND repo = ? ORDER BY closed_date DESC, repo, number DESC').all(from, to, repo)
+    : db.prepare('SELECT * FROM pr_ledger WHERE closed_date BETWEEN ? AND ? ORDER BY closed_date DESC, repo, number DESC').all(from, to)
+  ) as PrLedgerRow[]
+  let merged = 0, live = 0
+  for (const r of rows) { if (r.state === 'merged') merged++; if (r.is_live) live++ }
+  return { rows, summary: { closed: rows.length, merged, rejected: rows.length - merged, live } }
 }

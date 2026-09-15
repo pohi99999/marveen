@@ -33,7 +33,7 @@ import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { agentDir, listAgentNames } from './agent-config.js'
 import { isAgentRunning } from './agent-process.js'
-import { readLastIngestionTimestamp } from './inbound-probe.js'
+import { readLastIngestionTimestamp, readLastIngestionTimestampAcross, mainTranscriptDirs } from './inbound-probe.js'
 import { sendRoutineAlert } from './routine-alert.js'
 
 const MINUTE_MS = 60 * 1000
@@ -225,6 +225,24 @@ export function transcriptDirFor(agentName: string, projectRoot: string): string
   return join(process.env['HOME'] ?? homedir(), '.claude', 'projects', cwd.replace(/\//g, '-'))
 }
 
+// Same CONFIG-DIR BLIND SPOT the keepalive watchdog hit (see mainTranscriptDirs
+// in inbound-probe.ts): an agent running with an isolated CLAUDE_CONFIG_DIR
+// writes its transcript under THAT root, not the shared ~/.claude, so reading
+// only the shared path reports "no inbound ever" for a perfectly busy agent.
+// Both the main agent (<PROJECT_ROOT>/.channels-config) and every sub-agent
+// (<agentDir>/.claude-config) can be isolated, so probe each candidate root and
+// let the newest ingestion win.
+export function transcriptDirsFor(agentName: string, projectRoot: string): string[] {
+  if (agentName === MAIN_AGENT_ID) return mainTranscriptDirs()
+  const cwd = agentDir(agentName)
+  const encoded = cwd.replace(/\//g, '-')
+  const roots = [
+    join(process.env['HOME'] ?? homedir(), '.claude'),
+    join(cwd, '.claude-config'),
+  ]
+  return [...new Set(roots.map(r => join(r, 'projects', encoded)))]
+}
+
 async function probeIntake(token: string): Promise<IntakeProbe> {
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`, {
@@ -248,7 +266,7 @@ async function checkAgentIntake(agentName: string, projectRoot: string): Promise
 
   const probe = await probeIntake(token)
   const now = Date.now()
-  const lastInboundAt = readLastIngestionTimestamp(transcriptDirFor(agentName, projectRoot))
+  const lastInboundAt = readLastIngestionTimestampAcross(transcriptDirsFor(agentName, projectRoot))
   const decision = decideIntakeVerdict({
     probe,
     prev: lastObservation.get(agentName) ?? null,

@@ -8,6 +8,7 @@ import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, OLLAMA_URL, APP_TZ } from '../../config
 import { logger } from '../../logger.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
 import { detectHomoglyphs, formatHomoglyphWarning } from '../../homoglyph.js'
+import type { HybridSearchTrace } from '../../db.js'
 import type { RouteContext } from './types.js'
 
 // Canonical memory categories. Kept in sync with the DB CHECK constraint in
@@ -82,10 +83,29 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     const tier = url.searchParams.get('tier') || url.searchParams.get('category') || ''
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
     const mode = url.searchParams.get('mode') || 'fts'
+    // #947: offset is honoured on the LISTING branches only. A negative or
+    // non-numeric value is clamped to 0 (no page skip) rather than erroring --
+    // the failure this fixes was a SILENT one, and a hard 400 on a stray value
+    // would trade it for a different surprise.
+    const offsetRaw = parseInt(url.searchParams.get('offset') || '0', 10)
+    const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0
+    // offset makes no sense on a relevance-ranked search: hybridSearch fuses two
+    // rankings and searchAgentMemories oversamples FTS then re-ranks in JS, so a
+    // SQL OFFSET would page over a DIFFERENT ranking than page 1 returned.
+    // Reject the combination loudly instead of dropping offset silently --
+    // silently dropping the parameter is the class of bug #947 is about.
+    if (offset > 0 && q) {
+      json(res, { error: 'offset is not supported together with q (search results are relevance-ranked, not a stable page order)' }, 400)
+      return true
+    }
 
     let results: Memory[]
+    // GH #1025: a hybrid answer built entirely by the vector branch looks the
+    // same as one with lexical support. The trace rides the response so the
+    // caller can tell them apart.
+    const hybridTrace: HybridSearchTrace = { ftsHits: 0, vectorHits: 0, ftsRelaxed: false, vectorOnly: false }
     if (q && mode === 'hybrid') {
-      results = await hybridSearch(agentId || MAIN_AGENT_ID, q, limit)
+      results = await hybridSearch(agentId || MAIN_AGENT_ID, q, limit, hybridTrace)
     } else if (q && agentId) {
       results = searchAgentMemories(agentId, q, limit)
       if (results.length === 0) {
@@ -101,9 +121,9 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       }
     } else if (agentId) {
       // Category goes into the query, not a post-filter: see getAgentMemories.
-      results = getAgentMemories(agentId, limit, tier || undefined)
+      results = getAgentMemories(agentId, limit, tier || undefined, offset)
     } else {
-      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit)
+      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit, offset)
     }
 
     // Still needed for the search branches above, which rank by relevance and
@@ -124,6 +144,15 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       created_label: new Date(m.created_at * 1000).toLocaleString('hu-HU', { timeZone: APP_TZ }),
       accessed_label: new Date(m.accessed_at * 1000).toLocaleString('hu-HU', { timeZone: APP_TZ }),
     }))
+    // The body of this endpoint is a bare array and several callers index into
+    // it, so the trace rides a header rather than changing the shape.
+    if (q && mode === 'hybrid') {
+      res.setHeader(
+        'X-Memory-Search',
+        `fts=${hybridTrace.ftsHits}; vector=${hybridTrace.vectorHits};` +
+          ` relaxed=${hybridTrace.ftsRelaxed}; vector-only=${hybridTrace.vectorOnly}`,
+      )
+    }
     jsonMaybeGzip(req, res, formatted)
     return true
   }
@@ -246,11 +275,30 @@ Respond ONLY with JSON, nothing else:
   }
 
   const memUpdateMatch = path.match(/^\/api\/memories\/(\d+)$/)
-  if (memUpdateMatch && method === 'PUT') {
+  if (memUpdateMatch && (method === 'PUT' || method === 'PATCH')) {
     const id = parseInt(memUpdateMatch[1], 10)
     const body = await readBody(req)
-    const { content, category, tier, agent_id, keywords } = JSON.parse(body.toString()) as { content: string; category?: string; tier?: string; agent_id?: string; keywords?: string }
-    if (updateMemory(id, content, tier || category, agent_id, keywords)) { json(res, { ok: true }); return true }
+    const { content, category, tier, agent_id, keywords } = JSON.parse(body.toString()) as { content?: string; category?: string; tier?: string; agent_id?: string; keywords?: string }
+    const newCategory = (tier || category || '').toLowerCase() || undefined
+    if (newCategory && !MEMORY_CATEGORIES.has(newCategory)) {
+      json(res, { error: `Invalid category "${newCategory}". Allowed: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
+      return true
+    }
+    // Partial update: a category-only change (the hot->cold tier move) must not
+    // require re-sending the content. updateMemory() always SETs content, so an
+    // omitted content is backfilled from the existing row -- previously an
+    // undefined content made the SQL bind throw and the endpoint 500'd, which
+    // left tier moves impossible via the API (Dream Engine blocker, 2026-07-30).
+    let effectiveContent = content
+    if (effectiveContent === undefined) {
+      const row = getDb().prepare('SELECT content FROM memories WHERE id = ?').get(id) as { content: string } | undefined
+      if (!row) { json(res, { error: 'Memory not found' }, 404); return true }
+      effectiveContent = row.content
+    } else if (containsSuspiciousContent(effectiveContent)) {
+      json(res, { error: 'Content rejected by security filter' }, 400)
+      return true
+    }
+    if (updateMemory(id, effectiveContent, newCategory, agent_id, keywords)) { json(res, { ok: true }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true
   }

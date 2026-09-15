@@ -75,6 +75,10 @@ vi.mock('../web/agent-config.js', () => ({
   readAgentRemoteHost: () => null,
   readAgentVoiceConfig: () => ({ responseMode: 'text' }),
   readAgentEngine: (name: string) => mockReadAgentEngine(name),
+  // v1.38.0 upstream sync: this suite predates the worksource-queue delivery
+  // path and is not exercising it -- false keeps every case on the tmux/
+  // engine-branch delivery these tests actually assert on.
+  readAgentWorksourceChannel: () => false,
 }))
 
 vi.mock('../web/agent-process.js', () => ({

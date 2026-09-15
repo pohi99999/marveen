@@ -10,11 +10,15 @@ Amit garantal:
   - megnevezett flotta-gazdas kartya NEM jon letre ertesites nelkul (a szkript megtagadja);
   - mindket iras VISSZA VAN OLVASVA (a kartya SELECT-tel, az uzenet a visszakapott id-vel);
   - a 300 karakteres cim-kaput ELORE jelzi, nem utolag a trigger;
-  - --dry-run: mindent ellenoriz, semmit nem ir.
+  - --dry-run: mindent ellenoriz, semmit nem ir -- ES UGYANAZOKAT A KAPUKAT futtatja, mint az
+    eles ag (letezes, token). Egy dry-run, ami megengedobb az eles futasnal, rosszabb, mint
+    a semmi: zoldet ad arra, amit a rendszer megtagad. Ezt a kartya-dryrun-paritas teszt meri.
 
 Hasznalat:
   kartya-es-ertesites.py --id X905 --assignee boni --title "..." --desc-file /path
-      --msg-file /path [--priority normal] [--status planned] [--dry-run]
+      --msg-file /path --author Boni [--priority normal] [--status planned] [--dry-run]
+A felado MINDKET modban KIMONDOTT (KARTYAKULDO908, 2026-09-08): a letrehozo agon --author vagy
+--from kell, kulonben megtagadas. Korabban csendben 'marveen' lett belole.
 Az onmagunknak (marveen) vagy a gazdanak (szabolcs) szolo kartya ertesites nelkul is mehet:
 ott a --no-msg kapcsolo kell, KIMONDVA.
 
@@ -27,7 +31,9 @@ KOORDINATORHOZ (marveen) -- kimondva, a kimeneten es az uzenet elso soraban is.
 
 KOMMENT-ONLY MOD (KARTYAIRASESZKOZ905, 2026-09-05): komment egy MEGLEVO kartyara,
 ERTESITES NELKUL, ugyanazokkal a kapukkal es kotelezo visszaolvasassal:
-  kartya-es-ertesites.py --id X905 --comment-file /path [--author Samu] [--dry-run]
+  kartya-es-ertesites.py --id X905 --comment-file /path --author Samu [--dry-run]
+Az --author itt KOTELEZO (KARTYADRYRUN907, 2026-09-08): korabban csendben 'Marveen'-re esett,
+tehat a kartyan MAS neve allt, mint aki irta. A letrehozo agon az alapertelmezes valtozatlan.
 MEZOMOZGATAS (KARTYASTATUSZ906, Boni lelete 2026-09-06): komment-modban a lenti mezok MEGLEVO
 kartyat mozgatnak, elotte-pillanatkeppel es FUGGETLEN visszaolvasassal:
   kartya-es-ertesites.py --id X905 --status waiting --comment-file /path --author Boni
@@ -87,6 +93,30 @@ def _db_kapu():
                  f'(gyoker: {ROOT})\nEz jellemzoen egy korabbi rossz ut-feloldas hagyta ott. Mondd ki:\n'
                  f'CLAUDECLAW_ROOT=<a fo fa> vagy KARTYA_DB=<a db utvonala>.')
     return DB
+def _token_kapu(dry_run):
+    """A dashboard-token feloldasa, EGY helyen -- hogy a dry-run ES az eles ag UGYANAZT a
+    kaput fussa. A ket ag CSAK a mondatban ter el, mert a KOVETKEZMENY ter el: az eles agon
+    a kartya EKKOR MAR LETREJOTT (a token-kapu az 5. lepesben all, a 4. lepes irasa utan),
+    a dry-run agon meg semmi nem irodott -- ezert ott felteteles modban mondjuk ki, hogy
+    eles futasban MAR LETREJONNE. Ez a hianyzo mondat volt a dry-run legdragabb hazugsaga:
+    zoldet adott arra a futasra, aminek a vege pontosan az az allapot, amit az egesz eszkoz
+    megelozni hivatott -- a NEMA KARTYA."""
+    tok = os.environ.get('KARTYA_TOKEN')
+    if tok is not None:
+        return tok
+    tokpath = os.path.join(ROOT, 'store', '.dashboard-token')
+    if not os.path.exists(tokpath):
+        elozmeny = ('MEGTAGADVA (dry-run): eles futasban A KARTYA MAR LETREJONNE, DE AZ UZENET NEM MENNE KI:'
+                    if dry_run else
+                    'A KARTYA LETREJOTT, DE AZ UZENET NEM MENT KI:')
+        sys.exit(f'{elozmeny} nincs dashboard-token itt:\n'
+                 f'  {tokpath}\n(gyoker: {ROOT}). Mondd ki: CLAUDECLAW_ROOT=<a fo fa> vagy KARTYA_TOKEN=<token>.\n'
+                 + ('A dry-run ezert PIROS: az eles futas reszlegesen irna (kartya igen, uzenet nem).'
+                    if dry_run else
+                    'Kuldd el kezzel az uzenetet, kulonben a kartya nema marad.'))
+    return open(tokpath).read().strip()
+
+
 FLEET = {'samu','zara','boni','iris','dani','geri','deeper','qwen','mira','tomi','jumanji','hidli'}
 COORDINATOR = 'marveen'
 GAZDA = 'szabolcs'
@@ -230,6 +260,19 @@ GEPI_FEJLEC_RX = re.compile(r'^\s*\[[^\]\n]*\d{1,2}:\d{2}, rendszerora\]\s*\n?')
 
 def komment_mod(a):
     """Komment egy MEGLEVO kartyara, ertesites nelkul. Kapuk + kotelezo visszaolvasas."""
+    # SZERZO-KAPU (KARTYADRYRUN907, 2026-09-08). Boni es Zara egymastol fuggetlenul
+    # merte 2026-09-07-en (21700, 21701), hogy --author nelkul a fejlec ES a
+    # kanban_comments.author mezo CSENDBEN 'Marveen'-re esett. A javitas akkor egy
+    # VERZIOKOVETETLEN peldanyba ment, es a v1.37.0 kiadas nemán visszaallitotta a hibat
+    # (a kartya kozben done-on allt, tehat senki nem olvasta ujra). Ezert all itt fail-closed
+    # kapu FELSZOLITAS helyett: a kapu akkor is vedd, ha senki nem olvassa el a korlevelet.
+    # MIERT NEM ELEG A HELYES ALAPERTELMEZES: a komment SZERZOJE attribucio, nem kenyelem --
+    # a rossz nev irANYA is rossz, mert FELFELE, a koordinatorra mutat, tehat SULYT ad egy
+    # mondatnak, amit nem o irt.
+    if a.author is None:
+        sys.exit('MEGTAGADVA: komment-modban a szerzo KIMONDOTT: add meg az --author-t\n'
+                 '(pl. --author Boni). Korabban ez csendben "Marveen"-re esett vissza, tehat\n'
+                 'a kartyan MAS neve allt, mint aki irta -- es a kimenet kozben OK-t mondott.')
     text = open(a.comment_file, encoding='utf-8').read().strip()
     if not text:
         sys.exit('MEGTAGADVA: ures komment-fajl.')
@@ -328,6 +371,8 @@ def komment_mod(a):
               f'  fejlec: {fejlec} | szoveg {len(text)} kar | ertesites: NINCS (komment-only)\n'
               f'  mezomozgatas: {terv}'
               + (f' | mar ezen az erteken all: {valtozatlan}' if valtozatlan else ''))
+        if valtozik:
+            _elozmeny_figyelmeztetes(db, a, now, dry=True)
         return
 
     cur = db.execute('INSERT INTO kanban_comments (card_id,author,content,created_at) VALUES (?,?,?,?)',
@@ -349,6 +394,8 @@ def komment_mod(a):
         if mozgatas:
             print('MEZOMOZGATAS: nincs teendo (minden kimondott ertek mar ez volt).')
         return
+    _elozmeny_figyelmeztetes(db, a, now)
+
     sets = ', '.join(f'{k}=?' for k in valtozik)
     cur = db.execute(f'UPDATE kanban_cards SET {sets}, updated_at=? WHERE id=?',
                      (*valtozik.values(), now, a.id))
@@ -369,12 +416,99 @@ def komment_mod(a):
           + ', '.join(f'{k}: {rov(elotte[k])} -> {rov(kapott[k])}' for k in valtozik))
     # A MOZGATAS NYOMA A KARTYAN: a komment szovege Bonie, ez a sor a gepe. Enelkul a
     # tabla olvasoja latja az uj statuszt, de nem latja, hogy KI es MIKOR mozgatta.
+    #
+    # A REGI ERTEK TELJES EGESZEBEN IDE KERUL (2026-09-11, Mira lelete). A kartya-mezo
+    # EGYERTEKU: aki utoljara ir, felulir, es a regi ertek ELVESZIK. A rovidített nyom
+    # ma nem volt eleg: egy felulirt cimet nem lehetett belole visszaallitani, mert a
+    # naplo csak 60 karaktert orzott. (Ugyanaznap HAROM ilyen utkozes volt, mind
+    # kartya-mezon -- mikozben a KOZOS SKILL-FAJLBA harman irtak egy oran belul nulla
+    # utkozessel, mert az a szerkezet HOZZAFUZHETO, nem egyerteku.)
+    # A konzol-kimenet marad rovid (olvashatosag); a TAROLT nyom teljes.
+    teljes = [f'{k}: {rov(elotte[k])} -> {rov(kapott[k])}' for k in valtozik]
+    # A NULL-t KIIRVA kell megkulonboztetni az ures szotol: a visszaallito ember kulonben
+    # a 'None' szot masolna vissza egy mezobe, ami eredetileg NULL volt.
+    reszletes = '\n'.join(
+        f'  A(z) {k} TELJES REGI ERTEKE (masolhato, ha vissza kell allitani):\n  '
+        + (str(elotte[k]) if elotte[k] is not None else '(ures -- NULL volt)')
+        for k in valtozik)
+    # GEPI ZAROSOR (Samu verify-lelete a #1296-on, 2026-09-12). A kovetkezo kor
+    # figyelmeztetese EBBOL olvassa vissza a mozgatot -- SOHA a fenti szabad szovegbol.
+    # A szabad szoveges parse harom alakban bukott: a 'dr. Kovacs' nevet az elso pontnal
+    # levagta; egy regi ertek, amiben benne all a 'kerte: Hamis.' szoveg, atvette a valodi
+    # szerzo helyet; es a legrosszabb, ha a beagyazott nev EGYBEESIK a kovetkezo mozgatoeval,
+    # az intes teljesen ELNEMUL -- pont az utkozes-alaku adaton, amiert letezik.
+    # A zarosor az UTOLSO sor, a `reszletes` (tehat minden kulso eredetu ertek) MOGOTT all,
+    # es a visszaolvasas az UTOLSO illeszkedest veszi: egy ertekbe hamisitott zarosor igy
+    # sosem elozheti meg a valodit. A nevbol a sortoresek kiesnek, kulonben a nev maga
+    # tudna zarosort hamisitani.
+    # A NEVBOL A SORTORES ES A MEZOELVALASZTO IS KIESIK (Samu 2. verify-kore, B2-alak).
+    # A sortores-ejtes onmagaban keves volt: egy 'Silent | mezok: z' alaku nev ELCSUSZTATJA a
+    # mezok-mezot, es ha utana egy tenyleg 'Silent' nevu szerzo mozgat, a FIGYELMEZTETES ELNEMUL --
+    # vagyis a nev maga allitja elo pontosan azt a csendet, amiert ez a mechanizmus letezik.
+    # A '|' ejtese ugyanaz az elv, mint a sortorese: a zarosor szerkezetet a NEV nem irhatja felul.
+    mozgato = ' '.join((a.author or '(ismeretlen)').replace('|', '/').split())
+    zarosor = f'{_ZAROSOR_ELO}{mozgato} | mezok: {",".join(valtozik)} | ts: {now}'
     db.execute('INSERT INTO kanban_comments (card_id,author,content,created_at) VALUES (?,?,?,?)',
                (a.id, 'kartya-es-ertesites',
                 '[kartya-es-ertesites.py] Mezomozgatas a fenti komment mellett ('
-                + ', '.join(f'{k}: {rov(elotte[k])} -> {rov(kapott[k])}' for k in valtozik)
-                + f'), kerte: {a.author}. Fuggetlenul visszaolvasva.', now))
+                + ', '.join(teljes)
+                + f'), kerte: {a.author}. Fuggetlenul visszaolvasva.\n' + reszletes
+                + '\n' + zarosor, now))
     db.commit()
+
+# A mezomozgatas-nyom GEPI ZAROSORA. Ket helyen hasznaljuk: iraskor a nyom vegere kerul,
+# olvasaskor EBBOL jon a mozgato neve. A sor-eleji ^ es a sor-vegi $ egyutt kell: enelkul a
+# mintaja beleillik egy tobbsoros regi ertekbe is.
+_ZAROSOR_ELO = '-- mozgato: '
+_ZAROSOR_RE = re.compile(r'^-- mozgato: (.*?) \| mezok: (.*?) \| ts: (\d+)$', re.M)
+
+
+def _elozmeny_figyelmeztetes(db, a, now, dry=False):
+    """KI allitotta utoljara a mezot, es MIKOR -- a dontes ELE.
+
+    A no-op fogas csak azt latja, ha az ertek MAR ez. Azt NEM, ha valaki MAS
+    percekkel korabban allitotta at, es most valaki visszafordul. 2026-09-11-en
+    HAROMSZOR tortent meg egy oran belul, ugyanattol a szokastol: masfel oras
+    tabla-pillanatkepbol dolgozni. Ez NEM kapu -- a visszaallitas sokszor jogos.
+
+    A DRY-RUN AGON IS FUT (Mira lelete, 2026-09-11): eloszor csak az eles agon
+    futott, es ezzel EPP A GONDOS HASZNALOT buntette -- aki elovigyazatossagbol
+    dry-runol egy mezomozgatas elott, kevesebb informaciot kapott, mint aki
+    gondolkodas nelkul nekifutott. A negyedik utkozest pont az elozetes
+    ellenorzes elozne meg, es az az ut volt a vak.
+    """
+    elozmeny = db.execute(
+        "SELECT created_at, content FROM kanban_comments WHERE card_id=? "
+        "AND content LIKE '[kartya-es-ertesites.py] Mezomozgatas%' ORDER BY created_at DESC LIMIT 1",
+        (a.id,)).fetchone()
+    if not elozmeny:
+        return
+    kora = now - elozmeny[0]
+    perc = kora / 60.0
+    # AZ UTOLSO illeszkedes szamit, nem az elso: a kulso eredetu regi ertekek a zarosor ELOTT
+    # allnak, tehat egy oda hamisitott sor sosem elozheti meg a valodit.
+    talalatok = _ZAROSOR_RE.findall(elozmeny[1] or '')
+    if not talalatok:
+        # REGI FORMATUMU NYOM (a zarosor elotti korokbol). Nem talalgatunk nevet a szabad
+        # szovegbol -- az volt a hiba. De NEM is nemulunk el: a friss, ismeretlen mozgato
+        # epp a kockazatos eset.
+        if kora < 1800:
+            print(f'FIGYELEM -- AZ ELOZO MEZOMOZGATAS {perc:.0f} PERCE VOLT, a mozgato viszont '
+                  f'NEM ALLAPITHATO MEG gepileg (regi formatumu nyom). Nezd meg a kartyan, '
+                  f'ki mozgatott, mielott visszaforditod.')
+        else:
+            print(f'(elozo mezomozgatas: {perc:.0f} perce -- regi formatumu nyom, a mozgato nem '
+                  f'allapithato meg gepileg)')
+        return
+    ki, mit, _ts = talalatok[-1]
+    ki = ki.strip()
+    if kora < 1800 and ki.lower() != (a.author or '').lower():
+        print(f'FIGYELEM -- AZ ELOZO MEZOMOZGATAS {perc:.0f} PERCE VOLT, ES NEM A TIED: '
+              f'{ki} allitotta ({mit}). Ha ezt most visszaforditod, elavult allapotbol dolgozol. '
+              + ('Eles futasban a mozgatas VEGREHAJTODNA -- most semmi nem irodik.'
+                 if dry else 'A mozgatast VEGREHAJTOM, de a kartyan lasd az o indokat is.'))
+    else:
+        print(f'(elozo mezomozgatas: {ki}, {perc:.0f} perce -- {mit})')
 
 def main():
     p = argparse.ArgumentParser()
@@ -387,7 +521,12 @@ def main():
     p.add_argument('--comment-file', help='KOMMENT-ONLY mod: komment meglevo kartyara, ertesites nelkul')
     p.add_argument('--assignee-uj', action='store_true', dest='assignee_uj',
                    help='komment-mod: kimondva uj (a tablan meg nem szereplo) felelos-nev')
-    p.add_argument('--author', default='Marveen', help='komment-mod: a komment szerzoje')
+    # NINCS CSENDES ALAPERTELMEZES (KARTYADRYRUN907, 2026-09-08). Korabban itt
+    # default='Marveen' allt, tehat egy --author nelkuli komment SZO NELKUL a
+    # koordinatort nevezte meg szerzokent -- a kimenet OK-t mondott, a kartyan pedig
+    # MAS neve allt. A None azert kell, hogy a komment-ag meg tudja KULONBOZTETNI a
+    # kimondott erteket a nem-adottol; a letrehozo ag alapertelmezese lentebb, KIMONDVA all.
+    p.add_argument('--author', default=None, help='a komment szerzoje (komment-modban KOTELEZO)')
     p.add_argument('--from', dest='from_agent', default=None,
                    help='az ertesites feladoja (alapertelmezes: az --author kisbetusitve)')
     p.add_argument('--dry-run', action='store_true')
@@ -418,8 +557,21 @@ def main():
     # UGYANAZ A KANONIKUS ALAK, mint a mozgato agon -- kulonben a ket ut ugyanarra a nevre
     # KET KULONBOZO erteket irna a tablara.
     who = _felelos_feloldas(a.assignee)
-    # A FELADO: kimondva (--from), vagy a szerzobol. Az alapertelmezes az --author kisbetusitve,
-    # tehat a korabbi viselkedes (--author nelkul: 'marveen') valtozatlan marad.
+    # A FELADO KIMONDOTT (KARTYAKULDO908, 2026-09-08). Korabban itt egy 'Marveen' tartalek allt:
+    # --author es --from nelkul az ertesites CSENDBEN a koordinator neveben ment ki. Mira merte
+    # 2026-09-07-en (21680), mi tortenik ilyenkor: Tomi olyan feladat-kiosztast kapott, ami ugy
+    # nezett ki, mintha a FO-AGENS adta volna, holott a kartya Mirae volt. Az attribucios hiba
+    # iranya a rossz: FELFELE mutat, tehat SULYT ad egy kerésnek, amit nem a koordinator kuldott,
+    # es a cimzett neki is valaszolna vissza.
+    # A #1237 ezt a komment-agon mar lezarta; ez a kapu ugyanaz a LETREHOZO agon. A ket agat
+    # SZANDEKOSAN kulon PR zarja: a regi viselkedest egy KIADOTT teszt rogzitette
+    # regresszio-kontrollkent (kartya-ertesites-felado, 3. ellenorzes), es egy ilyen szerzodest
+    # nem irunk at egy masik javitas mellekhatasakent -- kulon dontesbol, a teszttel egyutt.
+    if not a.from_agent and not a.author:
+        sys.exit('MEGTAGADVA: a letrehozo agon is KIMONDOTT a felado: add meg az --author-t\n'
+                 '(a kartya szerzoje) vagy a --from-ot (az ertesites feladoja).\n'
+                 'Korabban ez csendben "marveen"-re esett vissza, tehat a cimzett ugy latta,\n'
+                 'mintha a koordinator kerte volna -- es neki is valaszolt volna vissza.')
     frm = (a.from_agent or a.author).strip().lower()
     if frm not in KULDOK:
         sys.exit(f'MEGTAGADVA: ismeretlen felado ("{frm}"). Ervenyes: {", ".join(sorted(KULDOK))}.\n'
@@ -466,8 +618,30 @@ def main():
             sys.exit(f'MEGTAGADVA: vegyes irasrendszeru szo a(z) {cimke}-ban: {h[:5]}')
 
     if a.dry_run:
-        _db_kapu()
-        print(f'DRY-RUN OK (DB: {DB}): minden ellenorzes atment.\n  id={a.id} gazda={who} statusz={a.status} '
+        # PARITAS-KAPU (KARTYADRYRUN907; Mira lelete 2026-09-07, UJRA ELO 2026-09-08 a kiadott
+        # peldanyban). A dry-run KORABBAN ITT tert vissza: a 4. lepes letezes-ellenorzese ES az
+        # 5. lepes token-kapuja ELOTT. Ezert zoldet adott ket olyan futasra, amit az eles ag
+        # megtagad vagy elront:
+        #   - LETEZO id-re "minden ellenorzes atment" (az eles ag: MEGTAGADVA, MAR LETEZIK);
+        #   - token nelkul, uzenettel szinten zold (az eles ag: a kartya letrejon, az uzenet nem).
+        # Egy dry-run, ami MEGENGEDOBB az eles agnal, rosszabb, mintha nem lenne: pont az a
+        # hasznalat dol be, amiert a kapcsolo letezik ("atmenne-e?"). A kapcsolo erteke a
+        # PARITAS, nem a szigor -- ezert a lenti ket kapu ugyanaz, mint az eles agon, es ezert
+        # meri a kartya-dryrun-paritas teszt MINDKET IRANYT (a hamis zoldet es a hamis pirosat is).
+        # IRNI TOVABBRA SEM IR: a letezes-ellenorzes READ-ONLY kapcsolaton megy, igy a dry-run
+        # meg egy hianyzo DB-fajlt sem hozhat letre.
+        dbro = sqlite3.connect(f'file:{_db_kapu()}?mode=ro', uri=True)
+        letezik = dbro.execute('SELECT 1 FROM kanban_cards WHERE id=?', (a.id,)).fetchone()
+        dbro.close()
+        if letezik:
+            # SZO SZERINT ugyanaz a mondat, mint az eles agon (a paritas-teszt 3. ellenorzese
+            # pont ezt meri): ha a ket ag MAS okot mond ugyanarra, az olvasoja nem tudja
+            # eldonteni, hogy ugyanaz a kapu fogta-e meg.
+            sys.exit(f'MEGTAGADVA: a(z) {a.id} kartya MAR LETEZIK.')
+        if msg:
+            _token_kapu(dry_run=True)
+        print(f'DRY-RUN OK (DB: {DB}): minden ellenorzes atment (a letezes- es a token-kaput is'
+              f' beleertve).\n  id={a.id} gazda={who} statusz={a.status} '
               f'prio={a.priority}\n  cim {len(a.title)} kar | leiras {len(desc)} kar | uzenet {len(msg)} kar')
         return
 
@@ -503,14 +677,7 @@ def main():
 
     # A token a gyokerbol jon, tehat ugyanaz a feloldas vonatkozik ra. KARTYA_TOKEN: teszt-horog
     # es kimondott felulbiralas, ugyanabban az alakban, mint a KARTYA_DB/KARTYA_API.
-    tokpath = os.path.join(ROOT, 'store', '.dashboard-token')
-    tok = os.environ.get('KARTYA_TOKEN')
-    if tok is None:
-        if not os.path.exists(tokpath):
-            sys.exit(f'A KARTYA LETREJOTT, DE AZ UZENET NEM MENT KI: nincs dashboard-token itt:\n'
-                     f'  {tokpath}\n(gyoker: {ROOT}). Mondd ki: CLAUDECLAW_ROOT=<a fo fa> vagy KARTYA_TOKEN=<token>.\n'
-                     f'Kuldd el kezzel az uzenetet, kulonben a kartya nema marad.')
-        tok = open(tokpath).read().strip()
+    tok = _token_kapu(dry_run=False)
     req = urllib.request.Request(API,
         data=json.dumps({'from': frm, 'to': cimzett, 'content': msg}).encode(),
         headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok}, method='POST')

@@ -22,6 +22,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { logger } from '../logger.js'
 import { PROJECT_ROOT } from '../config.js'
 import { readEnvFile } from '../env.js'
+import { getEffectiveSettingValue } from '../settings-store.js'
 import { resolveOwnerChatId } from '../owner-chat.js'
 
 // Mirrors KEEPALIVE_RESPAWN_GRACE_MS from channel-monitor.ts (15 min).
@@ -40,12 +41,66 @@ const PROBER_SCRIPT = join(PROJECT_ROOT, 'scripts', 'watchdog-inbound-prober.py'
 // derive it from PROJECT_ROOT rather than hardcoding a host-specific path.
 // Sub-agents live in separate project dirs (one per agent cwd), so picking the
 // newest file in the main dir is reliable.
+//
+// Kept as the SHARED-ROOT candidate only; every caller must go through
+// mainTranscriptDirs() instead -- see the comment there.
 export const TRANSCRIPT_DIR = join(
   process.env.HOME ?? homedir(),
   '.claude',
   'projects',
   PROJECT_ROOT.replace(/\//g, '-'),
 )
+
+// CONFIG-DIR BLIND SPOT (2026-09-11, ~2h of false keepalive respawns): the
+// constant above assumes the main channels agent writes its transcript under the
+// SHARED ~/.claude. That stopped being true the moment main-agent config
+// isolation shipped -- with MAIN_AGENT_ISOLATED_CONFIG=1 the session runs with
+// CLAUDE_CONFIG_DIR=<PROJECT_ROOT>/.channels-config, so its JSONL lands in
+// <PROJECT_ROOT>/.channels-config/projects/<encoded-cwd>/ and the watchdogs read
+// an empty (or frozen) directory forever. Two things break at once:
+//   - refreshKeepaliveFromInbound() never sees live traffic, so a BUSY
+//     conversation ages the keepalive file out (the scheduled edit_message
+//     keep-alive is busy-skipped exactly then) and the staleness watchdog
+//     respawn-panes the running conversation away;
+//   - the inbound probe reads lastIngestionTs as null/stale and can declare
+//     deafness on a perfectly healthy channel.
+// Rather than re-deriving the isolation gates here (settings + fleet token +
+// dir existence -- three places to drift out of sync, and an import cycle into
+// agent-process.ts), we probe EVERY candidate root and take the newest
+// ingestion across them. A root that is not in use simply yields an older
+// timestamp or none, and "newest wins" is exactly the question being asked.
+export function mainTranscriptDirs(): string[] {
+  const encoded = PROJECT_ROOT.replace(/\//g, '-')
+  const roots = [
+    join(process.env.HOME ?? homedir(), '.claude'),
+    join(PROJECT_ROOT, '.channels-config'),
+  ]
+  // An operator-set MAIN_AGENT_CONFIG_DIR (a separate Claude login for the bot)
+  // wins over both defaults, so it must be a candidate too. Read defensively:
+  // the settings store must never be able to break a watchdog tick.
+  try {
+    let raw = String(getEffectiveSettingValue('MAIN_AGENT_CONFIG_DIR') ?? '').trim()
+    if (raw) {
+      if (raw.startsWith('~')) raw = join(homedir(), raw.slice(1))
+      roots.push(raw)
+    }
+  } catch {
+    // keep the defaults
+  }
+  const dirs = roots.map(r => join(r, 'projects', encoded))
+  return [...new Set(dirs)]
+}
+
+// Newest inbound-channel ingestion across every candidate transcript root.
+// Returns null only when NO candidate has one.
+export function readLastIngestionTimestampAcross(dirs: string[]): number | null {
+  let newest: number | null = null
+  for (const dir of dirs) {
+    const ts = readLastIngestionTimestamp(dir)
+    if (ts != null && (newest == null || ts > newest)) newest = ts
+  }
+  return newest
+}
 
 // N3: named constant for the probe timeout multiplier.
 // probeTimeoutMs = probeIntervalMs * PROBE_TIMEOUT_MULTIPLIER (allow 2x interval before declaring deaf).
@@ -304,7 +359,7 @@ function checkInboundProbeDeafness(probeTimeoutMs: number): void {
   }
 
   const nowMs = Date.now()
-  const lastIngestionTs = readLastIngestionTimestamp(TRANSCRIPT_DIR)
+  const lastIngestionTs = readLastIngestionTimestampAcross(mainTranscriptDirs())
 
   const needsRespawn = shouldTriggerDeafnessRespawn({
     markerTs,

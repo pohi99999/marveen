@@ -304,6 +304,15 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     secret: false,
     requiresRestart: false,
   },
+  {
+    key: 'OWNER_DRIVE_FOLDER',
+    type: 'string',
+    default: '',
+    description: 'A flotta közös Google Drive mappájának ID-je (a mappa-URL /folders/ utáni része). A generált kolléga-asszisztensek ide írják az eredmény-fájlokat. Üres = a generált agent a tulajdonostól kéri el a mappát. Hot-reload: agent-generáláskor olvasódik, nem igényel újraindítást.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+  },
   // --- Heartbeat module (hot-reload via settings-store) ---
   {
     key: 'HEARTBEAT_START_HOUR',
@@ -468,6 +477,22 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
       'claude-opus-4-8[1m]',
       'claude-haiku-4-5-20251001',
     ],
+  },
+  // --- Claude plans module (PR2b/PR2c) ---
+  // Gates BOTH POST /api/claude-plans/rotate (returns 409 while off) and the
+  // heartbeat script's decision to call it (scripts/claude-plan-rotate-check.ts)
+  // -- see docs/superpowers/specs/2026-09-11-claude-key-rotation-design.md
+  // sections 6-7. Default OFF: staging verification (live session-restart,
+  // the riskiest part of this feature) happens before an operator ever flips
+  // this to '1'.
+  {
+    key: 'CLAUDE_ROTATION_ENABLED',
+    type: 'boolean',
+    default: '0',
+    description: 'Automata Claude-kulcs rotáció: ha a fő agent aktív előfizetése kifogy, automatikusan váltson egy másik regisztrált planre. Előfeltétel: MAIN_AGENT_ISOLATED_CONFIG=1 és legalább 2 regisztrált plan a claude-plans.json-ban. A váltás a fő agent session-jének újraindításával jár.',
+    module: 'claude-plans',
+    secret: false,
+    requiresRestart: false,
   },
 ]
 

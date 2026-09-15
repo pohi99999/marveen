@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, rmdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp } from '../web/inbound-probe.js'
+import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp, readLastIngestionTimestampAcross, mainTranscriptDirs } from '../web/inbound-probe.js'
 
 // ---------------------------------------------------------------------------
 // AC coverage map (channel-watchdog-prompt.md D3 + wolf-swarm-trial.md #3)
@@ -199,5 +199,94 @@ describe('readLastIngestionTimestamp', () => {
     // The tail window starts at the last 256 KB — the earlyLine is NOT in it.
     // The function must return null (the line is beyond the tail window).
     expect(readLastIngestionTimestamp(dir)).toBe(null)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CONFIG-DIR BLIND SPOT regression (2026-09-11)
+//
+// The main channels agent can run with an isolated CLAUDE_CONFIG_DIR
+// (MAIN_AGENT_ISOLATED_CONFIG=1 -> <PROJECT_ROOT>/.channels-config), which puts
+// its transcript under THAT root instead of the shared ~/.claude. Reading only
+// the shared root reported "no inbound ever" while the owner was actively
+// chatting: the keepalive file was never warmed from live traffic, aged past the
+// 18-minute staleness threshold, and the watchdog respawn-paned the running
+// conversation away (twice in 30 minutes, "124 perce nem frissult").
+//
+//   AC-CFG-1: mainTranscriptDirs() offers BOTH the shared and the isolated root
+//   AC-CFG-2: readLastIngestionTimestampAcross() takes the NEWEST across roots,
+//             so the isolated root wins when the shared one is stale
+//   AC-CFG-3: a non-existent candidate root is ignored, not fatal
+// ---------------------------------------------------------------------------
+describe('transcript roots across config dirs', () => {
+  const tmpDirs: string[] = []
+
+  afterEach(() => {
+    for (const d of tmpDirs) {
+      try { rmSync(d, { recursive: true, force: true }) } catch { /* ignore */ }
+    }
+    tmpDirs.length = 0
+  })
+
+  function makeTmpDir(): string {
+    const d = mkdtempSync(join(tmpdir(), 'inbound-probe-roots-'))
+    tmpDirs.push(d)
+    return d
+  }
+
+  function writeIngestion(dir: string, ts: string): void {
+    writeFileSync(
+      join(dir, 'session.jsonl'),
+      JSON.stringify({ timestamp: ts, content: '<channel source=telegram> hello' }),
+      'utf-8',
+    )
+  }
+
+  // AC-CFG-1
+  it('mainTranscriptDirs offers both the shared and the isolated config root', () => {
+    const dirs = mainTranscriptDirs()
+    expect(dirs.length).toBeGreaterThanOrEqual(2)
+    expect(dirs.some(d => d.includes(join('.claude', 'projects')))).toBe(true)
+    expect(dirs.some(d => d.includes(join('.channels-config', 'projects')))).toBe(true)
+    // no duplicates — the candidates are de-duplicated
+    expect(new Set(dirs).size).toBe(dirs.length)
+  })
+
+  // AC-CFG-2: this is the actual bug. The shared root holds an old transcript
+  // (from before isolation was turned on) and the isolated root holds the live
+  // one. Reading the shared root alone returns the STALE timestamp and the
+  // keepalive never gets warmed.
+  it('takes the newest ingestion across roots when the live one is isolated', () => {
+    const shared = makeTmpDir()
+    const isolated = makeTmpDir()
+    const stale = '2026-09-11T18:36:00.000Z'
+    const live = '2026-09-11T20:41:00.000Z'
+    writeIngestion(shared, stale)
+    writeIngestion(isolated, live)
+
+    expect(readLastIngestionTimestamp(shared)).toBe(new Date(stale).getTime())
+    expect(readLastIngestionTimestampAcross([shared, isolated])).toBe(new Date(live).getTime())
+  })
+
+  it('never moves backward: an older isolated root does not beat a live shared one', () => {
+    const shared = makeTmpDir()
+    const isolated = makeTmpDir()
+    const live = '2026-09-11T20:41:00.000Z'
+    writeIngestion(shared, live)
+    writeIngestion(isolated, '2026-09-11T18:36:00.000Z')
+    expect(readLastIngestionTimestampAcross([shared, isolated])).toBe(new Date(live).getTime())
+  })
+
+  // AC-CFG-3
+  it('ignores candidate roots that do not exist', () => {
+    const real = makeTmpDir()
+    const ts = '2026-09-11T20:41:00.000Z'
+    writeIngestion(real, ts)
+    const missing = '/tmp/nonexistent-inbound-probe-root-' + Date.now()
+    expect(readLastIngestionTimestampAcross([missing, real])).toBe(new Date(ts).getTime())
+  })
+
+  it('returns null when no candidate root has an ingestion', () => {
+    expect(readLastIngestionTimestampAcross([makeTmpDir(), makeTmpDir()])).toBe(null)
   })
 })

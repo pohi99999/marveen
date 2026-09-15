@@ -18,7 +18,8 @@ import {
 import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
-import { readAgentRemoteHost, readAgentVoiceConfig, readAgentEngine } from './agent-config.js'
+import { readAgentRemoteHost, readAgentVoiceConfig, readAgentWorksourceChannel, readAgentEngine } from './agent-config.js'
+import { enqueueWorksourceItem, worksourceItemId } from './worksource-queue.js'
 import {
   agentSessionName,
   isSessionReadyForPrompt,
@@ -30,7 +31,7 @@ import {
 } from './agent-process.js'
 import { sendPromptToCopilotSession, formatCopilotInboundMessage } from './copilot-agent-process.js'
 import { sendPromptToAntigravitySession, formatAntigravityInboundMessage } from './antigravity-agent-process.js'
-import { detectPaneState, type PaneState } from '../pane-state.js'
+import { detectPaneState, detectsFirstRunGate, type PaneState } from '../pane-state.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { maybeWakeSubAgentsForTelegram } from './telegram-inbox-wake.js'
@@ -451,12 +452,15 @@ export async function runMessageRouterTick(): Promise<void> {
     const absentNow = new Set<string>()
     const presentNow = new Set<string>()
     // agent -> {exists: bool, host, session} cached lookup for the main loop.
-    const agentSessionCache = new Map<string, {host: string | null, session: string, exists: boolean}>()
+    const agentSessionCache = new Map<string, {host: string | null, session: string, exists: boolean, worksource: boolean}>()
     for (const agent of receiversInTick) {
       const host = readAgentRemoteHost(agent)
       const session = agentSessionName(agent)
       const exists = sessionExistsOnHost(host, session)
-      agentSessionCache.set(agent, { host, session, exists })
+      // Read once per receiver per tick, not once per message: the flag decides
+      // the whole delivery path below and a per-message read would re-open the
+      // same config file for every queued item.
+      agentSessionCache.set(agent, { host, session, exists, worksource: readAgentWorksourceChannel(agent) })
       if (exists) {
         presentNow.add(agent)
       } else {
@@ -465,6 +469,12 @@ export async function runMessageRouterTick(): Promise<void> {
     }
     // Reconnect detection: agent was absent on the last tick, now present.
     for (const agent of presentNow) {
+      // Worksource agents are exempt: backlog batching exists because a tmux
+      // pane that was gone missed everything and typing 40 messages in a row
+      // would wedge it. A queue directory misses nothing -- the items are still
+      // in pending/ and get handed over one at a time, acknowledged one at a
+      // time. Summarising them away would DISCARD work that was never lost.
+      if (agentSessionCache.get(agent)?.worksource) continue
       if (agentWasAbsent.has(agent) && !agentBatchedThisReconnect.has(agent)) {
         // Check if this agent qualifies for backlog batching.
         const agentPending = getPendingMessages(agent)
@@ -536,8 +546,40 @@ export async function runMessageRouterTick(): Promise<void> {
       const session = cached?.session ?? agentSessionName(msg.to_agent)
       const host = isMainAgent ? null : cached?.host ?? readAgentRemoteHost(msg.to_agent)
       const sessionExists = cached?.exists ?? sessionExistsOnHost(host, session)
+      // Opt-in queue delivery. EVERY tmux-shaped gate below is skipped for these
+      // agents, and that is the point rather than a shortcut: "session absent",
+      // "session busy" and "session stuck" are all statements about a KEYBOARD.
+      // An item written into the queue directory waits there for an agent that
+      // is busy, and is still there for an agent that has not started yet -- so
+      // abandoning it, or counting the wait as a stall, would invent a failure
+      // the queue does not have. The stuck escalation is the sharpest case: it
+      // tells the operator to consider a restart, and firing it at a merely busy
+      // worksource agent would be a false alarm with a destructive suggestion.
+      const usesWorksource = cached?.worksource ?? readAgentWorksourceChannel(msg.to_agent)
 
-      if (shouldAbandon(sessionExists, ageMs, MESSAGE_ABANDON_WINDOW_MS)) {
+      // ...BUT the carve-out needs POSITIVE EVIDENCE that the queue is actually
+      // being served, not just that the agent opted in (2026-09-03, PR #1099
+      // review). The reviewer measured the hole: a worksource agent parks on
+      // the MCP server-approval dialog at startup, the router keeps writing to
+      // pending/, and every stall gate is already switched off underneath it --
+      // so from the outside the item looks delivered and nobody is working on
+      // it. That is the exact failure this PR set out to remove.
+      //
+      // Evidence, in the weakest form that still closes the hole: the session
+      // must EXIST and must not be parked on a first-run/approval dialog. A
+      // parked pane means the channel is not up, so the tmux-shaped gates
+      // (abandon / not-running / not-ready) must apply again -- they are the
+      // only thing that will report it.
+      const parkedGate = usesWorksource && sessionExists
+        ? detectsFirstRunGate(capturePane(session, host) ?? '')
+        : null
+      const worksourceServing = usesWorksource && sessionExists && parkedGate == null
+      if (usesWorksource && !worksourceServing) {
+        logger.warn({ id: msg.id, to: msg.to_agent, session, sessionExists, parkedGate },
+          'worksource agent is not serving its queue (session absent or parked on a startup dialog) -- keeping the tmux stall gates armed')
+      }
+
+      if (!worksourceServing && shouldAbandon(sessionExists, ageMs, MESSAGE_ABANDON_WINDOW_MS)) {
         logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ageMs }, 'Agent message abandoned: target session absent for full retry window')
         if (!markMessageFailed(msg.id, 'Abandoned: target session absent for full retry window')) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
@@ -548,7 +590,7 @@ export async function runMessageRouterTick(): Promise<void> {
         continue
       }
 
-      if (!sessionExists) {
+      if (!worksourceServing && !sessionExists) {
         if (!routerLoggedMisses.has(msg.id)) {
           logger.warn({ id: msg.id, to: msg.to_agent, session }, 'Agent message target session not running, will retry')
           routerLoggedMisses.add(msg.id)
@@ -556,44 +598,49 @@ export async function runMessageRouterTick(): Promise<void> {
         continue
       }
 
-      // ENGINE GATE. Resolved ONCE per message, HERE -- above the readiness
-      // gate, not at the delivery branch below -- because the readiness gate is
-      // Claude-TUI-specific and would otherwise make ANY non-Claude engine's
-      // delivery branch unreachable in production:
+      // ENGINE GATE + WORKSOURCE GATE. Resolved ONCE per message, HERE -- above
+      // the readiness gate, not at the delivery branch below -- because the
+      // readiness gate is Claude-TUI-specific and would otherwise make ANY
+      // non-Claude engine's OR any worksource-serving agent's delivery branch
+      // unreachable in production:
       //
       //   isSessionReadyForPrompt -> capturePane -> detectPaneState (pane-state.ts)
       //
       // decides "idle" by matching Claude Code's status-footer regex. A Copilot
-      // CLI pane or an Antigravity CLI pane never renders that footer, so the
+      // CLI pane, an Antigravity CLI pane, or a worksource-serving agent (fed
+      // from a file queue, never typed into) never renders that footer, so the
       // gate never opens. Because the session DOES exist, shouldAbandon's
-      // `!sessionExists` condition also never fires: every message to a
-      // non-Claude-engine agent would re-queue forever -- never delivered, never
-      // abandoned -- and after ~10 min shouldEscalateStuckSession would fire and
-      // re-fire every ~10 min, spamming the main agent with bogus stuck-session
-      // escalations. Kanban card dispatch routes through here too, so it would
-      // break the same way.
+      // `!sessionExists` condition also never fires: every message to such an
+      // agent would re-queue forever -- never delivered, never abandoned -- and
+      // after ~10 min shouldEscalateStuckSession would fire and re-fire every
+      // ~10 min, spamming the main agent with bogus stuck-session escalations.
+      // Kanban card dispatch routes through here too, so it would break the
+      // same way.
       //
-      // Skipping the whole `if (!ready) { ... }` block for any non-Claude engine
-      // also skips the clearStaleParkedInput janitor inside it, which is
-      // deliberate: that janitor is likewise Claude-TUI-tuned (it acts on
-      // detectPaneState's 'typing' state). It happens to no-op against a foreign
-      // TUI today, but "no-ops by coincidence" is not a guarantee worth
-      // depending on.
+      // Skipping the whole `if (!ready) { ... }` block for any non-Claude
+      // engine or worksource-serving agent also skips the
+      // clearStaleParkedInput janitor inside it, which is deliberate: that
+      // janitor is likewise Claude-TUI-tuned (it acts on detectPaneState's
+      // 'typing' state). It happens to no-op against a foreign TUI or a
+      // worksource-fed pane today, but "no-ops by coincidence" is not a
+      // guarantee worth depending on.
       //
-      // Claude-engine agents are unaffected: usesClaudeTuiDelivery is true for
-      // them (readAgentEngine defaults to 'claude' for every missing/unknown
-      // value), so the condition below reduces to the original
-      // `if (!(await isSessionReadyForPrompt(session, host)))` and the block is
-      // entered on exactly the same messages as before.
+      // A plain Claude-engine agent that is NOT worksource-serving is
+      // unaffected: usesClaudeTuiDelivery is true (readAgentEngine defaults to
+      // 'claude') and worksourceServing is false, so the condition below
+      // reduces to the original `if (!(await isSessionReadyForPrompt(session,
+      // host)))` and the block is entered on exactly the same messages as
+      // before.
       const destEngine = readAgentEngine(msg.to_agent)
       const usesClaudeTuiDelivery = destEngine === 'claude'
 
-      if (usesClaudeTuiDelivery && !(await isSessionReadyForPrompt(session, host))) {
-        // MERGE NOTE (v1.36.0 upstream sync): the engine gate above and the
-        // feedback-modal clearance below are independent fixes to the same
-        // branch. Both are kept: non-Claude engines skip the whole block, and
-        // a Claude pane held by its own drafted feedback modal gets cleared
-        // once before the stuck bookkeeping runs.
+      if (usesClaudeTuiDelivery && !worksourceServing && !(await isSessionReadyForPrompt(session, host))) {
+        // MERGE NOTE (v1.38.0 upstream sync): the engine gate, the worksource
+        // gate, and the feedback-modal clearance below are three independent
+        // fixes to the same branch. All are kept: non-Claude engines and
+        // worksource-serving agents skip the whole block, and a Claude pane
+        // held by its own drafted feedback modal gets cleared once before the
+        // stuck bookkeeping runs.
         // A self-drafted feedback modal ("Bug report drafted ... 0 to dismiss")
         // holds the pane in a not-ready state, and the pre-flight dismissal in
         // sendPromptToSession never runs because this gate short-circuits
@@ -741,29 +788,66 @@ export async function runMessageRouterTick(): Promise<void> {
         const freshness = isChannelInbound
           ? undefined
           : { ageMs, newerFromSameSender: countNewerMessagesFromSameSender(msg.from_agent, msg.to_agent, msg.id) }
-        // Non-Claude engine recipients skip the Claude-tuned wrap + pane-idle
-        // delivery path entirely: sendPromptToCopilotSession /
-        // sendPromptToAntigravitySession do a simple, conservative tmux send
-        // (see copilot-agent-process.ts / antigravity-agent-process.ts) with
-        // the minimal inter-agent envelope instead of the full trusted/untrusted
-        // preamble machinery, which is not meaningful outside Claude Code's
-        // <trusted-peer>/<untrusted> prompt-injection framing. `destEngine`
-        // is the value already resolved above the readiness gate -- one
-        // readAgentEngine call per message, not two.
-        //
-        // The trust distinction is NOT skipped: `category` and `safeFromAgent`
-        // come from the same classifyAgentMessage call the Claude path uses, so
-        // an untrusted/federated/channel-inbound sender is marked as such in
-        // the non-Claude envelope too, under its own sanitized id. Both copilot
-        // and antigravity agents run with --dangerously-skip-permissions /
-        // --allow-all-tools (no tool-permission prompts), so handing them a
-        // stranger's payload framed like a teammate's would be the worst place
-        // in the fleet to drop that signal.
+        // Delivery branches on two independent things resolved above the
+        // readiness gate: destEngine (copilot / antigravity / claude) and
+        // usesWorksource (file-queue vs. live tmux pane). Four siblings, not
+        // nested, so each concern stays legible on its own -- MERGE NOTE
+        // (v1.38.0 upstream sync): the engine branches and the worksource
+        // branch are independent additions to the same dispatch point, kept
+        // as peers rather than one nested inside the other.
         if (destEngine === 'copilot') {
+          // Non-Claude engine recipients skip the Claude-tuned wrap + pane-idle
+          // delivery path entirely: sendPromptToCopilotSession /
+          // sendPromptToAntigravitySession do a simple, conservative tmux send
+          // (see copilot-agent-process.ts / antigravity-agent-process.ts) with
+          // the minimal inter-agent envelope instead of the full trusted/untrusted
+          // preamble machinery, which is not meaningful outside Claude Code's
+          // <trusted-peer>/<untrusted> prompt-injection framing. `destEngine`
+          // is the value already resolved above the readiness gate -- one
+          // readAgentEngine call per message, not two.
+          //
+          // The trust distinction is NOT skipped: `category` and `safeFromAgent`
+          // come from the same classifyAgentMessage call the Claude path uses, so
+          // an untrusted/federated/channel-inbound sender is marked as such in
+          // the non-Claude envelope too, under its own sanitized id. Both copilot
+          // and antigravity agents run with --dangerously-skip-permissions /
+          // --allow-all-tools (no tool-permission prompts), so handing them a
+          // stranger's payload framed like a teammate's would be the worst place
+          // in the fleet to drop that signal.
           await sendPromptToCopilotSession(session, formatCopilotInboundMessage(safeFromAgent, content, category))
         } else if (destEngine === 'antigravity') {
           await sendPromptToAntigravitySession(session, formatAntigravityInboundMessage(safeFromAgent, content, category))
+        } else if (usesWorksource) {
+          const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note, freshness)
+          // Hand it to the queue instead of the keyboard. The reader turns the
+          // file into a real turn and takes an acknowledgment back.
+          //
+          // WHAT 'delivered' MEANS HERE, stated plainly because it is weaker
+          // than it sounds and stronger than what it replaces: it means the item
+          // is durably queued, NOT that the agent has processed it. That is a
+          // strict improvement on the tmux path, where 'delivered' has always
+          // meant "we pressed some keys at a pane" -- which is exactly the claim
+          // that turned out to be false on the two cortex-router wedges. An item
+          // the agent never acknowledges is re-offered by the reader after its
+          // ack timeout, so a lost hand-off self-heals; the DB row does not have
+          // to model that.
+          //
+          // enqueue returns false when the id is already in pending/active/done.
+          // That is not an error: a tick that could not confirm its own write
+          // retries, and re-queueing would hand the agent the same work twice.
+          const itemId = worksourceItemId(msg.id)
+          const queued = enqueueWorksourceItem(msg.to_agent, itemId, prefix + wrapped, {
+            from: safeFromAgent,
+            category,
+            message_id: msg.id,
+            ...(traceCtx ?? {}),
+          })
+          logger.info({ id: msg.id, to: msg.to_agent, itemId, queued }, queued
+            ? 'message-router: queued to worksource'
+            : 'message-router: worksource item already present, not re-queued')
         } else {
+          // Plain Claude-engine recipient, not worksource-serving: the
+          // original live-pane tmux delivery.
           const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note, freshness)
           // Inline preamble so a fresh session (post hard-restart) doesn't miss
           // the context that explains the tag semantics.
