@@ -81,6 +81,22 @@ def fmt_reset(resets_at):
         return "ismeretlen"
 
 
+def _reset_key(resets_at):
+    """Round resets_at to the nearest minute for dedup comparisons.
+
+    Measured 2026-09-15: the provider recomputes resets_at fresh on every
+    hourly collection and it jitters by sub-second amounts each time (e.g.
+    1789650000.204469, then .940767, then .263748 -- same reset, three
+    different floats). An exact-equality dedup against the raw float never
+    matches twice, so the alert refired every hour instead of once per
+    reset window. A real reset moves resets_at by ~7 days, far more than a
+    minute, so rounding cannot mask an actual rollover.
+    """
+    if resets_at is None:
+        return None
+    return round(float(resets_at) / 60.0) * 60.0
+
+
 def decide(snapshot, state, thresholds=THRESHOLDS, window=WINDOW):
     """Pure. Returns (to_fire: list[int], new_state). A threshold fires when
     used_percent >= threshold AND it has not fired for this resets_at yet.
@@ -88,6 +104,7 @@ def decide(snapshot, state, thresholds=THRESHOLDS, window=WINDOW):
     w = (((snapshot or {}).get("claude") or {}).get("windows") or {}).get(window) or {}
     used = w.get("used_percent")
     resets_at = w.get("resets_at")
+    reset_key = _reset_key(resets_at)
     new_state = dict(state or {})
     to_fire = []
     if used is None:
@@ -95,11 +112,11 @@ def decide(snapshot, state, thresholds=THRESHOLDS, window=WINDOW):
     for t in thresholds:
         key = f"claude_{window}_threshold_{t}"
         entry = dict(new_state.get(key) or {})
-        if entry.get("fired_for_reset") not in (None, resets_at):
+        if entry.get("fired_for_reset") not in (None, reset_key):
             entry = {}  # the window reset since the last firing -> re-arm
-        if float(used) >= t and entry.get("fired_for_reset") != resets_at:
+        if float(used) >= t and entry.get("fired_for_reset") != reset_key:
             to_fire.append(t)
-            entry = {"fired_for_reset": resets_at, "fired_at": datetime.now(timezone.utc).isoformat(), "used_percent": used}
+            entry = {"fired_for_reset": reset_key, "fired_at": datetime.now(timezone.utc).isoformat(), "used_percent": used}
         new_state[key] = entry
     return to_fire, new_state
 
@@ -170,6 +187,18 @@ def self_test():
     # reset with low usage: re-armed but silent
     f, s = decide(snap(30, r1 + 14 * 86400), s)
     check(f == [] and s["claude_seven_day_threshold_80"] == {}, "after reset at 30%: silent and re-armed")
+    # sub-second jitter on resets_at (measured 2026-09-15) must not look like a new
+    # window: same reset, three slightly different floats -> fires once, not thrice
+    r2 = r1 + 21 * 86400
+    f, s = decide(snap(81, r2 + 0.204469), {})
+    check(f == [80], "jitter: first hourly read at 81% fires 80")
+    f, s = decide(snap(82, r2 + 0.940767), s)
+    check(f == [], "jitter: next hourly read, different fractional resets_at, does not refire")
+    f, s = decide(snap(83, r2 + 0.263748), s)
+    check(f == [], "jitter: a third differing fractional resets_at still does not refire")
+    # a real rollover (~7 days later) still re-arms despite similar jitter
+    f, s = decide(snap(85, r2 + 7 * 86400 + 0.5), s)
+    check(f == [80], "jitter: a genuine reset 7 days later still re-arms")
     # missing data never fires and never crashes
     f, s = decide({}, s)
     check(f == [], "empty snapshot: nothing")
