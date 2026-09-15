@@ -112,8 +112,8 @@ def message_text(t, snapshot):
     return (
         f"[KVOTA] Heti Max-keret {sd.get('used_percent')}% (kuszob {t}%). "
         f"Reset: {fmt_reset(sd.get('resets_at'))}. 5 oras: {fh.get('used_percent')}%, Fable-heti: {op.get('used_percent')}%. "
-        + ("Atallasi szabaly 80%: aura, zeph, irisz, stratega, nyomozo, lumen -> Sonnet 5; Kenshin marad Fable; marveen marad Opus." if t < 90
-           else "90%: marveen is Sonnet 5-re. Visszaallas a reset utan.")
+        + ("Atallasi szabaly 80%: aura, zeph, irisz, stratega, nyomozo, lumen, Kenshin, marveen -> Sonnet 5 (a Fable nem kulon keret). Visszaallas a reset utan." if t < 90
+           else "90%: nem surgos feladatok szuneteltetese a resetig. Visszaallas a reset utan.")
     )
 
 
