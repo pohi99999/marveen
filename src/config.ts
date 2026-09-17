@@ -409,6 +409,14 @@ export const HEARTBEAT_AGENT_ENABLED =
 export const SUBAGENT_INBOX_TEE =
   ['1', 'true', 'yes', 'on'].includes((cfg('SUBAGENT_INBOX_TEE') ?? '').trim().toLowerCase())
 
+// Per-agent MCP scope isolation (card b970af61): sub-agents launch with
+// `--mcp-config agents/<name>/.mcp.json --strict-mcp-config` so the repo-root
+// .mcp.json (the main agent's set), the user/local scopes and plugin MCPs are
+// NOT inherited by walking up from agents/<name>. Kill switch only -- default ON;
+// set SUBAGENT_STRICT_MCP=0 to fall back to inherited scopes without a redeploy.
+export const SUBAGENT_STRICT_MCP =
+  !['0', 'false', 'no', 'off'].includes((cfg('SUBAGENT_STRICT_MCP') ?? '').trim().toLowerCase())
+
 // Sub-agent Telegram inbox wake-nudge (opt-in, DEFAULT OFF).
 // The message-router can nudge an idle sub-agent whose derived Telegram inbox
 // (<state>/inbox-pending.jsonl) has stuck inbound messages, so its drain hook

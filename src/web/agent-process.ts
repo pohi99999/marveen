@@ -53,7 +53,7 @@ import {
 } from './ssh-tmux.js'
 import { parseTelegramToken } from './telegram.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
-import { CHANNEL_PROVIDER, MAIN_AGENT_ID, STORE_DIR, PROJECT_ROOT, SUBAGENT_INBOX_TEE } from '../config.js'
+import { CHANNEL_PROVIDER, MAIN_AGENT_ID, STORE_DIR, PROJECT_ROOT, SUBAGENT_INBOX_TEE, SUBAGENT_STRICT_MCP } from '../config.js'
 import { getEffectiveSettingValue } from '../settings-store.js'
 import { readEnvFile } from '../env.js'
 import { loadProfileTemplate } from './profiles.js'
@@ -1868,6 +1868,40 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // the same reason). Every other agent (non-telegram, main, or flag off) keeps
     // the --channels launch path unchanged.
     const channelFlag = hasChannel && !useMcpJsonForChannel ? `--channels plugin:${provider.pluginId}` : ''
+    // MCP scope isolation for sub-agents (card b970af61, measured 2026-09-17).
+    // Claude Code resolves project-scope `.mcp.json` by walking UP from cwd, so
+    // an agent in agents/<name> also loads the repo-root `.mcp.json` -- the main
+    // agent's full set. The local scope (~/.claude.json projects[<path>]) is
+    // inherited by subdirectory cwds the same way, and `disabledMcpjsonServers`
+    // on the agent's own project key did not stop the resolution either. Both
+    // were measured from agents/aura with `claude mcp get <name>`: still
+    // "Connected". Result: 5 live sub-agents each carrying the root's 10
+    // main-agent-only servers plus the user-scope and plugin ones -- 1.4-1.7 GB
+    // RSS per agent, 7.8 GB in total, for tools none of them call.
+    //
+    // `--mcp-config <agents/<name>/.mcp.json> --strict-mcp-config` is the one
+    // switch that isolated in the measurement: a throwaway session from
+    // agents/aura spawned exactly the agent's own servers and none of the
+    // root's. Strict mode ignores EVERY other MCP source (root .mcp.json, user
+    // and local scope, plugins), which is why it is gated:
+    //   - sub-agents only: the main agent launches via channels.sh and keeps its
+    //     full set (it never reaches this path, the guard is belt-and-braces);
+    //   - never when the channel comes in through the shared `--channels
+    //     plugin:<id>` flag: strict mode would drop that plugin MCP and the agent
+    //     would come up deaf. The mcp.json channel path (useMcpJsonForChannel)
+    //     and the worksource channel both live INSIDE the agent's own .mcp.json,
+    //     so they survive strict mode;
+    //   - only when the agent's own .mcp.json exists: without it strict mode
+    //     would start the agent with zero MCP servers.
+    // Kill switch without a redeploy: SUBAGENT_STRICT_MCP=0 (config.ts).
+    const agentMcpJsonPath = join(agentDir(name), '.mcp.json')
+    const strictMcp =
+      SUBAGENT_STRICT_MCP &&
+      name !== MAIN_AGENT_ID &&
+      !channelFlag.includes('plugin:') &&
+      existsSync(agentMcpJsonPath)
+    const strictMcpFlags = strictMcp ? `--mcp-config ${shSingleQuote(agentMcpJsonPath)} --strict-mcp-config ` : ''
+    if (strictMcp) logger.info({ name, mcpConfig: agentMcpJsonPath }, 'MCP scope isolated: --strict-mcp-config with the agent\'s own .mcp.json')
     // Channel-plugin MCP-registration guard (2026-06-23): the telegram/slack/etc.
     // channel plugin registers as a stdio MCP server loaded via --channels. Claude
     // Code connects stdio MCP servers in batches of MCP_SERVER_CONNECTION_BATCH_SIZE
@@ -1922,7 +1956,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // exactly how korall lost its `hasCompletedOnboarding` flag on every restart
     // and parked on the login picker with a perfectly good token in its env.
     const umaskPrefix = agentTmuxTarget(name).runAsUser ? 'umask 002 && ' : ''
-    const cmd = `${umaskPrefix}export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${autoUpdaterEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}`.trimEnd()
+    const cmd = `${umaskPrefix}export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${autoUpdaterEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}${strictMcpFlags}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}`.trimEnd()
     // The agent's own target: for a per-user agent this is what makes the whole
     // session (and every process inside it) belong to that uid. Passing null here
     // silently started it as the router's user -- measured 2026-08-19: the start
