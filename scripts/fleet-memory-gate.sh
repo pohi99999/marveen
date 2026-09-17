@@ -95,7 +95,14 @@ try:
   print(v[0] if v else "")
 except Exception: print("")' "$ACCESS_JSON" 2>/dev/null)"
 fi
-ALERT_COOLDOWN=600   # seconds; do not repeat the same band's alert within this
+# Per-band cooldown (seconds). WARN (safe-mode) is the noisy, non-urgent band --
+# Peter's 2026-09-17 request: it kept re-alerting on Telegram roughly every 10
+# minutes while the fleet sat in the warn band for hours. HARD (pause, real
+# OOM risk) and CAP stay on the short cooldown, because that band is rarer and
+# genuinely urgent -- this change must not blunt it.
+WARN_ALERT_COOLDOWN="${MARVEEN_MEM_WARN_COOLDOWN:-3600}"
+HARD_ALERT_COOLDOWN="${MARVEEN_MEM_HARD_COOLDOWN:-600}"
+CAP_ALERT_COOLDOWN="${MARVEEN_MEM_CAP_COOLDOWN:-600}"
 
 log() { echo "[fleet-memory-gate] $*" >&2; }
 
@@ -132,13 +139,19 @@ send_alert() {
   # No resolvable owner chat id -> never send (would otherwise go nowhere or, with
   # a hardcoded default, to a stranger). Log and move on.
   [[ -z "$CHAT_ID" ]] && { log "no owner chat id resolved; skipping Telegram alert [$band]"; return 0; }
-  local now prev_band prev_ep
+  local now prev_band prev_ep cooldown
   now="$(date +%s)"
+  case "$band" in
+    warn) cooldown="$WARN_ALERT_COOLDOWN" ;;
+    hard) cooldown="$HARD_ALERT_COOLDOWN" ;;
+    cap)  cooldown="$CAP_ALERT_COOLDOWN" ;;
+    *)    cooldown="$HARD_ALERT_COOLDOWN" ;;
+  esac
   if [[ -f "$ALERT_STAMP" ]]; then
     prev_band="$(cut -d: -f1 "$ALERT_STAMP" 2>/dev/null)"
     prev_ep="$(cut -d: -f2 "$ALERT_STAMP" 2>/dev/null | tr -dc '0-9')"
-    if [[ "$prev_band" == "$band" && -n "${prev_ep:-}" ]] && (( now - prev_ep < ALERT_COOLDOWN )); then
-      log "alert [$band] within cooldown; skipping"; return 0
+    if [[ "$prev_band" == "$band" && -n "${prev_ep:-}" ]] && (( now - prev_ep < cooldown )); then
+      log "alert [$band] within cooldown (${cooldown}s); skipping"; return 0
     fi
   fi
   local token=""
