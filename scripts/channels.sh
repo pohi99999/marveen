@@ -804,7 +804,20 @@ case "$CHANNEL_PROVIDER" in
   discord)  STATE_ENV_VAR="DISCORD_STATE_DIR" ;;
   *)        STATE_ENV_VAR="TELEGRAM_STATE_DIR" ;;
 esac
-ORPHAN_PIDS="$(/bin/ps eww -e 2>/dev/null | awk -v needle="${STATE_ENV_VAR}=${MAIN_CHAN_DIR}" '$0 ~ needle { print $1 }')"
+# POLLER-ONLY GATE (2026-09-18, 33258ff2). The env needle alone is not a
+# poller test: whoever CREATED the shared tmux server inherits this shell's
+# `export ${STATE_ENV_VAR}` (line below, before start-server), so the tmux
+# server itself, every pane spawned under it (all sub-agents, workers, the
+# dashboard when it ran in tmux) and their MCP children all carry the needle.
+# Measured 2026-09-18 03:01: the reap after the 03:00 auto-restart matched
+# 156 processes -- tmux server, 8 agent claudes, 4 podman -- and killed the
+# whole fleet plus the dashboard (03:01-09:11 outage). A poller is a `bun`
+# process (`bun run --cwd .../plugins/cache/...` or `.../bun server.ts`) or a
+# `node` plugin server whose script lives under plugins/cache/ or
+# plugins/marketplaces/ (old builds). Field 5 of
+# `ps eww -e` is the command word, field 6 its first argument; the env block
+# comes after argv, so it can never satisfy the $5/$6 test.
+ORPHAN_PIDS="$(/bin/ps eww -e 2>/dev/null | awk -v needle="${STATE_ENV_VAR}=${MAIN_CHAN_DIR}" '$0 ~ needle && ($5 ~ /(^|\/)bun$/ || ($5 ~ /(^|\/)node$/ && $6 ~ /\/plugins\/(cache|marketplaces)\//)) { print $1 }')"
 if [ -n "$ORPHAN_PIDS" ]; then
   # shellcheck disable=SC2086
   /bin/kill -TERM $ORPHAN_PIDS 2>/dev/null || true
@@ -831,7 +844,7 @@ fi
 # an install path with regex metacharacters can't break the exclusion. The var
 # is named `subdir` (not `sub`) because `sub` is a reserved awk function name and
 # BSD/macOS awk syntax-errors on it.
-ORPHAN_PIDS2="$(/bin/ps eww -e 2>/dev/null | awk -v needle="CLAUDE_PLUGIN_ROOT=" -v prov="/${CHANNEL_PROVIDER}" -v subdir="${INSTALL_DIR}/agents/" '$0 ~ needle && $0 ~ prov && index($0, subdir) == 0 { print $1 }')"
+ORPHAN_PIDS2="$(/bin/ps eww -e 2>/dev/null | awk -v needle="CLAUDE_PLUGIN_ROOT=" -v prov="/${CHANNEL_PROVIDER}" -v subdir="${INSTALL_DIR}/agents/" '$0 ~ needle && $0 ~ prov && index($0, subdir) == 0 && ($5 ~ /(^|\/)bun$/ || ($5 ~ /(^|\/)node$/ && $6 ~ /\/plugins\/(cache|marketplaces)\//)) { print $1 }')"
 if [ -n "$ORPHAN_PIDS2" ]; then
   # shellcheck disable=SC2086
   /bin/kill -TERM $ORPHAN_PIDS2 2>/dev/null || true
@@ -884,6 +897,12 @@ fi
 # otherwise described the unexported state.
 export "$STATE_ENV_VAR"="$MAIN_CHAN_DIR"
 STATE_DIR_ENV="export ${STATE_ENV_VAR}='${MAIN_CHAN_DIR}' && "
+# The pane command string above carries the state dir into the channels claude;
+# this shell must NOT keep it exported, or the shared tmux server (created by
+# `start-server` below when we are first) inherits it and every future pane on
+# this host matches the orphan reap needle (33258ff2). Unset it here; nothing
+# after this line reads it from the environment.
+unset "$STATE_ENV_VAR"
 
 # P1 FIX: put the Claude auth token into the tmux SERVER global env BEFORE
 # new-session. A new session inherits the tmux SERVER's global environment, not

@@ -45,3 +45,27 @@ Linux side must not write it automatically.
     rm ~/.config/systemd/user/marveen-notify@.service
     # revert the channels StartLimit move by reinstalling the previous unit, then:
     systemctl --user daemon-reload
+
+## marveen-dashboard.service (2026-09-18, 33258ff2)
+
+Until 2026-09-18 the dashboard on the WSL host ran only as a tmux pane (`tmux
+new-session -d -s marveen-dashboard "node dist/index.js"`, from
+`scripts/inditas-full.sh`) or as an ad-hoc `systemd-run` unit: nothing
+restarted it after a crash and nothing brought it back after a reboot or a
+user-manager restart. `start.sh`'s systemd branch already expected a
+`marveen-dashboard.service` ("Unit marveen-dashboard.service not found" in
+update.log). The unit template lives next to the channels one; install it
+with the `sed` recipe in its header, then `systemctl --user enable --now`.
+
+Why the dashboard died at the 2026-09-18 03:00 channels auto-restart: not the
+unit's kill mode, but the orphan reap in `channels.sh` (and its TypeScript twin
+`reapChannelOrphans`). Both selected processes by the `TELEGRAM_STATE_DIR=<main
+dir>` string in the process ENVIRONMENT, and `channels.sh` exported that
+variable before `tmux start-server`, so a tmux server created by channels.sh
+inherited it, and so did every pane spawned under that server afterwards (all
+sub-agents, the workers, a dashboard running in tmux) and their MCP children.
+Measured on the live host: 156 matches. The reap therefore SIGKILLed the shared
+tmux server and the whole fleet. Both reapers now require a poller-shaped argv
+(`bun ...` or `node .../plugins/cache/...`) and channels.sh unsets the variable
+after building the pane command string; see
+`src/__tests__/channels-reap-poller-gate.test.ts`.

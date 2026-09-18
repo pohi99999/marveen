@@ -38,12 +38,15 @@ function runReapMatcher(psLines: string[]): string[] {
 
 // CLAUDE_PLUGIN_ROOT is the shared cache path for main and sub alike. A main
 // orphan carries no agent dir; a sub-agent poller carries $INSTALL_DIR/agents/<name>/.
-const MAIN_ORPHAN_A = '67149 ?? S 0:01 node CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram BOT=x'
-const MAIN_ORPHAN_B = '67154 ?? S 0:01 node CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 BOT=x'
-const SUB_DEV2 = `14513 ?? S 0:01 node CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram TELEGRAM_STATE_DIR=${INSTALL_DIR}/agents/dev2/.claude/channels/telegram`
-const SUB_DEV3 = `28358 ?? S 0:01 node CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 CLAUDE_CONFIG_DIR=${INSTALL_DIR}/agents/dev3/.claude`
-const OTHER_PROVIDER = '99999 ?? S 0:01 node CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/slack'
+const MAIN_ORPHAN_A = '67149 ?? S 0:01 node /Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram/server.js CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram BOT=x'
+const MAIN_ORPHAN_B = '67154 ?? S 0:01 node /Users/u/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6/server.js CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 BOT=x'
+const SUB_DEV2 = `14513 ?? S 0:01 node /Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram/server.js CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram TELEGRAM_STATE_DIR=${INSTALL_DIR}/agents/dev2/.claude/channels/telegram`
+const SUB_DEV3 = `28358 ?? S 0:01 node /Users/u/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6/server.js CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 CLAUDE_CONFIG_DIR=${INSTALL_DIR}/agents/dev3/.claude`
+const OTHER_PROVIDER = '99999 ?? S 0:01 node /Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/slack/server.js CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/slack'
 const UNRELATED = '88888 ?? S 0:01 node some-other-process --flag'
+// 2026-09-18 (33258ff2): a tmux server / MCP server that INHERITED the plugin env is not a poller.
+const TMUX_WITH_ENV = '360935 ?? Ss 0:03 /usr/bin/tmux new-session -d -s marveen-channels CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/cache/claude-plugins-official/telegram/0.0.7 TELEGRAM_STATE_DIR=/x/.claude/channels/telegram'
+const MCP_WITH_ENV = '361557 ?? S 0:01 node /Users/u/.npm/_npx/abc/node_modules/.bin/mcp-pdf-server --stdio CLAUDE_PLUGIN_ROOT=/Users/u/.claude/plugins/cache/claude-plugins-official/pdf-viewer/1.0 TELEGRAM_STATE_DIR=/x/.claude/channels/telegram'
 
 describe('channels.sh second-pass orphan reap is scoped to the main agent', () => {
   it('reaps the main agent old-build orphans (no agent dir in env)', () => {
@@ -63,6 +66,7 @@ describe('channels.sh second-pass orphan reap is scoped to the main agent', () =
 
   it('ignores a different provider and non-poller processes', () => {
     expect(runReapMatcher([OTHER_PROVIDER, UNRELATED])).toEqual([])
+    expect(runReapMatcher([TMUX_WITH_ENV, MCP_WITH_ENV, MAIN_ORPHAN_B]).sort()).toEqual(['67154'])
   })
 
   it('keeps the sub-agent exclusion guard so it cannot revert to the unscoped form', () => {

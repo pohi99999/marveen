@@ -149,3 +149,32 @@ describe('findOrphanChannelClaudes', () => {
     expect(findOrphanChannelClaudes(allLive, new Set([76621]))).toEqual([])
   })
 })
+
+// 2026-09-18 (33258ff2): rows captured from the live host after the 03:00
+// channels auto-restart. The shared tmux server, an agent claude and a podman
+// MCP container all carry the MAIN agent's TELEGRAM_STATE_DIR in their
+// environment (they inherited channels.sh's export through the tmux server),
+// so an env-only match reaped the whole fleet. Only the bun poller rows may
+// come back.
+const PS_FLEET_SAMPLE = [
+  ' 360935 ?        Ss     0:03 /usr/bin/tmux new-session -d -s marveen-channels -c /home/pohi/marveen export TELEGRAM_STATE_DIR=\'/home/pohi/marveen/.claude/channels/telegram\' && claude HOME=/home/pohi TELEGRAM_STATE_DIR=/home/pohi/marveen/.claude/channels/telegram PATH=/home/pohi/.bun/bin',
+  ' 361103 pts/2    Sl+    0:00 bun run --cwd /home/pohi/.claude/plugins/cache/claude-plugins-official/telegram/0.0.7 --shell=bun --silent start HOME=/home/pohi TELEGRAM_STATE_DIR=/home/pohi/marveen/.claude/channels/telegram',
+  ' 361142 pts/2    Sl+    0:32 /home/pohi/.bun/bin/bun server.ts HOME=/home/pohi PATH=/home/pohi/.claude/plugins/cache/x TELEGRAM_STATE_DIR=/home/pohi/marveen/.claude/channels/telegram',
+  ' 420297 pts/5    Ssl+   0:07 /home/pohi/.local/bin/claude --continue --dangerously-skip-permissions --mcp-config /home/pohi/marveen/agents/aura/.mcp.json HOME=/home/pohi TELEGRAM_STATE_DIR=/home/pohi/marveen/.claude/channels/telegram CLAUDE_PLUGIN_ROOT=/home/pohi/.claude/plugins/cache/claude-plugins-official/telegram',
+  ' 421139 pts/6    Sl+    0:01 podman run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server:0.31.0 HOME=/home/pohi TELEGRAM_STATE_DIR=/home/pohi/marveen/.claude/channels/telegram',
+  ' 419345 ?        Ssl    0:40 /usr/bin/node /home/pohi/marveen/dist/index.js HOME=/home/pohi TELEGRAM_STATE_DIR=/home/pohi/marveen/.claude/channels/telegram',
+].join('\n')
+
+describe('parsePollerPidsFromPs -- poller-only gate (33258ff2, fleet kill of 2026-09-18 03:01)', () => {
+  const MAIN = '/home/pohi/marveen/.claude/channels/telegram'
+  it('reaps exactly the two bun poller rows that carry the main needle', () => {
+    expect(parsePollerPidsFromPs(PS_FLEET_SAMPLE, 'TELEGRAM_STATE_DIR', MAIN)).toEqual([361103, 361142])
+  })
+  it('never returns the shared tmux server, an agent claude, a podman MCP or the dashboard node, even with the needle in their env', () => {
+    const pids = parsePollerPidsFromPs(PS_FLEET_SAMPLE, 'TELEGRAM_STATE_DIR', MAIN)
+    for (const forbidden of [360935, 420297, 421139, 419345]) expect(pids).not.toContain(forbidden)
+  })
+  it('still ignores a poller whose needle points at another agent', () => {
+    expect(parsePollerPidsFromPs(PS_FLEET_SAMPLE, 'TELEGRAM_STATE_DIR', '/home/pohi/marveen/agents/aura/.claude/channels/telegram')).toEqual([])
+  })
+})

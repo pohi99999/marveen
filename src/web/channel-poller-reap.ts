@@ -55,6 +55,7 @@ export function parsePollerPidsFromPs(
   const out: number[] = []
   for (const line of psOutput.split('\n')) {
     if (!line.includes(needle)) continue
+    if (!POLLER_ARGV_RE.test(line)) continue
     const m = line.match(/^\s*(\d+)\s/)
     if (!m) continue
     const pid = parseInt(m[1]!, 10)
@@ -62,6 +63,20 @@ export function parsePollerPidsFromPs(
   }
   return out
 }
+
+// POLLER-ONLY GATE (2026-09-18, 33258ff2). The env needle alone selects far
+// more than pollers: whoever created the SHARED tmux server inherits
+// channels.sh's `export TELEGRAM_STATE_DIR`, so the server, every pane under
+// it (all sub-agents, the workers, a dashboard running in tmux) and their MCP
+// children carry the main agent's needle. Measured 2026-09-18 03:01: 156
+// matches -- tmux server, 8 agent claudes, 4 podman -- reaped after the 03:00
+// channels auto-restart, i.e. a fleet-wide kill and a 6-hour dashboard outage.
+// A poller row's argv (columns after PID TTY STAT TIME) starts with `bun`
+// (`bun run --cwd .../plugins/cache/...`, `.../bun server.ts`) or with a
+// `node` whose script lives under plugins/cache/ or plugins/marketplaces/
+// (old builds). The env block follows argv,
+// so it can never satisfy this anchored test.
+const POLLER_ARGV_RE = /^\s*\d+\s+\S+\s+\S+\s+\S+\s+(?:\S*\/)?(?:bun\s|node\s+\S*\/plugins\/(?:cache|marketplaces)\/)/
 
 function listPollerPidsByStateDir(envVar: string, chanDir: string): number[] {
   try {

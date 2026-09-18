@@ -1,0 +1,38 @@
+# NOTE: replace /path/to/marveen (install dir), /home/USER (home), and USER=youruser with your values.
+# Install (user scope):
+#   sed -e 's#/path/to/marveen#'"$PWD"'#g' -e 's#/home/USER#'"$HOME"'#g' -e "s#USER=youruser#USER=$USER#" \
+#       scripts/systemd/marveen-dashboard.service > ~/.config/systemd/user/marveen-dashboard.service
+#   systemctl --user daemon-reload && systemctl --user enable --now marveen-dashboard.service
+[Unit]
+Description=Marveen Dashboard (API :3420, scheduler, agent router)
+After=network.target
+# A crash loop must not burn the start budget forever; 5 restarts / 5 min,
+# same shape as marveen-channels.service.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# KillMode=process: the dashboard may be the first process on the host to
+# touch the SHARED tmux server (its worker sessions, agent respawns). With the
+# default control-group kill mode a `systemctl restart marveen-dashboard`
+# would tear that server down and with it every agent session (the
+# 2026-06-26 outage shape). Only the node process is signalled.
+KillMode=process
+WorkingDirectory=/path/to/marveen
+ExecStart=/usr/bin/node /path/to/marveen/dist/index.js
+Restart=always
+RestartSec=5
+# Same sink the tmux-era launch used (`node dist/index.js >> store/dashboard.log`),
+# so log readers and the RESTART markers keep working unchanged.
+StandardOutput=append:/path/to/marveen/store/dashboard.log
+StandardError=append:/path/to/marveen/store/dashboard.log
+Environment=PATH=/home/USER/.local/bin:/home/USER/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/USER
+Environment=USER=youruser
+Environment=TERM=xterm-256color
+Environment=LANG=en_US.UTF-8
+Environment=TZ=Europe/Budapest
+
+[Install]
+WantedBy=default.target
