@@ -168,7 +168,7 @@ describe('the real launch builder escapes the model AT the sink (not only at the
 
   it('buildMainSessionRespawnCmd single-quote-escapes a hostile model id at --model', () => {
     const hostile = "x'; touch PWNED #"
-    const cmd = buildMainSessionRespawnCmd({ ...OPTS, model: hostile })
+    const cmd = buildMainSessionRespawnCmd({ provider: 'telegram', ...OPTS, model: hostile })
     // The escaped token must be present; the raw close-quote breakout must NOT.
     expect(cmd).toContain(`--model ${shSingleQuote(hostile)}`)
     expect(cmd).not.toContain(`--model '${hostile}'`)
@@ -178,7 +178,7 @@ describe('the real launch builder escapes the model AT the sink (not only at the
     // Sentinel kept OUT of the payload string so its (non-)existence is an independent signal
     // rather than a substring of the value itself (the trap the block above documents at its sentinel).
     const hostile = "y'; echo LEAKED_$(id -u); printf '"
-    const cmd = buildMainSessionRespawnCmd({ ...OPTS, model: hostile })
+    const cmd = buildMainSessionRespawnCmd({ provider: 'telegram', ...OPTS, model: hostile })
     const token = shSingleQuote(hostile)
     expect(cmd).toContain(`--model ${token}`)
     // Run just the escaped --model token as the sole printf arg. If the escape leaked, the injected

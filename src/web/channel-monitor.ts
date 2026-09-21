@@ -51,7 +51,7 @@ import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { recordChannelEvent } from './channel-event-log.js'
 import { notifyChannel } from '../notify.js'
 import { sendRoutineAlert } from './routine-alert.js'
-import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
+import { getProvider, channelStateDir, channelStateDirEnvVar, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
 import { readLastIngestionTimestampAcross, mainTranscriptDirs } from './inbound-probe.js'
 import {
@@ -776,9 +776,29 @@ export function buildMainSessionRespawnCmd(opts: {
    * non-primary channel after a recovery respawn -- see that helper's comment.
    */
   extraPluginIds?: string[]
+  /**
+   * Which channel provider the main session serves. REQUIRED: the respawned
+   * claude must carry `<PROVIDER>_STATE_DIR` exactly like channels.sh's own
+   * new-session does (channels.sh STATE_DIR_ENV), because the plugin reads its
+   * bot token from `<state dir>/.env` and falls back to ~/.claude/channels/
+   * <provider> -- which does not exist on a migrated install. Until 2026-09-21
+   * this path relied on the tmux SERVER's global env still holding the var
+   * (exported by the pre-33258ff2 channels.sh); once channels.sh stopped
+   * leaking it (1c98864) and the host rebooted, every dashboard-driven respawn
+   * (nightly 03:00 fresh, stage-3 --continue, hard restart) came up with
+   * "TELEGRAM_BOT_TOKEN required" and the channel stayed dark ~75 min per
+   * night (09-20, 09-21). See reference_respawn-pane-state-dir-hianya.
+   */
+  provider: ChannelProviderType
 }): string {
+  const stateEnvVar = channelStateDirEnvVar(opts.provider)
+  const stateDir = channelStateDir(opts.provider)
   return [
     'export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
+    // Channel state dir -- parity with channels.sh STATE_DIR_ENV (same
+    // `export VAR='dir' &&` shape). The value is a path we resolved ourselves,
+    // single-quoted so it stays one shell word.
+    `&& export ${stateEnvVar}='${stateDir}'`,
     // MCP startup-batch tuning (parity with channels.sh + startAgentProcess):
     // the --channels plugin is a stdio MCP server; the main session runs the
     // most MCP servers (filesystem/playwright/chrome + claude.ai connectors +
@@ -841,6 +861,7 @@ export function respawnMainSessionFresh(): void {
   const claudeCmd = buildMainSessionRespawnCmd({
     claudePath: claudeBin(),
     pluginId: provider.pluginId,
+    provider: provider.type,
     extraPluginIds: readExtraChannelPluginIds(),
     model: readConfiguredMainModel(),
     // The main session always starts a new conversation -- this is the whole
@@ -889,12 +910,15 @@ export async function resumeMarveenSession(): Promise<boolean> {
     }
 
     // Also reap DETACHED main-session claudes. reapChannelOrphans (env-scan)
-    // cannot see the main session: channels.sh launches it without a
-    // *_STATE_DIR export, so neither the claude nor its bun poller match the
-    // env needle, and bot.pid is never written. A --continue respawn that did
-    // not tear down the prior claude leaves it detached (reparented to the tmux
-    // server) with a live poller hammering the shared token. Pane attribution
-    // spares the live session (this pane) and kills only the leftovers.
+    // must not touch the main session: channels.sh DOES launch it with the
+    // *_STATE_DIR export (inline in the pane command, measured 2026-09-21 in
+    // the live claude's /proc environ), but the scan is gated on poller argv
+    // (bun / node under plugins/, POLLER_ARGV_RE, 1c98864), so the claude
+    // itself is never a candidate -- only its bun poller is, and that one is
+    // attributed by pane. A --continue respawn that did not tear down the prior
+    // claude leaves it detached (reparented to the tmux server) with a live
+    // poller hammering the shared token. Pane attribution spares the live
+    // session (this pane) and kills only the leftovers.
     // See project_channels_continue_respawn_leak.
     try {
       reapDetachedChannelClaudes({ tmuxPath: tmuxBin() })
@@ -910,6 +934,7 @@ export async function resumeMarveenSession(): Promise<boolean> {
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: claudeBin(),
       pluginId: provider.pluginId,
+    provider: provider.type,
       extraPluginIds: readExtraChannelPluginIds(),
       model: readConfiguredMainModel(),
       continueSession: true,
@@ -1164,6 +1189,7 @@ function respawnMarveenSessionFresh(): boolean {
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: claudeBin(),
       pluginId: provider.pluginId,
+    provider: provider.type,
       extraPluginIds: readExtraChannelPluginIds(),
       model: readConfiguredMainModel(),
       continueSession: false,

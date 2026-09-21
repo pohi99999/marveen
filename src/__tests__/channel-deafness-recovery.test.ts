@@ -19,7 +19,7 @@ import { mainConfigDecisionForTest } from '../web/main-config-decision.js'
 // it the respawned bun telegram bridge can't be located and the session comes
 // up channel-less. Lock it so a future refactor can't silently drop it.
 describe('buildMainSessionRespawnCmd', () => {
-  const base = { claudePath: '/usr/local/bin/claude', pluginId: 'telegram@claude-plugins-official', model: "claude-opus-4-8[1m]", config: mainConfigDecisionForTest() }
+  const base = { claudePath: '/usr/local/bin/claude', pluginId: 'telegram@claude-plugins-official', model: "claude-opus-4-8[1m]", config: mainConfigDecisionForTest(), provider: 'telegram' as const }
 
   it('always exports a PATH that includes $HOME/.bun/bin', () => {
     const cmd = buildMainSessionRespawnCmd({ ...base, continueSession: false })
@@ -31,6 +31,24 @@ describe('buildMainSessionRespawnCmd', () => {
     const cmd = buildMainSessionRespawnCmd({ ...base, continueSession: false })
     expect(cmd).toContain('--channels plugin:telegram@claude-plugins-official')
     expect(cmd).toContain('--dangerously-skip-permissions')
+  })
+
+  // CONTRACT (2026-09-21, 42bbbf2e): the respawn command MUST export the
+  // provider's *_STATE_DIR exactly like channels.sh's own new-session does.
+  // Without it the plugin looks for its token in ~/.claude/channels/<provider>
+  // (absent on a migrated install), logs "TELEGRAM_BOT_TOKEN required" and the
+  // channel stays dark until channels.sh itself relaunches (~75 min on the
+  // nightly 03:00 fresh restart, measured 09-20 and 09-21).
+  it('exports the provider state dir before launching claude, channels.sh-shaped', () => {
+    const cmd = buildMainSessionRespawnCmd({ ...base, continueSession: false })
+    const m = cmd.match(/&& export TELEGRAM_STATE_DIR='([^']+)' &&/)
+    expect(m, 'TELEGRAM_STATE_DIR export missing').not.toBeNull()
+    expect(m![1]).toMatch(/\.claude\/channels\/telegram$/)
+    expect(cmd.indexOf('TELEGRAM_STATE_DIR=')).toBeLessThan(cmd.indexOf(base.claudePath))
+    // Both directions: another provider gets ITS var, and never the telegram one.
+    const slack = buildMainSessionRespawnCmd({ ...base, provider: 'slack', pluginId: 'slack@claude-plugins-official', continueSession: false })
+    expect(slack).toMatch(/&& export SLACK_STATE_DIR='[^']*\.claude\/channels\/slack' &&/)
+    expect(slack).not.toContain('TELEGRAM_STATE_DIR=')
   })
 
   it('single-quotes the model id (so [1m] is not glob-expanded)', () => {
