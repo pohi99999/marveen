@@ -10,6 +10,7 @@ import { quarantineFleetTokenIfDead } from './claude-credentials-guard.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectReauthNeeded } from './reauth-detect.js'
+import { detectReauthFromTranscript } from './reauth-transcript.js'
 import { loginSequence, literalKeyArgs, specialKeyArgs } from './tmux-keys.js'
 import { withSessionSendLock } from './session-send-lock.js'
 
@@ -276,10 +277,41 @@ function sendNotify(msg: string): void {
   })
 }
 
+/**
+ * MAIN session: the pane signal OR the transcript signal. Pure and exported so
+ * the contract test can lock it: the pane's live status region is redrawn by
+ * every injected scheduled-task prompt and lost the "Not logged in" marker after
+ * one sweep on 2026-09-22 (03:08 -> silence until 08:24), while the transcript
+ * kept answering "Login expired · Please run /login" for 5 hours. The transcript
+ * is only consulted when the pane says healthy (cheap path first).
+ */
+export function combineMainReauthSignals(
+  fromPane: { needsReauth: boolean; reason?: string },
+  fromTranscript: () => { needsReauth: boolean; reason?: string },
+): { needsReauth: boolean; reason?: string } {
+  if (fromPane.needsReauth) return fromPane
+  const t = fromTranscript()
+  return t.needsReauth ? { needsReauth: true, reason: t.reason } : fromPane
+}
+
+/**
+ * A dead login proven by the TRANSCRIPT lives in the shared credentials file
+ * (the fresh 03:00 respawn of 2026-09-22 read the same file and answered
+ * "Login expired" at 03:00:13). A main respawn cannot fix that -- it would only
+ * drop context every cooldown all night -- so it is escalate-only; the fix is
+ * the token source (owner /login). A pane-proven dead login keeps the GAP 1
+ * behaviour (a stale env token override IS fixed by a respawn).
+ */
+export function shouldSkipMainRestartForFileDeadLogin(reason: string | undefined): boolean {
+  return typeof reason === 'string' && reason.startsWith('transcript:')
+}
+
 function checkSession(label: string, session: string, isMain: boolean, quiet: boolean): void {
   const pane = capturePane(session)
   const sessionAlive = pane != null
-  const reauth = detectReauthNeeded(pane)
+  const reauth = isMain && sessionAlive
+    ? combineMainReauthSignals(detectReauthNeeded(pane), () => detectReauthFromTranscript(PROJECT_ROOT))
+    : detectReauthNeeded(pane)
   const prev = watchState.get(session) ?? NO_REAUTH_STATE
   // The reasons produced by the two first-run-gate markers in reauth-detect.
   const isFirstRunGate = /onboarding picker|sign-in screen/i.test(reauth.reason ?? '')
@@ -330,7 +362,9 @@ function checkSession(label: string, session: string, isMain: boolean, quiet: bo
           // cannot re-read a token that is only now being quarantined. Dynamic
           // import (matches inbound-probe.ts:318) to avoid a circular module
           // dependency with channel-monitor.ts.
-          if (decision.restartMain) {
+          if (decision.restartMain && shouldSkipMainRestartForFileDeadLogin(reauth.reason)) {
+            logger.warn({ label, reason: reauth.reason }, 'reauth-healer: main dead-token restart skipped -- login is dead in the shared credentials file, a fresh respawn reads the same file (escalate-only, owner /login needed)')
+          } else if (decision.restartMain) {
             import('./channel-monitor.js').then(({ hardRestartMarveenChannels, lastMainRespawnAt }) => {
               const RESPAWN_GRACE_MS = 15 * 60 * 1000 // mirror channel-monitor.ts's KEEPALIVE_RESPAWN_GRACE_MS
               const now = Date.now()
