@@ -33,8 +33,11 @@ outbound text before the send happens:
    (`store/outgoing-copy-gate-rules.json`, shape
    `{"bad_name_patterns": [...], "correction": "..."}`) rather than
    hardcoded in the script, since a personal name rule shouldn't ship in a
-   public repo. A missing/empty rules file is never silent — see fail-open
-   vs. fail-closed below.
+   public repo. A missing/empty rules file is never silent — every run puts
+   a `systemMessage` in front of the live session, and the gate log
+   (`store/outgoing-copy-gate.log`) carries **one** line per state per day
+   (COPYGATELOG923; it used to be one line per send, 10 908 identical lines
+   in ten days, which buried the signal). See fail-open vs. fail-closed below.
 
 ## How it's wired
 
@@ -62,9 +65,11 @@ The two channels are handled differently on purpose:
 
 - **Email is fail-closed.** If the body can't be recovered (e.g. a
   `--body "$(cat file)"` that reaches the hook unexpanded, or a pipe the
-  hook can't see into), or the name-rules file is missing, the send is
-  **blocked**. Email is deferrable, and a silently-skipped name check is
-  worse than a delayed send.
+  hook can't see into), or the name-rules file is present but **broken**
+  (unparseable, uncompilable pattern), the send is **blocked**. A merely
+  *missing* or *empty* rules file lets the mail out with a loud warning
+  (CLCOPYGATEHIANY902). Email is deferrable, and a silently-skipped name
+  check is worse than a delayed send.
 - **Telegram is fail-open on internal hook errors** (but still blocks on an
   actual finding). Telegram is the owner's only supervision channel — a
   gate crash that silences it costs more than one slipped accent would. A

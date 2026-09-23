@@ -103,6 +103,39 @@ def main():
         check("missing file: telegram fail-open (exit 0)", code, 0)
         check_true("missing file: telegram warns via systemMessage", "NEV-SZABALY" in out, out)
 
+        # --- 1b. The loud line is ONE PER DAY, the systemMessage is per run ---
+        # COPYGATELOG923: the ledger used to gain one identical line on every
+        # send (10 908 lines in ten days). Now: a second run on the same day
+        # adds nothing to the log; a new day adds exactly one new line; the
+        # systemMessage still reaches the session on EVERY run.
+        from datetime import datetime, timedelta
+        daydir = tempfile.mkdtemp(prefix="copygate-day-", dir=tmp)
+        day_rules = rules_path(daydir, "does-not-exist.json")
+        day_log = os.path.join(daydir, "outgoing-copy-gate.log")
+
+        def missing_lines():
+            if not os.path.exists(day_log):
+                return []
+            with open(day_log, encoding="utf-8") as fh:
+                return [l for l in fh.read().splitlines() if "NEV-SZABALY MISSING" in l]
+
+        code, out1, _ = run_hook(telegram_payload(CLEAN_HU_OK), rules_file=day_rules)
+        code, out2, _ = run_hook(telegram_payload(CLEAN_HU_OK), rules_file=day_rules)
+        check("daily log: two runs on one day leave ONE missing-line", len(missing_lines()), 1)
+        check_true("daily log: the systemMessage still fires on BOTH runs",
+                   "NEV-SZABALY" in out1 and "NEV-SZABALY" in out2, out1 + out2)
+        yesterday = (datetime.now().astimezone() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S%z")
+        today_line = missing_lines()[0]
+        with open(day_log, "w", encoding="utf-8") as fh:
+            fh.write(yesterday + today_line[today_line.index(" "):] + "\n")
+        code, out3, _ = run_hook(telegram_payload(CLEAN_HU_OK), rules_file=day_rules)
+        check("daily log: a new day adds exactly one new line", len(missing_lines()), 2)
+        check_true("daily log: the new line carries today's date",
+                   missing_lines()[-1].startswith(datetime.now().astimezone().strftime("%Y-%m-%d")), missing_lines()[-1])
+        print("  gate-log visszaolvasva (tesztkonyvtar):")
+        for l in missing_lines():
+            print("    " + l[:110])
+
         # --- 2. CORRUPT file (unparseable JSON) -----------------------------
         corrupt = rules_path(tmp, "corrupt.json")
         with open(corrupt, "w", encoding="utf-8") as fh:

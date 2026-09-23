@@ -466,6 +466,28 @@ def _gate_log(message: str) -> None:
         pass
 
 
+def _gate_log_daily(message: str) -> None:
+    """Append `message` to the gate log unless an identical line already
+    carries today's date (local). Scans only the tail of the file, so a
+    multi-megabyte ledger is not re-read on every send. Any read problem
+    falls back to logging -- a lost dedup is cheaper than a lost warning."""
+    try:
+        from datetime import datetime
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        want = message.rstrip()
+        with open(_GATE_LOG, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 65536))
+            tail = fh.read().decode("utf-8", "replace")
+        for line in tail.splitlines():
+            if line.startswith(today) and line.endswith(want):
+                return
+    except OSError:
+        pass
+    _gate_log(message)
+
+
 # CLCOPYGATEHIANY902 (owner decision, TG 14442) MERGED WITH GATEPERSIST816/3
 # (PDB install, 2026-08-19). Two independent fixes to the same question, from
 # opposite directions, so the merged policy has FIVE states:
@@ -553,8 +575,14 @@ def load_bad_name():
     # first cut logged only the exception branches, so empty/schema-invalid
     # left no log line while missing did -- same event class, inconsistent
     # ledger).
-    _gate_log(f"outgoing-copy-gate: NEV-SZABALY {state.upper()} ({_LOCAL_RULES}) -- "
-              "a nev-ellenorzes NEM fut.")
+    # COPYGATELOG923 (Kenshin evening check 2026-09-22, marveen GO 1688): this
+    # line was written on EVERY hook run -- 10 908 identical lines between
+    # 09-12 and 09-22 on one install -- which drowned the very signal it was
+    # meant to carry. The ledger keeps ONE line per state per calendar day;
+    # the per-run systemMessage to the live session is untouched (see below),
+    # so the absence is still never silent where a human actually looks.
+    _gate_log_daily(f"outgoing-copy-gate: NEV-SZABALY {state.upper()} ({_LOCAL_RULES}) -- "
+                    "a nev-ellenorzes NEM fut.")
     return (None, state)
 
 
