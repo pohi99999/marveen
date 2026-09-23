@@ -38,6 +38,16 @@ The realistic threat is not a malicious agent: it is a fetched page telling an
 agent to run a `curl`, which is why the quarantine-reader exists in the first
 place.
 
+**Fork switch, recipient ledger (owner decision 2026-09-23, Telegram 4361).**
+Upstream's `email-send-gate.mjs` refuses any To/Cc/Bcc address that has no
+recorded source in `store/verified-recipients.json`, drafts included. On this
+install that check is OFF: `EMAIL_RECIPIENT_LEDGER=off` in the root `.env`
+(see `.env.example`). Only the ledger branch is skipped; the draft-only rule,
+the thread-reply narrowing, the sub-agent send deny and `outgoing-copy-gate.py`
+are unchanged. Remove the key (or set anything but `off`/`0`/`false`) to get
+upstream's fail-closed behaviour back; a missing or unreadable `.env` also
+means ON.
+
 ## What it does
 
 `BASH_EGRESS_DENY` in `src/web/agent-scaffold.ts` is the single source of truth

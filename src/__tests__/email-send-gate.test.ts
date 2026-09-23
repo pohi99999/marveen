@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { gateDecision, buildUnverifiedRecipientMsg } from '../../scripts/email-send-gate.mjs'
+import { gateDecision, buildUnverifiedRecipientMsg, recipientLedgerEnabled, makeRecipientVerifier } from '../../scripts/email-send-gate.mjs'
 // @ts-expect-error -- plain .mjs hook script, no types
 import { isValidSource, normalizeAddress, splitAddresses, loadLedger, isVerifiedIn } from '../../scripts/recipient-ledger.mjs'
 import { injectEmailSendGate, agentGetsEmailGate } from '../web/agent-scaffold.js'
@@ -281,5 +281,46 @@ describe('injectEmailSendGate', () => {
     expect(pre).toHaveLength(2)
     expect(pre.some((e) => JSON.stringify(e).includes('email-send-gate.mjs'))).toBe(true)
     expect(pre.some((e) => e.matcher === 'WebFetch')).toBe(true)
+  })
+})
+
+// FORK SWITCH (Peter dontese 2026-09-23, Telegram 4361): EMAIL_RECIPIENT_LEDGER=off
+// in the install's .env turns the ledger check off, nothing else. Both
+// directions are pinned: the switch opens the ledger branch only when it is
+// explicitly off, and a missing/unreadable .env keeps upstream's fail-closed default.
+describe('fork switch: EMAIL_RECIPIENT_LEDGER in .env', () => {
+  const envWith = (body: string) => (_p: string) => body
+
+  it('is ON by default: no key, empty value, unrelated values, unreadable .env', () => {
+    expect(recipientLedgerEnabled(envWith('OWNER_NAME=Peter\n'))).toBe(true)
+    expect(recipientLedgerEnabled(envWith('EMAIL_RECIPIENT_LEDGER=\n'))).toBe(true)
+    expect(recipientLedgerEnabled(envWith('EMAIL_RECIPIENT_LEDGER=on\n'))).toBe(true)
+    expect(recipientLedgerEnabled(() => { throw new Error('ENOENT') })).toBe(true)
+  })
+
+  it('is OFF only on an explicit off / 0 / false, quoted or not', () => {
+    expect(recipientLedgerEnabled(envWith('EMAIL_RECIPIENT_LEDGER=off\n'))).toBe(false)
+    expect(recipientLedgerEnabled(envWith('EMAIL_RECIPIENT_LEDGER="OFF"\n'))).toBe(false)
+    expect(recipientLedgerEnabled(envWith('EMAIL_RECIPIENT_LEDGER=0\n'))).toBe(false)
+    expect(recipientLedgerEnabled(envWith('EMAIL_RECIPIENT_LEDGER=false\n'))).toBe(false)
+  })
+
+  it('OFF: every address verifies and the ledger file is never read', () => {
+    const verify = makeRecipientVerifier({ enabled: false, loadLedgerImpl: () => { throw new Error('must not load') } })
+    expect(verify('nobody@never-seen.example')).toBe(true)
+    const d = gateDecision('mcp__google-workspace__manage_email', { operation: 'send', draft: true, to: 'nobody@never-seen.example' }, verify)
+    expect(d.kind).not.toBe('unverified-recipient')
+  })
+
+  it('ON: the ledger decides, exactly as upstream', () => {
+    const verify = makeRecipientVerifier({ enabled: true, loadLedgerImpl: () => ({ version: 1, recipients: { 'hello@connectors.hu': { source: 'owner' } } }) })
+    expect(verify('hello@connectors.hu')).toBe(true)
+    expect(verify('support@connectors.hu')).toBe(false)
+    expect(gateDecision('mcp__google-workspace__manage_email', { operation: 'send', draft: true, to: 'support@connectors.hu' }, verify).kind).toBe('unverified-recipient')
+  })
+
+  it('OFF does not weaken the other rules: a sub-agent send is still denied', () => {
+    const verify = makeRecipientVerifier({ enabled: false })
+    expect(gateDecision('mcp__gmail__send_email', { to: 'nobody@never-seen.example' }, verify).deny).toBe(true)
   })
 })

@@ -233,12 +233,40 @@ export function unverifiedRecipients(toolInput, isVerified) {
   return out
 }
 
+// FORK SWITCH (Peter dontese 2026-09-23, Telegram 4361): the recipient ledger
+// is OFF on this install. `EMAIL_RECIPIENT_LEDGER=off` (also `0` / `false`) in
+// <root>/.env makes every address count as verified, so the ledger branch of
+// the gate is skipped; every OTHER rule of this gate (draft-only, thread-reply
+// narrowing, sub-agent deny) and every other outgoing gate (outgoing-copy-gate)
+// is untouched. Absent key, empty value or anything else = ON, i.e. upstream's
+// behaviour. Read the same way readBrandEnv reads the install's .env, and
+// fail-closed on a read error: a missing .env cannot switch the ledger off.
+export function recipientLedgerEnabled(readFile = (p) => readFileSync(p, 'utf-8')) {
+  try {
+    const envPath = join(dirname(fileURLToPath(import.meta.url)), '..', '.env')
+    const raw = readFile(envPath)
+    const m = raw.match(/^\s*EMAIL_RECIPIENT_LEDGER\s*=\s*(.*)$/m)
+    if (!m) return true
+    const v = m[1].trim().replace(/^["']|["']$/g, '').trim().toLowerCase()
+    return !(v === 'off' || v === '0' || v === 'false')
+  } catch {
+    return true
+  }
+}
+
 // Default lookup for the live hook: read the ledger once per invocation. A
 // missing or corrupt ledger means nothing is verified, so the gate blocks --
 // an evidence store that cannot be read must never open the gate silently.
-function ledgerLookup() {
-  const ledger = loadLedger()
+// With the fork switch off the ledger file is not read at all.
+export function makeRecipientVerifier(opts = {}) {
+  const enabled = opts.enabled ?? recipientLedgerEnabled()
+  if (!enabled) return () => true
+  const load = opts.loadLedgerImpl ?? loadLedger
+  const ledger = load()
   return (addr) => isVerifiedIn(ledger, addr)
+}
+function ledgerLookup() {
+  return makeRecipientVerifier()
 }
 
 // Pure decision: does this tool call send (or attempt to send) email?
