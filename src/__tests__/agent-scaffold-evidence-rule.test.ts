@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { buildEvidenceBody, recipientLedgerEnabledForScaffold } from '../web/agent-scaffold.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SCAFFOLD = readFileSync(join(__dirname, '..', 'web', 'agent-scaffold.ts'), 'utf-8')
@@ -102,5 +103,43 @@ describe('evidence-rule scaffold block', () => {
   it('keeps Hungarian accents and uses no em dash, like its sibling blocks', () => {
     expect(evidenceBody).toContain('ellenőrizz')
     expect(evidenceBody).not.toContain('—')
+  })
+})
+
+// FORK (Peter dontese 2026-09-23, Telegram 4361): the generated block follows the
+// EMAIL_RECIPIENT_LEDGER switch of email-send-gate.mjs, both directions.
+describe('evidence-rule block follows the recipient-ledger switch', () => {
+  it('ON: states the mechanical gate and the add command', () => {
+    const body = buildEvidenceBody(true)
+    expect(body).toContain('gépi kapu is')
+    expect(body).toContain('store/verified-recipients.json')
+    expect(body).toContain('recipient-ledger.mjs')
+    expect(body).not.toContain('KI van kapcsolva')
+  })
+
+  it('OFF: says the ledger is switched off on this install, keeps the source rule and the add command for later', () => {
+    const body = buildEvidenceBody(false)
+    expect(body).toContain('KI van kapcsolva')
+    expect(body).toContain('EMAIL_RECIPIENT_LEDGER=off')
+    expect(body).not.toContain('gépi kapu is')
+    expect(body).toContain('recipient-ledger.mjs')
+    expect(body).toContain('forrásból jön')
+  })
+
+  it('the switch reads process.env with the gate semantics: off/0/false = off, anything else = on', () => {
+    const saved = process.env.EMAIL_RECIPIENT_LEDGER
+    try {
+      for (const v of ['off', 'OFF', '"off"', '0', 'false']) {
+        process.env.EMAIL_RECIPIENT_LEDGER = v
+        expect(recipientLedgerEnabledForScaffold(), v).toBe(false)
+      }
+      for (const v of ['on', 'yes', 'anything']) {
+        process.env.EMAIL_RECIPIENT_LEDGER = v
+        expect(recipientLedgerEnabledForScaffold(), v).toBe(true)
+      }
+    } finally {
+      if (saved === undefined) delete process.env.EMAIL_RECIPIENT_LEDGER
+      else process.env.EMAIL_RECIPIENT_LEDGER = saved
+    }
   })
 })

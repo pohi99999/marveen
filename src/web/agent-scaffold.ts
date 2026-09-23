@@ -3,6 +3,7 @@ import { readRemovedDefaultTasks } from './scheduled-tasks-io.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WEB_PORT, OWNER_DRIVE_FOLDER, APP_TZ, DASHBOARD_PUBLIC_URL, AGENT_API_ORIGIN, STORE_DIR } from '../config.js'
+import { readEnvFile } from '../env.js'
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
@@ -1853,7 +1854,22 @@ function buildAutonomyBody(name: string): string {
 // "ezzel napok telnek el, hogyha hulyesegeket mondanak nekem, es en meg
 // elhiszem". This block is fleet-wide, not agent-specific: a guess dressed as
 // a fact costs the same wherever it comes from.
-function buildEvidenceBody(): string {
+// FORK (Peter dontese 2026-09-23, Telegram 4361): the recipient ledger of
+// email-send-gate.mjs can be switched off per install with
+// EMAIL_RECIPIENT_LEDGER=off in the root .env. The generated rule must say
+// what is actually enforced: read the key the same way the gate does
+// (process.env first, then the install .env -- readEnvFile), same
+// off/0/false semantics, anything else = ON. Regenerated on every respawn, so
+// flipping the key rewrites every agent's block without a hand edit.
+export function recipientLedgerEnabledForScaffold(): boolean {
+  const key = 'EMAIL_RECIPIENT_LEDGER'
+  const fromProcess = process.env[key]
+  const raw = (fromProcess !== undefined && fromProcess.trim() !== '') ? fromProcess : readEnvFile([key])[key]
+  const v = String(raw ?? '').trim().replace(/^["']|["']$/g, '').trim().toLowerCase()
+  return !(v === 'off' || v === '0' || v === 'false')
+}
+
+export function buildEvidenceBody(ledgerOn: boolean = recipientLedgerEnabledForScaffold()): string {
   return [
     '## Tények és találgatás',
     '',
@@ -1888,11 +1904,19 @@ function buildEvidenceBody(): string {
     '',
     'Ha nem találsz forrást, ez a válasz: "ezt a címet/számot nem találom sehol". Ez teljes értékű, és sokkal olcsóbb, mint egy jó levél, ami senkihez nem ér el.',
     '',
-    'Kimenő levélnél ez gépi kapu is, nem csak szabály: a `to`/`cc`/`bcc` minden címét a `store/verified-recipients.json` ledgerhez méri a PreToolUse hook, és ismeretlen címre még piszkozatot sem enged. Új cím felvétele forrás megnevezésével:',
-    '',
-    '```bash',
-    `node ${join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs')} add <cim> --source mail:<messageId>|site:<url>|owner|crm:<ref>|order:<id>|doc:<ref> --note "<honnan>"`,
-    '```',
+    ...(ledgerOn ? [
+      'Kimenő levélnél ez gépi kapu is, nem csak szabály: a `to`/`cc`/`bcc` minden címét a `store/verified-recipients.json` ledgerhez méri a PreToolUse hook, és ismeretlen címre még piszkozatot sem enged. Új cím felvétele forrás megnevezésével:',
+      '',
+      '```bash',
+      `node ${join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs')} add <cim> --source mail:<messageId>|site:<url>|owner|crm:<ref>|order:<id>|doc:<ref> --note "<honnan>"`,
+      '```',
+    ] : [
+      'Ezen a telepítésen a címzett-ledger (`store/verified-recipients.json`) KI van kapcsolva (`EMAIL_RECIPIENT_LEDGER=off` a gyökér `.env`-ben, tulajdonosi döntés 2026-09-23): a kimenő levél `to`/`cc`/`bcc` címeit a PreToolUse hook NEM méri ledgerhez, bárkinek írható levél és piszkozat. A forrás-szabály ettől nem gyengül: a cím továbbra is forrásból jön (From fejléc, élő oldal, rendelés, szerződés), és a forrást a levél kísérőjében vagy a kártyán nevezd meg. Ha a kapcsolót visszaveszik, a címek felvétele:',
+      '',
+      '```bash',
+      `node ${join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs')} add <cim> --source mail:<messageId>|site:<url>|owner|crm:<ref>|order:<id>|doc:<ref> --note "<honnan>"`,
+      '```',
+    ]),
   ].join('\n')
 }
 
