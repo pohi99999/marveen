@@ -54,13 +54,43 @@ export interface AgentSuggestionResult {
 }
 
 /**
+ * What counts as a large per-call context, averaged over the window.
+ *
+ * Anchored to numbers already in use, not invented. HIGH is the same 150K as
+ * the contextTokens override in suggestForAgent(), so one agent cannot read
+ * "large" by one measure and "small" by the other. MEDIUM sits just above a
+ * fresh session's startup context (measured on a live install 2026-09-17:
+ * 49,483 tokens on the first call after a restart), so a session that has
+ * merely started does not already read as medium.
+ *
+ * The previous 10K/3K thresholds belonged to the cache-blind signal described
+ * on contextAvgPerCall. Correcting the sum without raising these would trade a
+ * signal that never fired for one that always fires: every Claude Code session
+ * starts above 10K, so the "large context" hit would be permanently on, which
+ * carries exactly as much information as permanently off.
+ */
+export const CONTEXT_PER_CALL_HIGH = 150_000
+export const CONTEXT_PER_CALL_MEDIUM = 50_000
+
+/**
  * Runtime signals collected by the route layer (I/O-free here).
  * Every field is optional so the classifier degrades gracefully when
  * an agent has no history yet.
  */
 export interface AgentSignals {
-  /** token_usage, last 30 days: totalInput / totalCalls */
-  tokenAvgInputPerCall?: number
+  /**
+   * Average context carried per call over the window: input + cache-read +
+   * cache-creation tokens, divided by calls.
+   *
+   * MEASURED 2026-09-17: reading SUM(input_tokens) alone -- what this field
+   * used to be fed -- gave 2.9 tokens/call for the main agent over 30 days
+   * against a true 354,271, because a long-lived session serves nearly its
+   * whole context from the prompt cache and the uncached remainder is a
+   * rounding error. The error direction is systematic, not random: the better
+   * caching works, the cheaper the agent looks, so the module recommended a
+   * smaller model for precisely the agents carrying the most context.
+   */
+  contextAvgPerCall?: number
   /** kanban_cards WHERE assignee=name AND archived_at IS NULL */
   kanbanOpenCount?: number
   /** subset of kanbanOpenCount where priority IN ('urgent','high') */
@@ -149,8 +179,8 @@ function buildReason(
 
   // Section 2: Megfigyelt használat
   lines.push('Megfigyelt használat:')
-  const tokenStr = s.tokenAvgInputPerCall !== undefined
-    ? `${(s.tokenAvgInputPerCall / 1000).toFixed(1)}K token/hívás (30 nap átlag)`
+  const tokenStr = s.contextAvgPerCall !== undefined
+    ? `${(s.contextAvgPerCall / 1000).toFixed(1)}K token/hívás (30 nap átlag, gyorsítótárral együtt)`
     : 'nincs adat'
   const kanbanStr = s.kanbanOpenCount !== undefined
     ? `${s.kanbanOpenCount} aktív kártya${s.kanbanUrgentCount ? `, ebből ${s.kanbanUrgentCount} sürgős/magas` : ''}`
@@ -178,13 +208,13 @@ function buildReason(
       : `Általános (${opusKeyHits} opus-jelző, ${haikuKeyHits} haiku-jelző)`
   lines.push(`  Persona komplexitás: ${personaIcon} ${personaDesc}`)
 
-  const tokenIcon = s.tokenAvgInputPerCall === undefined ? '⚠️'
-    : s.tokenAvgInputPerCall > 10_000 ? '❌'
-    : s.tokenAvgInputPerCall > 3_000 ? '⚠️'
+  const tokenIcon = s.contextAvgPerCall === undefined ? '⚠️'
+    : s.contextAvgPerCall > CONTEXT_PER_CALL_HIGH ? '❌'
+    : s.contextAvgPerCall > CONTEXT_PER_CALL_MEDIUM ? '⚠️'
     : '✅'
-  const tokenDesc = s.tokenAvgInputPerCall === undefined ? 'nincs adat'
-    : s.tokenAvgInputPerCall > 10_000 ? 'magas -- komplex, hosszú kontextus'
-    : s.tokenAvgInputPerCall > 3_000 ? 'közepes'
+  const tokenDesc = s.contextAvgPerCall === undefined ? 'nincs adat'
+    : s.contextAvgPerCall > CONTEXT_PER_CALL_HIGH ? 'magas -- komplex, hosszú kontextus'
+    : s.contextAvgPerCall > CONTEXT_PER_CALL_MEDIUM ? 'közepes'
     : 'alacsony'
   lines.push(`  Token-fogyasztás: ${tokenIcon} ${tokenDesc}`)
 
@@ -223,7 +253,7 @@ function buildReason(
     topReasons.push(`nagy session-kontextus (${Math.round(contextTokens / 1000)}K token)`)
   } else {
     if (opusKeyHits >= 2) topReasons.push(`persona ${opusKeyHits} opus-jelzőt tartalmaz`)
-    if ((s.tokenAvgInputPerCall ?? 0) > 10_000) topReasons.push(`magas token-fogyasztás (${(s.tokenAvgInputPerCall! / 1000).toFixed(1)}K/hívás)`)
+    if ((s.contextAvgPerCall ?? 0) > CONTEXT_PER_CALL_HIGH) topReasons.push(`nagy átlagos kontextus (${(s.contextAvgPerCall! / 1000).toFixed(1)}K/hívás)`)
     if ((s.mcpServerCount ?? 0) >= 4) topReasons.push(`${s.mcpServerCount} MCP integráció`)
     if ((s.kanbanUrgentCount ?? 0) >= 2) topReasons.push(`${s.kanbanUrgentCount} sürgős/magas feladat`)
     if (haikuKeyHits >= 2) topReasons.push(`persona ${haikuKeyHits} haiku-jelzőt tartalmaz`)
@@ -247,7 +277,7 @@ function buildReason(
 
   // Section 6: Bizonytalanság
   const unknowns: string[] = []
-  if (s.tokenAvgInputPerCall === undefined) unknowns.push('token-adat hiányzik')
+  if (s.contextAvgPerCall === undefined) unknowns.push('token-adat hiányzik')
   if (s.kanbanOpenCount === undefined) unknowns.push('kanban-adat hiányzik')
   if (s.scheduledFreqPerDay === undefined) unknowns.push('ütemezési adat hiányzik')
   if (s.mcpServerCount === undefined) unknowns.push('MCP-konfig hiányzik')
@@ -340,7 +370,7 @@ export function suggestForAgent(
   // Signal scoring (runtime observations)
   let opusSignalHits = 0
   let haikuSignalHits = 0
-  if ((s.tokenAvgInputPerCall ?? 0) > 10_000) opusSignalHits++
+  if ((s.contextAvgPerCall ?? 0) > CONTEXT_PER_CALL_HIGH) opusSignalHits++
   if ((s.mcpServerCount ?? 0) >= 4) opusSignalHits++
   if ((s.kanbanUrgentCount ?? 0) >= 2) opusSignalHits++
   if ((s.scheduledFreqPerDay ?? 0) >= 10) haikuSignalHits++

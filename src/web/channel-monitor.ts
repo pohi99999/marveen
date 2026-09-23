@@ -1,3 +1,4 @@
+import { tmuxStderr } from './tmux-stderr.js'
 import { existsSync, readFileSync, statSync, writeFileSync, utimesSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
@@ -762,12 +763,16 @@ export function buildMainSessionRespawnCmd(opts: {
    * shouting about. REQUIRED, and obtainable in production only from
    * resolveMainConfigDecision(), which reports as it resolves -- see
    * main-config-decision.ts for why the guard is wired as a value rather than a
-   * callback. `isolatedConfigDir` set => export the isolated dir plus the fleet
-   * setup-token (parity with channels.sh CFG_ENV); null with `fleetToken` =>
-   * export the token alone, which is what keeps a wizard-entered token reaching
-   * a respawned main session at all (2026-07-15 bootcamp, bug 2 latent path);
-   * null with no token => the shared root, unchanged for installs with
-   * isolation off.
+   * callback. `isolatedConfigDir` set with `ownCredentials` => export ONLY the
+   * dir (it carries its own .credentials.json -- explicit or a rotated
+   * claude-plans entry; injecting the fleet token on top would swap that
+   * login for the flotta's shared one, CLAUDEPLANWATCHDOG912); `isolatedConfigDir`
+   * set without `ownCredentials` => export the dir plus the fleet setup-token
+   * (parity with channels.sh CFG_ENV, the credential-less flotta dir); null
+   * with `fleetToken` => export the token alone, which is what keeps a
+   * wizard-entered token reaching a respawned main session at all (2026-07-15
+   * bootcamp, bug 2 latent path); null with no token => the shared root,
+   * unchanged for installs with isolation off.
    */
   config: MainConfigDecision
   /**
@@ -810,8 +815,13 @@ export function buildMainSessionRespawnCmd(opts: {
     '&& export MCP_SERVER_CONNECTION_BATCH_SIZE=10 MCP_CONNECTION_NONBLOCKING=1 MCP_TIMEOUT=60000',
     // macOS main-agent config isolation -- parity with channels.sh CFG_ENV. The
     // token is read at launch via $(cat) so the secret never lands in argv/`ps`.
+    // An own-credential dir (explicit or a rotated claude-plans entry) gets NO
+    // token: it already has its own .credentials.json, and injecting the fleet
+    // token on top would authenticate as the flotta instead of that login.
     ...(opts.config.isolatedConfigDir
-      ? [`&& export CLAUDE_CONFIG_DIR='${opts.config.isolatedConfigDir}' && export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`]
+      ? (opts.config.ownCredentials
+          ? [`&& export CLAUDE_CONFIG_DIR='${opts.config.isolatedConfigDir}'`]
+          : [`&& export CLAUDE_CONFIG_DIR='${opts.config.isolatedConfigDir}' && export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`])
       : opts.config.fleetToken
         ? [`&& export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`]
         : []),
@@ -847,7 +857,7 @@ export function respawnMainSessionFresh(): void {
   // but leaves grandchild pollers alive, and two pollers on one bot token race
   // for getUpdates (409). Reap BEFORE respawning, never after.
   try {
-    reapChannelOrphans(provider.type, PROJECT_ROOT)
+    reapChannelOrphans(provider.type, PROJECT_ROOT, { tmuxPath: tmuxBin() })
   } catch (err) {
     logger.warn({ err }, 'respawnMainSessionFresh: pre-respawn reap failed (continuing)')
   }
@@ -904,7 +914,7 @@ export async function resumeMarveenSession(): Promise<boolean> {
     // --continue session would race a still-alive poller for the same bot
     // token (409 Conflict on getUpdates).
     try {
-      reapChannelOrphans(provider.type, PROJECT_ROOT)
+      reapChannelOrphans(provider.type, PROJECT_ROOT, { tmuxPath: tmuxBin() })
     } catch (err) {
       logger.warn({ err }, 'resumeMarveenSession: pre-respawn reap failed (continuing)')
     }
@@ -1129,9 +1139,13 @@ let marveenLastSessionCreate = 0
 
 export function mainChannelsSessionExists(): boolean {
   try {
-    execFileSync(tmuxBin(), ['has-session', '-t', MAIN_CHANNELS_SESSION], { timeout: 3000 })
+    // TMUXWINDOWATTR920: stderr piped -- a missing session is an ANSWER here
+    // (false), not an error, so it is logged at debug with the call site rather
+    // than copied undated onto dashboard.error.log.
+    execFileSync(tmuxBin(), ['has-session', '-t', MAIN_CHANNELS_SESSION], { timeout: 3000, stdio: ['ignore', 'pipe', 'pipe'] })
     return true
-  } catch {
+  } catch (err) {
+    logger.debug({ site: 'channel-monitor.mainChannelsSessionExists', session: MAIN_CHANNELS_SESSION, tmux: tmuxStderr(err) }, 'tmux has-session: absent')
     return false
   }
 }
@@ -1311,13 +1325,19 @@ export function launchdRestartTookEffect(before: number | null, after: number | 
 }
 
 // pid of the claude process in the main channels pane, or null when unreadable.
+// TMUXWINDOWATTR920: stderr is PIPED, not inherited. Without a stdio option
+// execFileSync copies the child's stderr onto the parent's stderr as well, so
+// tmux's "can't find window/session: ..." landed in dashboard.error.log
+// undated and unattributed (133 + ~3000 such lines measured 2026-09-20). The
+// message now goes through the logger with the call site and the session.
 function mainPaneClaudePid(): number | null {
   try {
     const raw = execFileSync(tmuxBin(), ['list-panes', '-t', MAIN_CHANNELS_SESSION, '-F', '#{pane_pid}'],
-      { timeout: 3000, encoding: 'utf-8' })
+      { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
     const pid = parseInt(raw.trim().split('\n')[0] ?? '', 10)
     return Number.isFinite(pid) && pid > 0 ? pid : null
-  } catch {
+  } catch (err) {
+    logger.warn({ site: 'channel-monitor.mainPaneClaudePid', session: MAIN_CHANNELS_SESSION, tmux: tmuxStderr(err) }, 'tmux list-panes failed')
     return null
   }
 }

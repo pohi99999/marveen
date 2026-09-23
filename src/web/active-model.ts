@@ -154,3 +154,28 @@ export function readTranscriptMtimeFromProjectDir(workingDir: string, configDir?
     return newest
   } catch { return null }
 }
+
+/**
+ * Newest transcript mtime for `workingDir` across SEVERAL candidate config
+ * roots, or null when no candidate has one.
+ *
+ * Same "probe every root, newest wins" rule the inbound probe uses, and for the
+ * same reason: whether a session writes under the shared ~/.claude or under an
+ * isolated CLAUDE_CONFIG_DIR is decided by gates (settings, fleet token, dir
+ * existence) that a watchdog must not try to re-derive. A root that is not in
+ * use simply yields an older timestamp or none.
+ *
+ * An `undefined` entry means the shared ~/.claude default, so a caller that
+ * already has a single known root can pass `[root]` and get the old behaviour.
+ */
+export function readTranscriptMtimeAcrossConfigDirs(
+  workingDir: string,
+  configDirs: ReadonlyArray<string | undefined>,
+): number | null {
+  let newest: number | null = null
+  for (const configDir of configDirs) {
+    const m = readTranscriptMtimeFromProjectDir(workingDir, configDir)
+    if (m != null && (newest === null || m > newest)) newest = m
+  }
+  return newest
+}

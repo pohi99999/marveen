@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  LOST_REINJECT_MAX,
   cronOccursOnLocalDay,
-  decideLostRequeue,
   decideTaskTimeout,
   lostDetectionSupported,
   TASK_FIRE_GRACE_MS,
@@ -38,31 +36,8 @@ describe('gap 1: lost-detection is only meaningful on the Claude engine', () => 
   })
 })
 
-describe('gap 2: a lost re-queue has a ceiling', () => {
-  it('requeues below the ceiling and gives up at it', () => {
-    expect(LOST_REINJECT_MAX).toBe(3)
-    expect(decideLostRequeue(1)).toBe('requeue')
-    expect(decideLostRequeue(2)).toBe('requeue')
-    expect(decideLostRequeue(3)).toBe('giveup')
-    expect(decideLostRequeue(178)).toBe('giveup')
-  })
-
-  it('replay of the Saturday incident: 178 lost verdicts produce at most 2 re-queues, not 177', () => {
-    // Mirrors the runner's bookkeeping: the count increments per verdict and
-    // is cleared on giveup (the next cron-path fire starts a fresh streak).
-    let count = 0
-    let requeues = 0
-    let giveups = 0
-    for (let verdict = 0; verdict < 178; verdict++) {
-      count += 1
-      if (decideLostRequeue(count) === 'giveup') { giveups += 1; count = 0 } else { requeues += 1 }
-    }
-    // Without a ceiling this would have been 178 re-queues (the measured loop).
-    expect(requeues).toBeLessThan(178)
-    expect(requeues).toBe(giveups * (LOST_REINJECT_MAX - 1) + count)
-    expect(giveups).toBeGreaterThan(0)
-  })
-})
+// gap 2 (the re-queue ceiling) is covered by upstream's decideLostRedeliveryAction /
+// MAX_LOST_REDELIVERIES tests in schedule-task-timeout.test.ts since the v1.39.0 merge.
 
 describe('gap 3: a lost re-queue respects the cron day', () => {
   it('a weekday-only cron has no occurrence on Saturday (the incident day)', () => {

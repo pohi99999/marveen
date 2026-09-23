@@ -149,6 +149,12 @@ import {
 } from '../agent-bundle.js'
 import type { RouteContext } from './types.js'
 import { suggestForAgent, type AgentSignals } from '../model-suggest.js'
+import {
+  contextAvgPerCallMap,
+  kanbanLoadMap,
+  KANBAN_LOAD_SQL,
+  type KanbanLoadRow,
+} from '../model-suggest-signals.js'
 import { getTokenSummary } from '../token-usage.js'
 import { listScheduledTasks } from '../scheduled-tasks-io.js'
 
@@ -875,30 +881,40 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // Collect runtime signals once, then classify per agent.
     // I/O is centralised here; the classifier (model-suggest.ts) stays pure.
 
-    // Token usage: per-agent average input tokens/call over the last 30 days
+    // Token usage: per-agent average CONTEXT carried per call over the last 30
+    // days -- input + cache-read + cache-creation, not totalInput alone.
+    //
+    // totalInput is SUM(input_tokens): the uncached remainder only. On a
+    // long-lived session nearly the whole context arrives as cache reads, so
+    // that remainder is a rounding error, and the classifier read it as a tiny
+    // context. MEASURED 2026-09-17 on the live install: 2.9 tokens/call over 30
+    // days (17,325 calls) against a true 354,271 -- and the main agent was
+    // therefore advised to DOWNGRADE to Sonnet, the opposite of what its own
+    // threshold means. Same defect family as the transcript-root blind spots
+    // (SCHEDLOST914, TOKENVAK915, GATEVAK917): a measurement that reads a real
+    // number from the wrong place and so never looks broken.
+    //
+    // getTokenSummary().totalInput itself stays as it is: the token-usage
+    // dashboard shows the four columns separately and wants the raw one.
     const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 24 * 3600
     const tokenSummaries = getTokenSummary(thirtyDaysAgo)
-    const tokenMap = new Map(
-      tokenSummaries.map(s => [s.agent, s.totalCalls > 0 ? s.totalInput / s.totalCalls : 0])
-    )
+    const tokenMap = contextAvgPerCallMap(tokenSummaries)
 
-    // Kanban: open and urgent/high card counts per assignee
+    // Kanban: OPEN and urgent/high card counts per assignee.
+    //
+    // status <> 'done' is the point: archived_at IS NULL alone counts finished
+    // cards as open, because a done card is only archived by the 7-day sweep
+    // (and a level-1 autonomy setting can stop even that). MEASURED 2026-09-17
+    // on the live install: the main agent showed "14 aktív kártya, ebből 6
+    // sürgős/magas" while it actually had 8 open and 2 urgent/high -- 6 of the
+    // 14 were done, and 4 of the 6 urgent ones were done. kanbanUrgentCount >= 2
+    // is an Opus signal, so the inflated count feeds the suggestion directly;
+    // that day it happened not to flip the verdict, which is luck, not
+    // correctness. Same family as the token signal fixed in the same commit
+    // range: a real number measured over the wrong set.
     const db = getDb()
-    type KanbanRow = { assignee: string | null; priority: string; cnt: number }
-    const kanbanRows = db.prepare(
-      `SELECT assignee, priority, COUNT(*) as cnt
-       FROM kanban_cards
-       WHERE archived_at IS NULL AND assignee IS NOT NULL
-       GROUP BY assignee, priority`
-    ).all() as KanbanRow[]
-    const kanbanMap = new Map<string, { open: number; urgent: number }>()
-    for (const row of kanbanRows) {
-      if (!row.assignee) continue
-      const cur = kanbanMap.get(row.assignee) ?? { open: 0, urgent: 0 }
-      cur.open += row.cnt
-      if (row.priority === 'urgent' || row.priority === 'high') cur.urgent += row.cnt
-      kanbanMap.set(row.assignee, cur)
-    }
+    const kanbanRows = db.prepare(KANBAN_LOAD_SQL).all() as KanbanLoadRow[]
+    const kanbanMap = kanbanLoadMap(kanbanRows)
 
     // Scheduled-task frequency: total estimated runs/day per agent (cron-derived)
     function cronFreqPerDay(cron: string): number {
@@ -955,7 +971,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
       const kanban = kanbanMap.get(name)
       const signals: AgentSignals = {
-        tokenAvgInputPerCall: tokenMap.has(name) ? tokenMap.get(name) : undefined,
+        contextAvgPerCall: tokenMap.has(name) ? tokenMap.get(name) : undefined,
         kanbanOpenCount: kanban?.open,
         kanbanUrgentCount: kanban?.urgent,
         scheduledFreqPerDay: schedFreqMap.has(name) ? schedFreqMap.get(name) : undefined,

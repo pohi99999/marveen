@@ -697,7 +697,7 @@ TECHNICAL = re.compile(
       | [\w.+-]+@[\w-]+\.[\w.]+     # email
       | `[^`]*`                     # kod-span
       | \b\w+(?:_\w+)+\b            # snake_case azonosito
-      | \b\w+\.[A-Za-z]{2,10}\b     # fajlnev / domain (video.mp4, marveen.io)
+      | \b\w+\.[A-Za-z]{2,10}(?:-[a-záéíóöőúüű]{1,4})?\b   # fajlnev / domain, magyar toldalekkal (video.mp4, marveen.io, Mail.app-ot)
       | \b[\w-]*/[\w/-]+            # utvonal / slug
       | \d+(?:[.:,]\d+)*-[^\W\d_]+   # szam + magyar toldalek (8:09-es, 2-es, 17:06-kor)
       | \b[A-ZÁÉÍÓÖŐÚÜŰ][^\W\d_]*-[a-záéíóöőúüű]{1,4}\b   # tulajdonnev + toldalek (Chrome-ot, Drive-ra)
@@ -925,9 +925,14 @@ MANAGE_EMAIL_OUTBOUND_OPS = {"send", "reply", "replyall", "forward"}
 # Dedicated (non-multiplexed) outbound tools: the draft tools and the Gmail
 # connector's three separate send-shaped tools. Kept in step with the matcher
 # this hook is registered under in settings.json.
+# GMAILCONNECTOR914: the server segment is NOT always exactly "gmail" -- the
+# claude.ai connector is mcp__claude_ai_Gmail__send_message, one underscore
+# before Gmail, and `(^|__)gmail__` never matched it, so its sends fell through
+# to sys.exit(0) with no audit (measured 2026-08-30, 2026-09-08). Anything
+# ending in "gmail__<send-shaped tool>" is a send now, whatever the prefix.
 EMAIL_TOOL_RE = re.compile(
     r"(send_email|create_draft|draft_email|update_draft"
-    r"|(^|__)gmail__(reply|reply_all|send_message|forward)$)",
+    r"|gmail__(reply|reply_all|send_message|forward)$)",
     re.I,
 )
 

@@ -102,6 +102,14 @@ function readBotPid(chanDir: string): number | null {
 export interface ReapResult {
   reaped: number[]
   source: { fromBotPid: number | null; fromEnvScan: number[] }
+  // Candidates that matched bot.pid/env-scan but were spared because they ARE a
+  // live tmux pane's own leader process right now. Non-empty here is the exact
+  // signature of the 2026-09-19 bug (card 08a02137): env-var inheritance makes a
+  // pane's own claude process match its own *_STATE_DIR export, and killing it
+  // here (instead of leaving it to the caller's imminent `respawn-pane -k`)
+  // collapsed the pane before respawn-pane could run. Logged whenever non-empty
+  // so a recurrence is visible instead of silently "just working".
+  skippedLivePane: number[]
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +223,7 @@ export function collectPollerEvidence(
 export function reapChannelOrphans(
   provider: ChannelProviderType,
   agentDirPath: string,
+  opts: { tmuxPath?: string } = {},
 ): ReapResult {
   const chanDir = channelStateDir(provider, agentDirPath)
   const envVar = STATE_ENV_VAR[provider]
@@ -223,13 +232,41 @@ export function reapChannelOrphans(
   const fromEnvScan = listPollerPidsByStateDir(envVar, chanDir)
 
   // Deduplicate while preserving order so the bot.pid path is logged first.
-  const all: number[] = []
+  const candidates: number[] = []
   const seen = new Set<number>()
   for (const pid of [fromBotPid, ...fromEnvScan]) {
     if (pid && !seen.has(pid)) {
       seen.add(pid)
-      all.push(pid)
+      candidates.push(pid)
     }
+  }
+
+  // Never kill a pid that IS a live tmux pane's own leader process right now.
+  // `export VAR=x && exec claude` makes VAR visible in claude's OWN environment
+  // too, not just a spawned poller child's -- so the env-var scan (and, for the
+  // main session, even bot.pid) can match the pane's own claude process, not
+  // just its poller. Killing that pid here -- instead of leaving it to the
+  // caller's imminent `tmux respawn-pane -k`, which is built to replace exactly
+  // that process cleanly -- races the respawn and can collapse the pane first
+  // (no remain-on-exit -> pane death takes the whole session with it). A
+  // grandchild poller (the bun/node child under it) is NOT a pane leader and
+  // stays a normal reap target, which is the whole point of reaping here rather
+  // than relying on respawn-pane -k alone.
+  //
+  // Fail-SAFE, not fail-open (Logra's review, 2026-09-19, same card 08a02137):
+  // an empty `live` set means the tmux query itself failed (a real server
+  // always has at least one pane), not "nothing is live". Treating that as
+  // "nothing to protect" would silently reproduce the exact bug this function
+  // exists to fix. So an unresolved live-pane set aborts the kill entirely,
+  // mirroring reapDetachedChannelClaudes's own fail-safe (`live.size === 0` ->
+  // reap nothing) instead of contradicting it.
+  const live = livePanePids(opts.tmuxPath ?? 'tmux')
+  const liveQueryFailed = live.size === 0
+  const all = liveQueryFailed ? [] : candidates.filter((pid) => !live.has(pid))
+  const skippedLivePane = liveQueryFailed ? [] : candidates.filter((pid) => live.has(pid))
+  if (liveQueryFailed && candidates.length > 0) {
+    logger.warn({ provider, chanDir, candidates },
+      'channel-poller-reap: could not resolve live tmux panes, refusing to reap (fail-safe)')
   }
 
   // SIGTERM, give bun/node ~300ms to flush, then SIGKILL stragglers.
@@ -246,7 +283,11 @@ export function reapChannelOrphans(
   if (all.length > 0) {
     logger.info({ provider, chanDir, reaped: all, fromBotPid, fromEnvScan }, 'channel-poller-reap: orphans killed')
   }
-  return { reaped: all, source: { fromBotPid, fromEnvScan } }
+  if (skippedLivePane.length > 0) {
+    logger.warn({ provider, chanDir, skippedLivePane, fromBotPid, fromEnvScan },
+      'channel-poller-reap: candidate IS a live pane leader, sparing it (respawn-pane will replace it)')
+  }
+  return { reaped: all, source: { fromBotPid, fromEnvScan }, skippedLivePane }
 }
 
 // ---------------------------------------------------------------------------

@@ -679,7 +679,26 @@ export function hasThreadReplyCapability(name: string, capabilities: string[]): 
 // payload, because the hook never ran). The `.*` wrappers are what make the gate
 // reach MCP tools at all. Exported so the startup migration can recognize a
 // stale matcher on an already-scaffolded agent.
-export const EMAIL_GATE_MATCHER = 'Bash|.*send_email.*|.*manage_email.*'
+// GMAILCONNECTOR914: the claude.ai Gmail connector names its tools
+// mcp__claude_ai_Gmail__{send_message,reply,forward,create_draft,...} -- no
+// "send_email", no "manage_email" -- so neither alternative above ever fired
+// on it and a connector send reached the wire with no gate at all (measured
+// 2026-08-30 and again after v1.37.0 on 2026-09-08: exit 0, zero output). The
+// alternative is deliberately the whole server (`.*[Gg]mail__.*`), not a list
+// of send-shaped names: the hooks classify by the OPERATION (a search or a
+// read exits 0 in every gate), and a name list is exactly what drifted here.
+// MATCHERGMAILSEG920: `.*[Gg]mail__.*` required the literal segment `gmail__`,
+// so it never reached the Gmail MCP the fleet actually runs, whose tools are
+// named mcp__server-gmail-autoauth-mcp__draft_email -- the segment there is
+// `gmail-autoauth-mcp__`. DRAFT_TOOL_RE in the gate was right all along; the
+// hook simply never fired for that tool, so "drafts are gated" held only for
+// the claude.ai connector and manage_email. `[Gg]mail.*__` covers any server
+// name that carries gmail in it, and the explicit draft_email alternative
+// keeps the draft surface reachable even under a server name with no gmail in
+// it at all -- a name-keyed matcher goes blind on the next new name, so the
+// draft surface is pinned by the OPERATION too, not only by the server.
+export const EMAIL_GATE_MATCHER =
+  'Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*'
 
 // Does an existing PreToolUse array carry an email-gate entry whose matcher is
 // NOT the current one? Pure + exported: this is the predicate that lets
@@ -1665,6 +1684,49 @@ const AUTONOMY_BLOCK_RE = new RegExp(
   `${AUTONOMY_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${AUTONOMY_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
 )
 
+const MCPLIST_BEGIN = '<!-- BEGIN GENERATED: mcp-list-channel (auto-generated, do not edit by hand) -->'
+const MCPLIST_END = '<!-- END GENERATED: mcp-list-channel -->'
+const MCPLIST_BLOCK_RE = new RegExp(
+  `${MCPLIST_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${MCPLIST_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+)
+
+/**
+ * MCPLISTCSATORNA921. Measured 2026-09-21 on a disposable channel-owning probe
+ * agent, twice, with the before-state taken in a separate round: running
+ * `claude mcp list` inside a session that owns a channel stops THAT session's
+ * channel plugin server. The other MCP servers survive, other sessions are
+ * untouched, and the command's own output says "Connected" while it happens.
+ *
+ * The warning ships to CUSTOMER machines, so it names the scope (a
+ * channel-owning session), not the command: `claude mcp list` is a useful
+ * diagnostic everywhere else, and a blanket prohibition would be false.
+ *
+ * What we did NOT measure is stated as not measured: whether an actual INCOMING
+ * message is lost. That was reported by the external submitter; we reproduced
+ * the tool/plugin side only.
+ */
+function buildMcpListChannelBody(): string {
+  return [
+    '## `claude mcp list` egy csatornát birtokló ügynökben',
+    '',
+    'Ha ez az ügynök csatornát birtokol (Telegram/Discord/Slack), a saját sessionjében NE futtasd',
+    'a `claude mcp list`-et: mérve 2026-09-21-én, a parancs leállítja ennek a sessionnek a',
+    'csatorna-plugin szerverét, és a csatorna-eszközök (reply, react, edit_message,',
+    'download_attachment) elérhetetlenné válnak. A parancs kimenete közben `Connected`-et ír, és',
+    '0-val tér vissza, tehát a hibát semmi nem jelzi. Más sessionök nem sérülnek, a többi',
+    'MCP-szerver életben marad, és a session újraindítása visszahozza a plugint.',
+    'Máshol a parancs hasznos diagnosztika: a korlát a csatornát birtokló session, nem a parancs.',
+    'A BEJÖVŐ üzenetek sorsát nem mértük (külső bejelentés); a részletes mérés:',
+    '`docs/mcp-list-channel-plugin.md`.',
+  ].join('\n')
+}
+
+const EVIDENCE_BEGIN = '<!-- BEGIN GENERATED: evidence-rule (auto-generated, do not edit by hand) -->'
+const EVIDENCE_END = '<!-- END GENERATED: evidence-rule -->'
+const EVIDENCE_BLOCK_RE = new RegExp(
+  `${EVIDENCE_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${EVIDENCE_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+)
+
 // Builds the text body that goes between the BEGIN/END markers.
 // Single source of truth -- called by both generateClaudeMd() (initial
 // generation) and ensureFleetRosterSection() (idempotent update on respawn).
@@ -1772,6 +1834,131 @@ function buildAutonomyBody(name: string): string {
     '',
     '**Level 3 (autonóm)**: elvégzed a műveletet, majd utána jelented a főágensnek.',
   ].join('\n')
+}
+
+// Extended 2026-08-14 with "A konkrétum mindig forrásból jön", after a letter
+// went to support@connectors.hu -- an address produced from the support@
+// convention, never read anywhere. It bounced 550 and the owner found it, not
+// the agent. His words: "Én szerintem már több ilyen szabályt fölvettünk (...)
+// ez nagyon kellemetlen, és újra meg újra előjön." Hence both halves: the prose
+// here names the class (address, URL, case number, price), and the outbound
+// half is enforced mechanically by the recipient ledger in email-send-gate.mjs,
+// because prose alone had already failed to stop it.
+//
+// Builds the evidence-rule body. Owner-mandated on 2026-08-12 after an evening
+// in which the main agent asserted three unverified technical claims in a row
+// (a connector had "expired", it had "stopped working", a sub-agent "could
+// never reach it"). All three were false, and a request to an external
+// contractor was already being drafted on top of them. The owner's words:
+// "ezzel napok telnek el, hogyha hulyesegeket mondanak nekem, es en meg
+// elhiszem". This block is fleet-wide, not agent-specific: a guess dressed as
+// a fact costs the same wherever it comes from.
+function buildEvidenceBody(): string {
+  return [
+    '## Tények és találgatás',
+    '',
+    'Ez a legfontosabb szabályod. Fontosabb, mint a gyorsaság.',
+    '',
+    'Minden állításodnak HÁROM formája lehet, és mindig ki kell derülnie, melyik:',
+    '',
+    '1. **Tény.** Ellenőrizted, és meg tudod mondani, honnan tudod. Mondd is meg, egy fél mondatban.',
+    '2. **Tipp.** Jelöld annak, ugyanabban a mondatban, ahol elhangzik. Nem a bekezdés végén, nem később.',
+    '3. **Nem tudom.** Ez teljes értékű válasz. Mondd ki egyszerűen, és ha van rá mód, nézd meg.',
+    '',
+    'Amit SOSEM csinálsz:',
+    '',
+    '- Nem találsz ki magyarázatot arra, miért romlott el valami. Ha nem nézted meg, akkor nem tudod, miért.',
+    '- Nem jelented ki, hogy valami lehetetlen, nem elérhető, lejárt vagy leállt, amíg meg nem nézted. A "nincs rá út" a legdrágább mondatod, mert lezár egy irányt.',
+    '- Nem becsülsz dátumot, időtartamot vagy számot emlékezetből. Nézd meg a git logot, a fájl dátumát, a naplót.',
+    '- Nem építesz tervet, levelet vagy külső kérést ellenőrizetlen állításra. Ha valami RÁÉPÜL egy állításra, azt az állítást KÖTELEZŐ előtte ellenőrizni.',
+    '',
+    'Hol ellenőrizz, mielőtt kérdezel vagy kijelentesz: a fájl maga, a config, a telepített program, az API válasza, az élő weboldal, a git történet. A saját forrásaink előbb, a gazda ideje utoljára.',
+    '',
+    'Ha kiderül, hogy tévedtél: javítsd ki röviden, és mondd meg, mi épült rá közben. Ne magyarázkodj, ne ostorozd magad, csak a következményt add át.',
+    '',
+    '### A konkrétum mindig forrásból jön',
+    '',
+    'A fenti szabály leggyakoribb megszegése nem egy hosszú hamis állítás, hanem egy rövid, ártatlannak látszó konkrétum, amit a szokásból írsz le. Email cím, telefonszám, URL, ügyszám, azonosító, számlaszám, verzió, ár.',
+    '',
+    'Ezekre nincs "valószínűleg". Vagy megvan a forrás, vagy nincs meg az adat:',
+    '',
+    '- **Email cím**: a tőlük kapott levél From fejléce, az élő oldaluk, a rendelés, a szerződés. SOHA nem a `support@`, `info@`, `hello@` szokásból, és soha nem névből összerakva.',
+    '- **URL, ügyszám, azonosító, számlaszám**: onnan, ahol le van írva. Ha fejből idézed, az tipp, és jelöld annak.',
+    '- **Ár, verzió, határidő**: az élő forrásból, nem a múltkori beszélgetésből.',
+    '',
+    'Ha nem találsz forrást, ez a válasz: "ezt a címet/számot nem találom sehol". Ez teljes értékű, és sokkal olcsóbb, mint egy jó levél, ami senkihez nem ér el.',
+    '',
+    'Kimenő levélnél ez gépi kapu is, nem csak szabály: a `to`/`cc`/`bcc` minden címét a `store/verified-recipients.json` ledgerhez méri a PreToolUse hook, és ismeretlen címre még piszkozatot sem enged. Új cím felvétele forrás megnevezésével:',
+    '',
+    '```bash',
+    `node ${join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs')} add <cim> --source mail:<messageId>|site:<url>|owner|crm:<ref>|order:<id>|doc:<ref> --note "<honnan>"`,
+    '```',
+  ].join('\n')
+}
+
+// Idempotently ensures the evidence-rule block is present and current in the
+// agent's CLAUDE.md. Called on every startAgentProcess() alongside
+// ensureAutonomySection(), so existing agents pick it up on respawn.
+//
+// Idempotency contract mirrors ensureFleetRosterSection (five rules apply).
+export function ensureEvidenceSection(name: string): void {
+  // The main agent's CLAUDE.md lives at PROJECT_ROOT, not inside agents/<name>/.
+  const claudeMdPath = name === MAIN_AGENT_ID
+    ? join(PROJECT_ROOT, 'CLAUDE.md')
+    : join(agentDir(name), 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return
+
+  const block = `${EVIDENCE_BEGIN}\n${buildEvidenceBody()}\n${EVIDENCE_END}`
+
+  let existing: string
+  try {
+    existing = readFileSync(claudeMdPath, 'utf-8')
+  } catch {
+    return
+  }
+
+  let updated: string
+  if (EVIDENCE_BLOCK_RE.test(existing)) {
+    updated = existing.replace(EVIDENCE_BLOCK_RE, block)
+  } else {
+    updated = existing.trimEnd() + '\n\n' + block + '\n'
+  }
+
+  if (updated === existing) return
+  atomicWriteFileSync(claudeMdPath, updated)
+}
+
+// Idempotently ensures the autonomy-wiring block is present and current in the
+// agent's CLAUDE.md. Called on every startAgentProcess() alongside
+// ensureFleetRosterSection() so that existing agents receive the block
+// automatically on respawn without manual migration.
+//
+// Idempotency contract mirrors ensureFleetRosterSection (five rules apply).
+export function ensureMcpListChannelSection(name: string): void {
+  // The main agent's CLAUDE.md lives at PROJECT_ROOT, not inside agents/<name>/.
+  const claudeMdPath = name === MAIN_AGENT_ID
+    ? join(PROJECT_ROOT, 'CLAUDE.md')
+    : join(agentDir(name), 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return
+
+  const block = `${MCPLIST_BEGIN}\n${buildMcpListChannelBody()}\n${MCPLIST_END}`
+
+  let existing: string
+  try {
+    existing = readFileSync(claudeMdPath, 'utf-8')
+  } catch {
+    return
+  }
+
+  let updated: string
+  if (MCPLIST_BLOCK_RE.test(existing)) {
+    updated = existing.replace(MCPLIST_BLOCK_RE, block)
+  } else {
+    updated = existing.trimEnd() + '\n\n' + block + '\n'
+  }
+
+  if (updated === existing) return
+  atomicWriteFileSync(claudeMdPath, updated)
 }
 
 // Idempotently ensures the autonomy-wiring block is present and current in the
@@ -1983,6 +2170,194 @@ export function ensureSystemDirectiveAuthSection(name: string): void {
   atomicWriteFileSync(claudeMdPath, updated)
 }
 
+// MEMKERESVAK917: the BACK-FILL half of #1380. That PR fixed the two GENERATING
+// surfaces (generateClaudeMd + templates/CLAUDE.md.template), which only run when
+// an agent is CREATED -- so on the day it merged it reached zero of the agents
+// already on disk. Measured on the owner host right after the merge: nine agent
+// CLAUDE.md files still carried the search recipe with no way to see the label.
+//
+// Hence a marker block on the same five-rule idempotency contract as the
+// sections above, applied to the main agent at dashboard start and to every
+// sub-agent on respawn.
+//
+// The "already documents it" skip is what keeps this from duplicating the text
+// for agents generated AFTER #1380: their scaffold-written section already
+// carries the label inline, and a second copy at the end of the file would be
+// pure context cost. The skip is deliberately one-directional -- once the marker
+// block is in a file it is refreshed in place forever, so a wording fix still
+// reaches the back-filled agents.
+const MEMORY_SEARCH_LABEL_BEGIN = '<!-- BEGIN GENERATED: memory-search-label (auto-generated, do not edit by hand) -->'
+const MEMORY_SEARCH_LABEL_END = '<!-- END GENERATED: memory-search-label -->'
+const MEMORY_SEARCH_LABEL_BLOCK_RE = new RegExp(
+  `${MEMORY_SEARCH_LABEL_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${MEMORY_SEARCH_LABEL_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+)
+
+// Unlike the scaffold copy -- which is an LLM PROMPT carrying the literal string
+// AGENT_NAME for the model to substitute -- this body is written deterministically,
+// so the header dump file is genuinely per-agent and two agents searching at the
+// same time cannot read each other's label out of one shared /tmp path.
+export function buildMemorySearchLabelBody(name: string): string {
+  return [
+    '## Memória-keresés: a FEJLÉCET is olvasd el (KÖTELEZŐ)',
+    '',
+    'A keresés alapból ENGEDÉKENY: ha egyetlen valódi szavad sem talál, eldobja őket, és a',
+    'maradék töltelékszavakra hozott sorokat adja vissza. A body ilyenkor UGYANÚGY néz ki, mint',
+    'egy valódi találat -- a különbség KIZÁRÓLAG az `X-Memory-Search` fejlécben utazik. Ezért a',
+    'keresés receptje `-D`-vel megy, és a `grep` NEM opcionális:',
+    '',
+    '```bash',
+    `curl -s -D /tmp/mem-fejlec-${name}.txt -H "Authorization: Bearer $(cat ${tokenPath})" \\`,
+    `  "${dashboardOrigin}/api/memories?agent=${name}&q=KULCSSZO"`,
+    `grep -i '^x-memory-search' /tmp/mem-fejlec-${name}.txt`,
+    '```',
+    '',
+    '- `relaxed=true` -- semmi nem illeszkedett ÚGY, AHOGY KÉRTED; amit látsz, az mentett',
+    '  közelítés, NEM bizonyíték. Egy sosem létezett minta így ötven sorral válaszol.',
+    '- `relaxed=false` -- a kérdés úgy illeszkedett, ahogy kérted. NEM jelenti azt, hogy ez',
+    '  MINDEN, és azt sem, hogy van találat: a `relaxed=false; hits=0` létező válasz.',
+    '',
+    'Ha a kérdés az, hogy VAN-E EGYÁLTALÁN emlékünk valamiről (hiány-állítás), tedd hozzá a',
+    '`&strict=1`-et: ott az üres válasz pontosan azt jelenti, aminek látszik.',
+    '',
+    'NYERS ÉKEZET A `q`-BAN = HTTP 400, ÜRES TÖRZZSEL. A `q=funkcionális` alak 400-at ad, a',
+    '`q=funkcion%C3%A1lis` és a `-G --data-urlencode "q=..."` alak 200-at. A 400-on NINCS',
+    '`X-Memory-Search` fejléc, tehát a fenti `grep` némán semmit nem ír, és a nulla sor pontosan',
+    'úgy néz ki, mint egy üres találat, holott a keresés EL SEM INDULT. Ezért: a magyar keresőszót',
+    'százalék-kódold (vagy `-G --data-urlencode`), vagy keress ékezet nélküli szótővel, és a',
+    '`grep` mellett a fejléc LÉTÉT is nézd: ha nincs `X-Memory-Search` sor, az elszállt kérés, nem üres találat.',
+  ].join('\n')
+}
+
+// Same five-rule idempotency contract as ensureFleetRosterSection /
+// ensureAutonomySection / ensureSkillsPathTrapSection / ensureSystemDirectiveAuthSection,
+// plus the one extra rule above: do not append where the file already documents
+// the label inline.
+export function ensureMemorySearchLabelSection(name: string): void {
+  const claudeMdPath = name === MAIN_AGENT_ID
+    ? join(PROJECT_ROOT, 'CLAUDE.md')
+    : join(agentDir(name), 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return
+
+  let existing: string
+  try {
+    existing = readFileSync(claudeMdPath, 'utf-8')
+  } catch {
+    return
+  }
+
+  const hasBlock = MEMORY_SEARCH_LABEL_BLOCK_RE.test(existing)
+  // Already carries the label from the generating surface (#1380) and has no
+  // block of ours: nothing to back-fill, and a second copy would only cost
+  // context on every session start.
+  if (!hasBlock && /x-memory-search/i.test(existing)) return
+
+  const block = `${MEMORY_SEARCH_LABEL_BEGIN}\n${buildMemorySearchLabelBody(name)}\n${MEMORY_SEARCH_LABEL_END}`
+  const updated = hasBlock
+    ? existing.replace(MEMORY_SEARCH_LABEL_BLOCK_RE, block)
+    : existing.trimEnd() + '\n\n' + block + '\n'
+
+  if (updated === existing) return
+  atomicWriteFileSync(claudeMdPath, updated)
+}
+
+// AUTHSECT919: the fleet auth rule existed only as hand-written prose in the
+// agent CLAUDE.md files on one install. Measured 2026-09-19 on the owner host:
+// all 22 agents carried it, NO generating surface did -- not generateClaudeMd,
+// not templates/CLAUDE.md.template. So every agent created from here on would
+// have missed it, and the miss is silent: the agent only finds out when it
+// "fixes" a Not-logged-in with a credential symlink and re-creates the 401
+// cascade the rule exists to prevent.
+//
+// SCOPE CORRECTION (review of #1409): the first draft of this block also
+// forbade `claudeConfigDir` and described the MAIN agent as isolated. Both were
+// LOCAL OPERATIONAL CHOICES on one install, generated out as if they were
+// product-level prohibitions -- and both contradict supported behaviour:
+//   - per-agent `claudeConfigDir` is a resolved, supported field (see
+//     resolveClaudeConfigDir in web/agent-config.ts, including the named-plan
+//     indirection), for agents that need their own Claude login or plan;
+//   - MAIN_AGENT_ISOLATED_CONFIG defaults to '0' (config-registry.ts), i.e. the
+//     main channels agent uses the SHARED ~/.claude unless switched on, and
+//     MAIN_AGENT_CONFIG_DIR takes precedence over it when the bot has its own
+//     login.
+// A generated doc block must state the product's real auth design. Narrowing a
+// supported field is a separate, explicit decision -- not a side effect of
+// shipping documentation. What survives here is the part that is actually
+// non-negotiable: the fix for "Not logged in" is the token source, and no agent
+// ever copies another agent's credentials.
+//
+// A marker block (not a template line) on purpose: the template only reaches
+// agents created after the change, while this also refreshes the wording for
+// agents already on disk.
+const FLEET_AUTH_BEGIN = '<!-- BEGIN GENERATED: fleet-auth (auto-generated, do not edit by hand) -->'
+const FLEET_AUTH_END = '<!-- END GENERATED: fleet-auth -->'
+const FLEET_AUTH_BLOCK_RE = new RegExp(
+  `${FLEET_AUTH_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${FLEET_AUTH_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+)
+
+// Host-agnostic on purpose: no operator name, no per-install agent names. The
+// rule is about the auth PATH, which is identical on every install.
+export function buildFleetAuthBody(): string {
+  return [
+    '## Flotta-szintű AUTH-szabály (MEGSZEGHETETLEN)',
+    '',
+    'A sub-agentek alapértelmezés szerint a `CLAUDE_CODE_OAUTH_TOKEN` úton hitelesítenek',
+    '(`store/.claude-oauth-token`), auto-provisionált `CLAUDE_CONFIG_DIR`-rel. Ez az út',
+    'szünteti meg a visszatérő 401-kaszkádot, amit a kézzel elhelyezett, lejáró',
+    '`.credentials.json` okozott.',
+    '',
+    'A fő channels-agent ettől SZÁNDÉKOSAN eltér: alapértelmezésben a közös `~/.claude`-ot',
+    'használja. A `MAIN_AGENT_ISOLATED_CONFIG=1` kapcsolja át a flotta setup-tokenjére; ha',
+    'a botnak SAJÁT Claude-loginja van, arra a `MAIN_AGENT_CONFIG_DIR` való, és az',
+    'elsőbbséget élvez.',
+    '',
+    'A per-agent `claudeConfigDir` TÁMOGATOTT mező (nevesített plan-en keresztül is), arra',
+    'az esetre, ha egy agentnek saját Claude-loginra vagy saját plan-re van szüksége. A',
+    'használata döntés kérdése, nem tilalom.',
+    '',
+    'AMI VISZONT MEGSZEGHETETLEN:',
+    '',
+    '1. Ha egy agent "Not logged in"-t mutat, a javítás a TOKEN-FORRÁS, nem egy kézzel',
+    '   elhelyezett vagy symlinkelt `.credentials.json`. A kézi credential-elhelyezés hozta',
+    '   vissza a 401-kaszkádot minden alkalommal: a lejárt fájl a Claude Code precedenciája',
+    '   miatt akkor is nyer az érvényes env-tokennel szemben, ha az ott van mellette.',
+    '2. SOHA ne másold át másik agent tokenjét vagy credentialjét. Új agent SAJÁT,',
+    '   per-agent tokent és saját külső-szolgáltatás setupot kap (saját email, egyedi port,',
+    '   saját creds-könyvtár, saját OAuth). A másolás auditálhatatlan, és más megbízó',
+    '   adatához is hozzáférést ad.',
+  ].join('\n')
+}
+
+// Same five-rule idempotency contract as the sections above, plus the
+// skip-where-already-documented rule borrowed from ensureMemorySearchLabelSection:
+// the 22 agents that got the rule by hand must not end up with two copies.
+// One-directional, like there -- once the marker block is in a file it is
+// refreshed in place forever, so a wording fix still reaches every agent.
+export function ensureFleetAuthSection(name: string): void {
+  const claudeMdPath = name === MAIN_AGENT_ID
+    ? join(PROJECT_ROOT, 'CLAUDE.md')
+    : join(agentDir(name), 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return
+
+  let existing: string
+  try {
+    existing = readFileSync(claudeMdPath, 'utf-8')
+  } catch {
+    return
+  }
+
+  const hasBlock = FLEET_AUTH_BLOCK_RE.test(existing)
+  // Hand-written copy already present and no block of ours: leave it alone.
+  if (!hasBlock && /AUTH-szabály/i.test(existing)) return
+
+  const block = `${FLEET_AUTH_BEGIN}\n${buildFleetAuthBody()}\n${FLEET_AUTH_END}`
+  const updated = hasBlock
+    ? existing.replace(FLEET_AUTH_BLOCK_RE, block)
+    : existing.trimEnd() + '\n\n' + block + '\n'
+
+  if (updated === existing) return
+  atomicWriteFileSync(claudeMdPath, updated)
+}
+
 export async function generateClaudeMd(name: string, description: string, model: string): Promise<string> {
   // Distribution-safe default-drive line: only emit a concrete folder when this
   // install has one configured (OWNER_DRIVE_FOLDER). A fresh install with no
@@ -2044,7 +2419,28 @@ Napi napló (append-only):
 curl -s -X POST ${dashboardOrigin}/api/daily-log -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" -d '{"agent_id":"AGENT_NAME","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
 
 Keresés (mielőtt válaszolsz, nézd meg van-e releváns emlék):
-curl -s -H "Authorization: Bearer $(cat ${tokenPath})" "${dashboardOrigin}/api/memories?agent=AGENT_NAME&q=KULCSSZO&category=warm"
+curl -s -D /tmp/mem-fejlec-AGENT_NAME.txt -H "Authorization: Bearer $(cat ${tokenPath})" "${dashboardOrigin}/api/memories?agent=AGENT_NAME&q=KULCSSZO&category=warm"
+grep -i '^x-memory-search' /tmp/mem-fejlec-AGENT_NAME.txt
+
+A -D NEM dísz, és a fejlécet KÖTELEZŐ elolvasni. A keresés alapból ENGEDÉKENY: ha egyetlen valódi szavad sem talál, eldobja őket, és a maradék töltelékszavakra hozott sorokat adja vissza. A body ilyenkor UGYANÚGY néz ki, mint egy valódi találat -- a különbség KIZÁRÓLAG az X-Memory-Search fejlécben utazik.
+relaxed=true  -> semmi nem illeszkedett ÚGY, AHOGY KÉRTED; amit látsz, az mentett közelítés, NEM bizonyíték.
+relaxed=false -> a kérdés úgy illeszkedett, ahogy kérted. NEM jelenti azt, hogy ez MINDEN, és azt sem, hogy van találat (hits=0 is lehet mellette).
+Ha a kérdés az, hogy VAN-E EGYÁLTALÁN emlékünk valamiről (hiány-állítás), tedd hozzá a &strict=1-et: ott az üres válasz pontosan azt jelenti, aminek látszik.
+
+### Átsorolás (hot -> cold/warm), amikor egy feladat lezárult
+
+A hot tier árát MINDEN session-indulás újra kifizeti, ezért a lezárt sorokat át kell sorolni.
+Az átsorolás memory_maintenance = level 3, AUTONÓM: a SAJÁT emlékeiden magadtól megteheted.
+
+1. Kell az ID -- a listázó ÉS a kereső ág is visszaadja:
+curl -s -H "Authorization: Bearer $(cat ${tokenPath})" "${dashboardOrigin}/api/memories?agent=AGENT_NAME&category=hot&limit=40"
+
+2. Átsorolás (a category-only PATCH elég, a tartalmat NEM kell újraküldeni):
+curl -s -X PATCH ${dashboardOrigin}/api/memories/<ID> -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" -d '{"category":"cold","updated_by":"AGENT_NAME"}'
+
+Az updated_by az, AKI ÍRT (írás-nyom). Az agent_id mezőt NE küldd: az a sort ÁTADJA másik ágensnek, nem a tier-t állítja.
+
+TÖRLÉS NINCS, ÉS SZÁNDÉKOSAN NE IS LEGYEN. A DELETE /api/memories/:id létezik, de a törlés data_delete = level 1, locked, tehát a gazda döntése. Az átsorolás elég: a költség a hot-halmaz BETÖLTÉSÉBŐL jön, nem a sorok létezéséből.
 
 ## Ütemezett feladatok
 

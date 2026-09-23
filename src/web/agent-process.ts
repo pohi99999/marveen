@@ -2,7 +2,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, lstatS
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { OLLAMA_URL } from '../config.js'
+import { AGENT_LOCAL_BASE_URL } from '../config.js'
 import { makeLazyBinResolver } from '../platform.js'
 import { logger } from '../logger.js'
 import {
@@ -18,6 +18,7 @@ import {
   stripSessionTitleBanner,
   stripAllAnsi,
   paneShowsContextSaturation,
+  paneShowsContextSaturationHardError,
   idleConsideringDimGhost,
   detectsFirstRunGate,
   detectsModelConsentDialog,
@@ -37,6 +38,7 @@ import { readClaudePlansState } from './claude-plans-state.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { paneOneLine } from './pane-text.js'
 import { withSessionSendLock, tryAcquireSessionSendLane, type SendLockMode } from './session-send-lock.js'
 import {
   buildTmuxInvocation,
@@ -58,7 +60,7 @@ import { getEffectiveSettingValue } from '../settings-store.js'
 import { readEnvFile } from '../env.js'
 import { loadProfileTemplate } from './profiles.js'
 import { resolveAgentSecurityProfile } from './agent-team.js'
-import { writeAgentSettingsFromProfile, ensureFleetRosterSection, ensureAutonomySection, ensureSkillsPathTrapSection, ensureSystemDirectiveAuthSection } from './agent-scaffold.js'
+import { writeAgentSettingsFromProfile, ensureFleetRosterSection, ensureAutonomySection, ensureSkillsPathTrapSection, ensureSystemDirectiveAuthSection, ensureMemorySearchLabelSection, ensureFleetAuthSection, ensureEvidenceSection, ensureMcpListChannelSection } from './agent-scaffold.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
 import { recordInjectedPrompt } from './injected-prompt-registry.js'
 import { getSecret } from './vault.js'
@@ -1165,7 +1167,12 @@ export function resolveProviderEnv(
   if (isOllama) {
     return {
       provider: 'ollama',
-      exportsStr: `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${OLLAMA_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && `,
+      // AGENT_LOCAL_BASE_URL, not OLLAMA_URL: this endpoint only has to speak
+      // the Anthropic /v1/messages shape, while OLLAMA_URL's other callers need
+      // the native ollama API. Empty AGENT_LOCAL_BASE_URL falls back to
+      // OLLAMA_URL, so nothing changes for an install whose local agent really
+      // is ollama.
+      exportsStr: `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${AGENT_LOCAL_BASE_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && `,
     }
   }
   return { provider: 'claude', exportsStr: '' }
@@ -1532,7 +1539,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     try {
       const agentProvider = resolveAgentProvider(name)
       const dir = agentDir(name)
-      reapChannelOrphans(agentProvider, dir)
+      reapChannelOrphans(agentProvider, dir, { tmuxPath: tmuxBin() })
     } catch (err) {
       logger.warn({ err, name }, 'pre-launch channel-poller reap failed (continuing)')
     }
@@ -1588,6 +1595,10 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     ensureAutonomySection(name)
     ensureSkillsPathTrapSection(name)
     ensureSystemDirectiveAuthSection(name)
+    ensureMemorySearchLabelSection(name)
+    ensureFleetAuthSection(name)
+    ensureEvidenceSection(name)
+    ensureMcpListChannelSection(name)
     // A sub-agent must load ONLY its own channel plugin. The user-scope
     // enabledPlugins would otherwise make EVERY sub-agent spawn a telegram
     // (and slack/discord) poller that falls back to the main agent's bot
@@ -1774,7 +1785,15 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // stable token instead -- this is what makes the Linux credentials-guard
     // rename safe (a shared sub-agent with no env token would otherwise be
     // locked out once credentials.json is moved aside). No-op without a token.
-    if (!claudeConfigDir && hasFleetOauthToken()) {
+    // authMode 'own_team' (OWNTEAMVAK914): the operator explicitly opted this
+    // agent OUT of the fleet credential -- it authenticates from its OWN
+    // /login credential (dashboard auth-flow -> /login in the agent's tmux).
+    // The fleet token must therefore never be exported for it: Claude Code
+    // falls back to CLAUDE_CODE_OAUTH_TOKEN whenever the on-disk/Keychain
+    // credential is absent or expired, which would silently put the agent
+    // back on the shared identity -- exactly what own_team excludes.
+    const isOwnTeam = isClaude && authMode === 'own_team'
+    if (!claudeConfigDir && hasFleetOauthToken() && !isOwnTeam) {
       oauthTokenEnv = `export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')" && `
     }
     // Isolation must also cover CHANNEL-LESS Claude-OAuth agents, not just
@@ -1787,9 +1806,35 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // 2026-07-25). Only agents that never touch Anthropic OAuth stay on the
     // shared root: local/BYO-endpoint models (Ollama/DeepSeek/OpenRouter) and
     // per-agent API-key (authMode 'api') agents.
-    const needsFleetOauth = isClaude && authMode !== 'api'
-    if (!claudeConfigDir && (hasChannel || needsFleetOauth) && name !== MAIN_AGENT_ID) {
-      if (hasFleetOauthToken()) {
+    const needsFleetOauth = isClaude && authMode !== 'api' && !isOwnTeam
+    if (!claudeConfigDir && (hasChannel || needsFleetOauth || isOwnTeam) && name !== MAIN_AGENT_ID) {
+      if (isOwnTeam) {
+        // own_team isolates WITHOUT the fleet token: the isolated dir is where
+        // the agent's own /login credential lives (macOS Keychain scopes the
+        // entry per CLAUDE_CONFIG_DIR -- service name carries a sha256 prefix
+        // of the dir -- and on Linux the provisioner deliberately never
+        // touches .credentials.json, see ISOLATED_CONFIG_SKIP), so the
+        // isolation gate must NOT be hasFleetOauthToken() here.
+        const isolated = ensureIsolatedChannelConfigDir(name, hasChannel ? agentProvider : null)
+        if (isolated) {
+          claudeConfigDir = isolated
+          // Linux keeps the credential as a file, so its absence is reliably
+          // detectable; on macOS it lives in the Keychain (service-name
+          // convention is Claude Code internal, probing it each spawn would
+          // false-alarm across versions), so first-run there surfaces as the
+          // login screen plus this info line.
+          if (process.platform !== 'darwin' && !existsSync(join(isolated, '.credentials.json'))) {
+            logger.warn({ name }, 'own_team auth: no .credentials.json in the isolated config dir yet -- run the dashboard auth flow (/login) or the agent parks on the login screen')
+          } else {
+            logger.info({ name }, 'own_team auth: fleet token not exported; agent authenticates from its own login credential in the isolated config dir')
+          }
+        } else {
+          // Falling back to the shared ~/.claude would put the agent on the
+          // OWNER's rotating credential -- the opposite of own_team. Loud.
+          logger.warn({ name }, 'own_team auth: isolated config dir provisioning failed; agent falls back to the shared ~/.claude and will use the HOST credential, not its own Team login')
+          if (hasChannel) maybeAlertSharedConfigCollision(name)
+        }
+      } else if (hasFleetOauthToken()) {
         // Token present -> isolation works; any earlier degradation is resolved,
         // so re-arm the one-shot alert for a future token loss.
         resetSharedConfigCollisionAlert()
@@ -2035,7 +2080,7 @@ export async function stopAgentProcess(name: string): Promise<{ ok: boolean; err
       try {
         const agentProvider = resolveAgentProvider(name)
         const dir = agentDir(name)
-        reapChannelOrphans(agentProvider, dir)
+        reapChannelOrphans(agentProvider, dir, { tmuxPath: tmuxBin() })
       } catch (err) {
         logger.warn({ err, name }, 'post-stop channel-poller reap failed')
       }
@@ -2701,7 +2746,9 @@ export async function sendPromptToSession(
     logger.warn({ err, session }, 'Pre-send capture-pane failed; skipping truncated-preamble check')
   }
 
-  const oneLine = text.replace(/\r?\n/g, ' ')
+  // The mapping lives in pane-text.ts: the provenance gate re-applies it to
+  // the queue row, so the two must never drift (DIREKTIVASORTORES920).
+  const oneLine = paneOneLine(text)
   // STUCKINPUT827: remember the EXACT byte stream we are about to type. If the
   // submitting Enter does not land, the stuck-input watcher re-injects THIS
   // instead of guessing from a lossy screen scrape. Recorded before the send so
@@ -2734,6 +2781,15 @@ export async function sendPromptToSession(
       i = end
       if (i < oneLine.length) await delay(30)
     }
+    // A multi-chunk prompt gets its Enter only once the TUI has stopped
+    // redrawing. Sent straight after the last chunk, the Enter races the
+    // TUI still ingesting the burst and is dropped: measured 2026-09-15
+    // (SCHEDLOST915) on Claude Code 2.1.110, 80x24 pane, 6735-char scheduled
+    // prompt -- immediate Enter submitted 3/6 rounds, settle-then-Enter 6/6.
+    // The parked copy was invisible to the retry loop below (the box was
+    // taller than the pane, see overfullParkedInputTail), so nothing
+    // re-pressed it. Single-chunk prompts keep the immediate Enter.
+    if (oneLine.length > CHUNK) await waitForPaneSettle(() => capturePane(session, host))
     runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
   }
   await sendChunks()
@@ -2842,6 +2898,30 @@ export function sendEnterToSession(session: string, host: string | null = null):
 
 // Capture a pane snapshot with an execSync timeout. Null on any error so
 // the caller can treat "capture failed" as "not ready".
+// Resolve once two consecutive captures `pollMs` apart are identical (true), or
+// after `maxMs` of continuous change (false; the caller proceeds anyway, as it
+// did before this wait existed). A null capture never counts as settled.
+// Capture, sleep and clock are injectable so the loop is unit-tested without
+// tmux or real time.
+export async function waitForPaneSettle(
+  capture: () => string | null,
+  opts: { pollMs?: number; maxMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
+): Promise<boolean> {
+  const pollMs = opts.pollMs ?? 250
+  const maxMs = opts.maxMs ?? 5000
+  const sleep = opts.sleep ?? delay
+  const now = opts.now ?? Date.now
+  const deadline = now() + maxMs
+  let prev = capture()
+  while (now() < deadline) {
+    await sleep(pollMs)
+    const cur = capture()
+    if (cur != null && cur === prev) return true
+    prev = cur
+  }
+  return false
+}
+
 export function capturePane(session: string, host: string | null = null): string | null {
   try {
     // Capture WITH colour, strip a trailing /rename session-title banner, then
@@ -2900,7 +2980,68 @@ export function captureParkedInputView(session: string, host: string | null = nu
 // dependency-free readiness check. NOTE the refusal is part of a deadlock by
 // design: Claude Code's auto-compact only runs when a new turn starts, and
 // this refusal is exactly what prevents a new turn -- so a saturated session
-// never self-heals and MUST be restarted from outside.
+// never self-heals and MUST be restarted from outside. The refusal therefore
+// applies ONLY while the banner is CREDIBLE -- see the override block below.
+
+// --- Saturation-banner override (context-guard -> dispatch) ----------------
+// The refusal above is safe only because the context-guard's saturation net
+// restarts the pane we will not prompt, so the two have to agree about what
+// "saturated" means. The guard's sweep is the only place that holds BOTH the
+// banner and the calibrated transcript measurement; when the measurement
+// contradicts an OVERRIDABLE (percentage-shaped) banner it stands the net down
+// and calls in here, because from that moment on refusing would silence a
+// working agent that nothing is going to restart. Which banners may be
+// overruled, and why an error-shaped one never may, is argued once -- on
+// saturationBannerCredible() in context-guard.ts.
+//
+// Deliberately in-process and TTL-bounded: the guard refreshes the entry on
+// every sweep, so if the guard stops (webOnly mode, guard disabled, crash,
+// dashboard restart) or the session genuinely fills up, the entry lapses within
+// ~3 sweeps and this gate returns to refusing. Fail-closed: an empty map (fresh
+// dashboard) is exactly today's behaviour.
+const saturationOverrideUntil = new Map<string, number>()
+
+/** Called by the context-guard runner when the measurement contradicts the
+ *  banner. */
+export function noteSaturationBannerUntrusted(session: string, untilMs: number): void {
+  saturationOverrideUntil.set(session, untilMs)
+}
+
+/** Called by the same runner on every sweep that LOOKED at the pane and found
+ *  the banner absent or credible. */
+export function clearSaturationBannerOverride(session: string): void {
+  saturationOverrideUntil.delete(session)
+}
+
+/** May we believe this session's pane saturation banner? Exported so the
+ *  fail-closed expiry is testable. */
+export function saturationBannerTrusted(session: string): boolean {
+  const until = saturationOverrideUntil.get(session)
+  if (until === undefined) return true
+  if (Date.now() >= until) {
+    saturationOverrideUntil.delete(session)
+    return true
+  }
+  return false
+}
+
+/** Does this capture refuse dispatch? The one question every injector asks.
+ *
+ *  The override above is keyed by SESSION, so it cannot know WHICH banner is on
+ *  screen -- which is exactly why the hard-error class is settled HERE, on the
+ *  capture itself, AHEAD of it. The reachable sequence this closes: a mis-tagged
+ *  agent's percentage banner is found not credible and an override entry is
+ *  written; the SAME agent later wedges for real and the CLI paints "Context
+ *  limit reached"; without this arm the still-valid entry would hold the gate
+ *  open and we would inject into a pane that cannot act -- one sweep at best,
+ *  the whole TTL at worst. Only a percentage claim is ever overridable; see
+ *  saturationBannerCredible() in context-guard.ts. */
+export function saturationRefusesDispatch(capture: string, session: string): boolean {
+  if (!paneShowsContextSaturation(capture)) return false
+  if (paneShowsContextSaturationHardError(capture)) return true
+  return saturationBannerTrusted(session)
+}
+
 export async function isSessionReadyForPrompt(session: string, host: string | null = null): Promise<boolean> {
   // Dim-ghost tolerant idle read: CC >=2.1.202 paints a dim placeholder into
   // the empty input box, which a plain capture reads as parked text. Only when
@@ -2911,7 +3052,7 @@ export async function isSessionReadyForPrompt(session: string, host: string | nu
     idleConsideringDimGhost(plain, detectPaneState(plain) === 'typing' ? captureParkedInputView(session, host) : null)
   const first = capturePane(session, host)
   if (first == null) return false
-  if (paneShowsContextSaturation(first)) {
+  if (saturationRefusesDispatch(first, session)) {
     logger.warn({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
     return false
   }
@@ -2921,7 +3062,7 @@ export async function isSessionReadyForPrompt(session: string, host: string | nu
 
   const second = capturePane(session, host)
   if (second == null) return false
-  if (paneShowsContextSaturation(second)) {
+  if (saturationRefusesDispatch(second, session)) {
     logger.warn({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
     return false
   }

@@ -763,7 +763,7 @@ window._i18n.en = {
   'settings.module.autonomy':    'Autonomy',
   'settings.module.security':    'Security',
   'settings.module.claude-plans': 'Claude plans',
-  'settings.claude_plans.intro':  'Registered Claude subscriptions (plans). A plan points at an already-logged-in, persistent CLAUDE_CONFIG_DIR -- the login itself (claude setup-token) is a manual step done ahead of time; this just registers it. Automatic key rotation (see the toggle below) is not wired up yet.',
+  'settings.claude_plans.intro':  'Registered Claude subscriptions (plans). A plan points at an already-logged-in, persistent CLAUDE_CONFIG_DIR; the login itself (claude setup-token) is a manual step done ahead of time, this just registers it. Automatic key rotation is controlled by the toggle below; its prerequisites are listed in the toggle description.',
   'settings.claude_plans.empty':  'No plans registered yet.',
   'settings.claude_plans.active': 'Currently active',
   'settings.claude_plans.no_channels': 'channels disabled',
@@ -1168,6 +1168,8 @@ window._i18n.en = {
   'conversation.filter_label':   'Show actions/notes',
   'memories.agent_all':			'All agents',
   'memories.stat.total':			'Total',
+  'memories.relaxed.title':			'These are rescued near-misses, not hits.',
+  'memories.relaxed.body':			'No memory matched your query as asked. The list shows what the leftover filler words pulled in -- do not read it as "we have something on this".',
   'memories.stat.vectors_btn':			'Generate vectors',
   'memories.stat.vectors_gen':			'Generating...',
   'memories.toast.vector_count':			'{count} memories vectorized',
@@ -1882,5 +1884,6 @@ window._i18n.en = {
   'auth.bridge.err.invalid_name':                'The device name may be 1-64 characters: letters, digits, space, and . _ -',
   'auth.bridge.err.invalid_ssh_port':            'The SSH port must be a number between 1 and 65535.',
   'auth.bridge.err.enroll_failed':               'Pairing failed. Check the dashboard log and try again.',
+  'auth.bridge.err.enroll813':                   'Pairing stopped at a safety check: this install looks like a test environment (VITEST or NODE_ENV=test), so authorized_keys was left untouched. Remove the test signal from the service environment, then try again.',
 
 }

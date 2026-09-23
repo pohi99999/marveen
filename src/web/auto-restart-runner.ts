@@ -221,7 +221,16 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     openQuestionDeferrals.delete(name)
     logger.info({ name, mode: name === MAIN_AGENT_ID ? 'fresh(main)' : cfg.mode }, 'auto-restart: restarted session')
   } catch (err) {
-    logger.warn({ err, name }, 'auto-restart: restart failed')
+    // MUST advance lastRestart even on failure. Root-caused 2026-09-19
+    // (card 08a02137): a throwing performRestart used to leave lastRestart
+    // untouched, so restartDue() stayed true and every following tick retried
+    // immediately -- 2-6 minutes apart all day, each attempt tearing down the
+    // main session's poller again. Recording the failed attempt here makes
+    // restartDue() see lastRestart >= today's dueAt and stand down until the
+    // next scheduled slot (tomorrow's dailyTime, or the next intervalHours
+    // window), trading "retry forever" for "alert once, retry on schedule".
+    lastRestart.set(name, nowMs)
+    logger.warn({ err, name }, 'auto-restart: restart failed, standing down until next scheduled slot')
   }
 }
 

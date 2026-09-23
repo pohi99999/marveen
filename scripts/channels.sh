@@ -194,6 +194,31 @@ if [ "${1:-}" = "--resolve-main-model" ]; then
   exit 0
 fi
 
+# --- pane-dead detector (PANEDEAD919) -----------------------------------------
+# With `remain-on-exit on` (set on the main session at launch, PR #1402) a pane
+# whose claude process died is KEPT by tmux instead of closing the session, so
+# `while has-session` below keeps looping and nothing restarts the channel until
+# the plugin-dead grace (180s) or, on a cold-start crash, the never-started
+# budget (600 -> 2400s) runs out. Before remain-on-exit the same death closed
+# the session and the supervisor relaunched within seconds. This check restores
+# that: a dead pane exits the loop on the SAME normal-end path (exit 0) the
+# session-gone case used, so the exit ledger reads the same as before.
+# Returns 0 (dead) only on a positive `1` from tmux; a failed query is NOT dead
+# (fail-safe: never restart on a broken instrument).
+pane_dead_detected() {
+  "$TMUX" list-panes -t "$1" -F '#{pane_dead}' 2>/dev/null | grep -q '^1$'
+}
+
+# Test seam: `channels.sh --pane-dead-check <session>` prints dead|alive and
+# exits before touching .env, the store or the real session. CHANNELS_TMUX_BIN
+# lets the contract test point it at a fake tmux (and a mutant copy of this
+# script at a real one) -- see scripts/__tests__/channels-pane-dead.test.sh.
+if [ "${1:-}" = "--pane-dead-check" ]; then
+  TMUX="${CHANNELS_TMUX_BIN:-$(command -v tmux)}"
+  if pane_dead_detected "${2:-}"; then echo dead; else echo alive; fi
+  exit 0
+fi
+
 if [ "${1:-}" = "--classify-mcp-pane" ]; then
   resolve_plugin_ids "${2:-$CHANNEL_PROVIDER}"
   classify_mcp_plugin_row "$(cat)"
@@ -962,6 +987,21 @@ $TMUX set-environment -g DISABLE_AUTOUPDATER 1 2>/dev/null || true
 $TMUX kill-session -t "$SESSION" 2>/dev/null || true
 $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
   "${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions --chrome ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+# remain-on-exit: without this, if the pane's claude process dies for ANY
+# reason (crashed plugin, OOM, a reap step killing its poller out from under
+# it) while it is the session's only window, tmux auto-closes the pane AND
+# the session with it. The auto-restart runner's forced pane relaunch
+# (auto-restart-runner.ts's restartMainChannelsSession, see channel-monitor.ts)
+# then fails with "can't find pane: $SESSION" because there is nothing left to
+# relaunch into -- root-caused 2026-09-19 (card 08a02137): the pre-relaunch
+# poller reap was killing the LIVE main session's poller (channels.sh now
+# exports STATE_DIR_ENV for main too, so the reap's env-var match hits the
+# current poller, not just stale ones), crashing claude's channel MCP
+# connection and collapsing the pane before the relaunch could run. With
+# remain-on-exit on, the pane survives as "dead" and the relaunch can always
+# find and reuse it. (Also fixed at the reap itself, see channel-poller-reap.ts;
+# this is the defense-in-depth layer, not the only fix.)
+$TMUX set-option -t "$SESSION" remain-on-exit on 2>/dev/null || true
 
 # Session startup guard: a Claude Code first-run dialogusait auto-accept-eljuk
 # kulonben a headless session orokre parkolna a prompton es a Telegram plugin
@@ -1036,6 +1076,10 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
         $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
           "${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions --chrome ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+        # See the primary new-session above: remain-on-exit keeps the pane
+        # (and session) alive if claude dies early, so the scheduled relaunch
+        # can always find it. This is the /tmp-fallback launch path, same fix.
+        $TMUX set-option -t "$SESSION" remain-on-exit on 2>/dev/null || true
         unset _CHANNELS_STARTDIR
       fi
       continue
@@ -1350,6 +1394,20 @@ RESTART_REQUESTED=0
 # detector (channel-monitor.ts) says THAT a respawn happened, this file says
 # WHY. Best-effort by design: a failed write must never break the watchdog.
 CHANNELS_RESPAWN_LOG="$INSTALL_DIR/store/channels-respawn.log"
+# Best-effort capture of the plugin's OWN exit reason (SIGINT/SIGTERM/"exited
+# cleanly"/"connection closed after Xs"), from Claude Code's per-MCP-server
+# debug log. The watchdog below only ever sees bot.pid disappear -- it never
+# learns WHY, so every crash-loop entry up to now read "dead for 182s" and
+# nothing else. Added 2026-09-17 after a 7x crash-loop (03:00-03:12) that left
+# no usable trace. The log path is deterministic from Claude Code's own
+# cache-key scheme (cwd with "/" -> "-", server id with ":" -> "-");
+# best-effort by design, a missing/unreadable log must never block a restart.
+MCP_LOG_DIR="$HOME/.cache/claude-cli-nodejs/$(printf '%s' "$INSTALL_DIR" | tr '/' '-')/mcp-logs-$(printf '%s' "$PLUGIN_PANE_ID" | tr ':' '-')"
+mcp_plugin_log_tail() {
+  _f="$(ls -t "$MCP_LOG_DIR"/*.jsonl 2>/dev/null | head -1)"
+  [ -n "$_f" ] && tail -n 6 "$_f" 2>/dev/null | tr '\n' ' '
+  return 0
+}
 respawn_log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$CHANNELS_RESPAWN_LOG" 2>/dev/null || true
   # Chronic-churn cap (the 40-min cycle writes ~36 lines/day forever): trim to
@@ -1377,6 +1435,16 @@ _watchdog_claude_pid="$($TMUX list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/n
 # Várakozás amíg a session él
 while $TMUX has-session -t "$SESSION" 2>/dev/null; do
   sleep 5
+
+  # PANEDEAD919: claude itself exited but remain-on-exit kept the pane (and so
+  # the session) alive -- leave on the normal-end path right away instead of
+  # waiting out the plugin-dead grace / never-started budget. RESTART_REQUESTED
+  # stays 0 on purpose: this is the pre-remain-on-exit "session gone" outcome.
+  if pane_dead_detected "$SESSION"; then
+    echo "WARN: $SESSION pane is dead (claude exited, pane kept by remain-on-exit) -- exiting for service-manager restart" >&2
+    respawn_log "pane-dead: claude process of $SESSION exited, pane kept by remain-on-exit -- exiting for service-manager restart"
+    break
+  fi
 
   NOW=$(date +%s)
   _plugin_alive=false
@@ -1427,7 +1495,7 @@ while $TMUX has-session -t "$SESSION" 2>/dev/null; do
       echo "WARN: $CHANNEL_PROVIDER plugin (bot.pid) disappeared -- ${PLUGIN_DEAD_GRACE}s grace before restart" >&2
     elif [ "$((NOW - PLUGIN_DEAD_SINCE))" -ge "$PLUGIN_DEAD_GRACE" ]; then
       echo "WARN: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart" >&2
-      respawn_log "died-after-up: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart"
+      respawn_log "died-after-up: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart -- mcp-log tail: $(mcp_plugin_log_tail)"
       RESTART_REQUESTED=1
       break
     fi

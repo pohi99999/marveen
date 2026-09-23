@@ -610,6 +610,8 @@ window._i18n.hu = {
   'memories.page_subtitle':      'AI csapat tudásbázisa',
   'memories.agent_all':          'Minden ügynök',
   'memories.stat.total':         'Osszes',
+  'memories.relaxed.title':     'Ez mentett közelítés, nem találat.',
+  'memories.relaxed.body':      'Egyetlen emlék sem illeszkedett úgy, ahogy kerested. A lista azt mutatja, amit a maradék töltelékszavak hoztak -- ne olvasd úgy, hogy "van róla emlékünk".',
   'memories.stat.vectors_btn':   'Vektorok generalasa',
   'memories.stat.vectors_gen':   'Generálás...',
   'memories.toast.vector_count': '{count} emlekhez vektor generalva',
@@ -1076,7 +1078,7 @@ window._i18n.hu = {
   'settings.module.autonomy':    'Autonómia',
   'settings.module.security':    'Biztonság',
   'settings.module.claude-plans': 'Claude planek',
-  'settings.claude_plans.intro':  'Regisztrált Claude-előfizetések (planek). Egy plan egy már bejelentkezett, tartós CLAUDE_CONFIG_DIR-t jelöl -- a bejelentkezést magát (claude setup-token) kézzel kell elvégezni, ide csak a regisztrációt vezeted fel. Az automata kulcs-rotáció (lásd a lenti kapcsolót) még nincs bekötve.',
+  'settings.claude_plans.intro':  'Regisztrált Claude-előfizetések (planek). Egy plan egy már bejelentkezett, tartós CLAUDE_CONFIG_DIR-t jelöl; a bejelentkezést magát (claude setup-token) kézzel kell elvégezni, ide csak a regisztrációt vezeted fel. Az automata kulcs-rotációt a lenti kapcsoló vezérli, az előfeltételeit a kapcsoló leírása mondja ki.',
   'settings.claude_plans.empty':  'Még nincs regisztrált plan.',
   'settings.claude_plans.active': 'Jelenleg aktív',
   'settings.claude_plans.no_channels': 'channels tiltva',
@@ -1884,5 +1886,6 @@ window._i18n.hu = {
   'auth.bridge.err.invalid_name':                'Az eszköz neve 1-64 karakter lehet: betű, számjegy, szóköz, valamint a . _ - jelek.',
   'auth.bridge.err.invalid_ssh_port':            'Az SSH-port 1 és 65535 közötti szám lehet.',
   'auth.bridge.err.enroll_failed':               'A párosítás nem sikerült. Nézd meg a dashboard naplóját, és próbáld újra.',
+  'auth.bridge.err.enroll813':                   'A párosítás egy biztonsági ellenőrzésen állt meg: ez a telepítés teszt-környezetnek látszik (VITEST vagy NODE_ENV=test), ezért a rendszer hozzá sem nyúlt az authorized_keys fájlhoz. Vedd ki a teszt-jelzést a szolgáltatás környezetéből, majd próbáld újra.',
 
 }
