@@ -54,6 +54,9 @@ vi.mock('../db.js', () => ({
   // upstream v1.37.0: the router now counts newer same-sender messages for the
   // freshness/supersession hint on every non-channel delivery.
   countNewerMessagesFromSameSender: vi.fn(() => 0),
+  // upstream v1.39.0 (TICKVAKSAG916): the row's status is re-read right before
+  // delivery; anything but 'pending' skips the send.
+  getMessageStatus: () => 'pending',
   getPendingMessages: (toAgent?: string) => {
     if (toAgent) return [] // per-agent query for the reconnect pre-pass
     return mockGetPendingMessages()

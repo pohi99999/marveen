@@ -47,6 +47,9 @@ vi.mock('../db.js', () => ({
 vi.mock('../web/voice-directive.js', () => ({ resolveAgentChannelStateDir: () => '/tmp/none' }))
 vi.mock('../web/agent-config.js', () => ({
   readAgentRemoteHost: () => null,
+  // fork-only (engine branching): the router resolves the recipient's engine
+  // before the readiness gate; a strict mock without it throws inside the tick.
+  readAgentEngine: () => 'claude',
   readAgentVoiceConfig: () => ({ responseMode: 'text' }),
   readAgentWorksourceChannel: () => false,
 }))

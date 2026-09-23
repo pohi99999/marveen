@@ -34,11 +34,11 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **47**, egyedi `/api/...` útvonal-literál bennük: **134**
-- Claude Code hookok (`.claude/settings.json`): **5** esemény, **15** bejegyzés, **10** szkript a `scripts/hooks/` alatt
+- Route-modulok (`src/web/routes/*.ts`): **49**, egyedi `/api/...` útvonal-literál bennük: **137**
+- Claude Code hookok (`.claude/settings.json`): **7** esemény, **34** bejegyzés, **24** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **4** -- dream-engine, ledger-live-drain, memoria-heartbeat, reggeli-napindito
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **7** -- channel-image, git-guard, hook-proof, prod-tree-guard, secret-gate, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **42**, ebből a fenti táblázat linkel **16**
+- Dokumentációs lapok a `docs/` alatt: **43**, ebből a fenti táblázat linkel **16**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
@@ -54,6 +54,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [ideabox](ideabox.md)
 - [inter-agent-send-reliability](inter-agent-send-reliability.md)
 - [kutatas](kutatas.md)
+- [mcp-list-channel-plugin](mcp-list-channel-plugin.md)
 - [mobil-dashboard](mobil-dashboard.md)
 - [munkamodszer](munkamodszer.md)
 - [naplo-audit](naplo-audit.md)

@@ -1516,6 +1516,24 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
 // (a still-running task) -- this is the opposite situation, a task that never
 // started and will not be retried again automatically. Same
 // createAgentMessage + try/catch shape as its neighbours in this file.
+// LOSTLOOP913 gap 1, the imperative half: on an engine where lost-detection is
+// structurally blind (see lostDetectionSupported) record the run as
+// 'unverified' and report true so the sweep lets the entry go WITHOUT undoing
+// its success bookkeeping and WITHOUT queueing a redelivery. Kept out of the
+// sweep body so upstream's source-text guard on the 'lost' branch
+// (schedule-task-timeout.test.ts, a 3600-char window) still sees the whole
+// bounded-redelivery wiring.
+function recordUnverifiedLostIfBlindEngine(entry: TaskInflightEntry, now: number): boolean {
+  const engine = readAgentEngine(entry.agentName)
+  if (lostDetectionSupported(engine)) return false
+  logger.warn(
+    { task: entry.taskName, agent: entry.agentName, engine, session: entry.session, elapsedMs: now - entry.injectedAt },
+    'Scheduled injection shows no turn evidence, but this engine exposes none -- recording as unverified, NOT re-queueing (LOSTLOOP913)',
+  )
+  appendTaskRun(entry.taskName, entry.agentName, 'unverified')
+  return true
+}
+
 function sendLostRedeliveryGiveUpNotice(entry: TaskInflightEntry, attempts: number): void {
   const text = [
     `[scheduler] A(z) "${entry.taskName}" (${entry.agentName}) ütemezett feladat ${attempts} próbálkozás után sem indult el (a session befogadta a promptot, de sosem kezdett kört).`,
@@ -1811,16 +1829,8 @@ export function startScheduleRunner(): NodeJS.Timeout {
           'Scheduled prompt parked in an overfull input box -- pressed Enter instead of recording lost',
         )
       } else if (decision === 'lost') {
-        // LOSTLOOP913 gap 1: on a non-Claude engine the verdict is blind (no
-        // footer state, no transcript) -- do not undo the success bookkeeping
-        // and do not re-queue; record it as unverified and let go.
-        const engine = readAgentEngine(entry.agentName)
-        if (!lostDetectionSupported(engine)) {
-          logger.warn(
-            { task: entry.taskName, agent: entry.agentName, engine, session: entry.session, elapsedMs: now - entry.injectedAt },
-            'Scheduled injection shows no turn evidence, but this engine exposes none -- recording as unverified, NOT re-queueing (LOSTLOOP913)',
-          )
-          appendTaskRun(entry.taskName, entry.agentName, 'unverified')
+        // LOSTLOOP913 gap 1: non-Claude engine, the verdict is blind -> 'unverified', no re-queue.
+        if (recordUnverifiedLostIfBlindEngine(entry, now)) {
           taskInflightMap.delete(key)
           continue
         }
