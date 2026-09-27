@@ -242,8 +242,15 @@ export function resumePrompt(
     `RESTART-ABLAK: az előző session utolsó ~15 percében kézbesített inter-agent üzenet elveszhetett. ` +
     `Olvasd vissza a saját sorodat erre az ablakra (GET /api/messages?agent=${name}, created_at szerint szűrve), ` +
     `és minden ott talált, még el nem intézett kérést kezelj újként. KÖTELEZŐ MEGFIGYELHETŐ NYOM: minden ` +
-    `visszaolvasott tételről küldj rövid nyugtát a feladónak ("[RESTART-ABLAK] <id> felvéve a friss sessionben"), ` +
-    `akkor is, ha nincs belőle teendő -- e nélkül a visszaolvasás a sorból láthatatlan. ` +
+    // CTXACK927: a directive sent by "system" (context-guard handoff, restart-gate
+    // wake) cannot be acked back to system -- /api/messages does not deliver to
+    // that sender, and the fresh session recorded a handoff-failure two nights
+    // running (2026-09-25 msg 1983, 2026-09-26 msgs 2027 -> 2029). Those acks go
+    // to the agent's OWN queue, which is exactly where the next restart window
+    // re-read will find them.
+    `visszaolvasott tételről küldj rövid nyugtát a feladónak ("[RESTART-ABLAK] <id> felvéve a friss sessionben"); ` +
+    `ha a feladó system, a saját sorodba (to=${name}), mert a system-feladónak nem kézbesít a sor. ` +
+    `Ezt akkor is, ha nincs belőle teendő -- e nélkül a visszaolvasás a sorból láthatatlan. ` +
     // RESPAWNZAJ822/PRODFAAG822: a fresh session acting on a resume goal is
     // exactly the actor that branch-switched and committed on the live prod
     // tree (2026-08-22 10:10, PR #1036 duplicate). The constraint must ride in

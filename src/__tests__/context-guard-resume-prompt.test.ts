@@ -76,6 +76,12 @@ describe('resumePrompt carries the restart-window re-read on every variant', () 
     ['with unmeasurable freshness', () => resumePrompt('samu', '/x/HANDOFF.md', true, 'unknown')],
     ['main agent', () => resumePrompt('marveen', '/x/HANDOFF.md', true)],
   ] as const
+  // The agent name each variant passes as the first argument, so the system
+  // branch can be pinned to the caller's OWN queue (to=<name>), not to a fixed
+  // string. Read from the label list, not from Function.toString(): the
+  // transform may rewrite quotes and the regex would silently fall back.
+  const agentOf: Record<string, string> = { 'main agent': 'marveen' }
+  const name = (label: string) => agentOf[label] ?? 'samu'
   for (const [label, make] of variants) {
     it(label, () => {
       const p = make()
@@ -86,6 +92,13 @@ describe('resumePrompt carries the restart-window re-read on every variant', () 
       // item needs no work -- this is what makes the v1 measurable at all.
       expect(p).toContain('nyugtát a feladónak')
       expect(p).toContain('akkor is, ha nincs belőle teendő')
+      // A system-sent item (context-guard / restart-gate directive) cannot be
+      // acked back to "system": /api/messages does not deliver to that sender,
+      // and the fresh session logged a handoff-failure twice (2026-09-25 msg
+      // 1983, 2026-09-26 msgs 2027 -> 2029). The ack for those goes to the
+      // agent's OWN queue, and the prompt must name that queue explicitly.
+      expect(p).toContain('ha a feladó system, a saját sorodba')
+      expect(p).toMatch(new RegExp(`ha a feladó system, a saját sorodba \\(to=${name(label)}\\)`))
     })
   }
 })
