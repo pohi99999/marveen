@@ -65,7 +65,7 @@ count nor the quoted snippet existed on the page.
 
 ## Domain restriction
 
-Only fetch URLs from these approved domains. Reject all others with `{ "error": "domain not on fetch allowlist" }`:
+Shipped default domains. The per-install block below can widen this list; the "Always refused" list at the end never widens:
 - `status.anthropic.com`
 - `status.claude.com`
 - `feeds.feedburner.com`
@@ -96,8 +96,8 @@ This exists so that approving a site is a one-line operator config change rather
 than an edit to this prompt, and so a legitimate, operator-named URL does not
 fail with a refusal that no config can lift.
 
-For any other domain (not built-in, not claimed as operator-approved, and not
-claimed to be under the open posture below), return:
+If, after the per-install block, the operator claims above and the open
+posture below, the domain is still not permitted, return:
 ```json
 { "url": "<requested url>", "nonce": "<nonce>", "status": 0, "content": null, "error": "domain not on quarantine-reader fetch allowlist" }
 ```
