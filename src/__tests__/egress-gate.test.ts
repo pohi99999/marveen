@@ -128,6 +128,40 @@ describe('the quarantine tier', () => {
 // the allowlist stays the default because its failure direction is the one a
 // human hears about. Everything in this block requires the explicit config
 // value; everything above ran on EMPTY and proved the default unchanged.
+// The built-in tier includes the install's own dashboard and Ollama (loopback).
+// A main agent needs them; the reader, which fetches untrusted content, must
+// not reach them in ANY posture. Both directions on the real egressDecision.
+describe('the reader and the loopback built-ins', () => {
+  const PORT = process.env['WEB_PORT'] && /^\d{1,5}$/.test(process.env['WEB_PORT']) ? process.env['WEB_PORT'] : '3420'
+  const loopback = [
+    `http://127.0.0.1:${PORT}/api/agents`,
+    `http://localhost:${PORT}/api/agents`,
+    'http://127.0.0.1:11434/api/tags',
+    'http://localhost:11434/api/tags',
+  ]
+
+  it.each(loopback)('blocks the reader from %s under the default allowlist posture', (url) => {
+    expect(egressDecision('WebFetch', { url }, EMPTY, QUARANTINE).blocked).toBe(true)
+    expect(egressDecision('WebFetch', { url }, EMPTY, QUARANTINE).tier).not.toBe('builtin')
+  })
+
+  it.each(loopback)('blocks the reader from %s under the open posture too', (url) => {
+    expect(egressDecision('WebFetch', { url }, OPEN, QUARANTINE).blocked).toBe(true)
+  })
+
+  it.each(loopback)('still lets a main agent (and any other agent type) reach %s', (url) => {
+    expect(egressDecision('WebFetch', { url }, EMPTY, '').tier).toBe('builtin')
+    expect(egressDecision('WebFetch', { url }, EMPTY, 'general-purpose').blocked).toBe(false)
+  })
+
+  it('leaves the reader its feeds and the external built-ins, and the main agent its behaviour', () => {
+    expect(egressDecision('WebFetch', { url: 'https://rss.arxiv.org/rss/cs.AI' }, EMPTY, QUARANTINE).blocked).toBe(false)
+    expect(egressDecision('WebFetch', { url: 'https://api.github.com/x' }, EMPTY, QUARANTINE).tier).toBe('builtin')
+    expect(egressDecision('WebFetch', { url: 'https://example.com/' }, EMPTY, '').blocked).toBe(true)
+    expect(egressDecision('WebFetch', { url: 'https://example.com/' }, OPEN, '').blocked).toBe(true)
+  })
+})
+
 describe('the open reader posture (operator opt-in)', () => {
   it('lets the reader fetch a public domain it was never given', () => {
     // The reader has `tools: WebFetch` and nothing else -- no shell, no
@@ -190,11 +224,12 @@ describe('the open reader posture (operator opt-in)', () => {
 
   it('keeps the deny rules away from the main agent and from the default posture', () => {
     // The main agent may still reach its own dashboard through the built-in
-    // prefixes, and so may the DEFAULT-posture reader (its prompt never asks
-    // for internal addresses, and the owner's rule is that the default
-    // changes for no one).
+    // prefixes. The reader may not, in any posture (owner decision
+    // 2026-09-30: the default-posture reader used to inherit the loopback
+    // built-ins; see 'the reader and the loopback built-ins' below).
     expect(isEgressBlocked('WebFetch', { url: 'http://localhost:3420/api/memories' }, OPEN, '')).toBe(false)
-    expect(isEgressBlocked('WebFetch', { url: 'http://localhost:3420/api/memories' }, EMPTY, QUARANTINE)).toBe(false)
+    expect(isEgressBlocked('WebFetch', { url: 'http://localhost:3420/api/memories' }, EMPTY, '')).toBe(false)
+    expect(isEgressBlocked('WebFetch', { url: 'http://localhost:3420/api/memories' }, EMPTY, QUARANTINE)).toBe(true)
   })
 
   it('reddit: the RSS path still matches by name, and the rest opens like any public site', () => {

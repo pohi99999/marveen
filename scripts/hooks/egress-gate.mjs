@@ -123,6 +123,8 @@ const ALLOWED_PREFIXES = [
 // in step -- and when they disagree, this file is the one that decides.
 const QUARANTINE_AGENT_TYPE = 'quarantine-reader'
 
+const isLoopbackPrefix = (prefix) => /^https?:\/\/(localhost|127\.0\.0\.1)[:/]/.test(prefix)
+
 // `path` (optional) narrows a domain to the URLs the sub-agent's definition
 // actually promises. Reddit is the reason it exists: the definition allows RSS
 // feeds only, and hostname matching alone would hand over the entire site.
@@ -403,7 +405,15 @@ export function egressDecision(
   //    includes the trailing slash so a prefix-extension attack is impossible,
   //    e.g. 'https://api.github.com.evil.com/' does not start with
   //    'https://api.github.com/').
-  if (ALLOWED_PREFIXES.some((prefix) => url.startsWith(prefix))) return { blocked: false, tier: 'builtin' }
+  //    The quarantine-reader never gets the loopback entries (own dashboard,
+  //    Ollama), in ANY posture: it fetches untrusted content, so aiming it at
+  //    the local services is exactly the attack it exists to contain. Main
+  //    agents keep them; the open posture already refused them at step 0, this
+  //    closes the same door for the default allowlist posture.
+  const readerCaller = String(agentType ?? '') === QUARANTINE_AGENT_TYPE
+  if (ALLOWED_PREFIXES.some((prefix) => url.startsWith(prefix) && !(readerCaller && isLoopbackPrefix(prefix)))) {
+    return { blocked: false, tier: 'builtin' }
+  }
 
   // 2. Runtime prefix check.
   const rtPrefixes = runtimeList.prefixes ?? []
