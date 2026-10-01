@@ -5,7 +5,8 @@ usage-quota-gate.py -- weekly Max-quota EMERGENCY GATE (card 6d9de12c, 2026-09-1
 Runs right after scripts/usage-collect.py (same command task, usage-collect-hourly).
 Reads store/usage-latest.json (never calls the provider itself), and when the
 Claude seven_day window's used_percent reaches a threshold (80, then 90) it
-sends ONCE per threshold per window:
+sends ONCE per threshold per window (the seven_day_opus window has its own
+70/80/90 steps, inter-agent only):
   - an inter-agent message to the main agent, prefixed [KVOTA], via the
     dashboard API (bearer from store/.dashboard-token). The API accepts only
     registered agent ids as `from`, so the note is sent from the main agent
@@ -39,6 +40,12 @@ SNAPSHOT_PATH = os.path.join(STORE, "usage-latest.json")
 STATE_PATH = os.path.join(STORE, "usage-alert-state.json")
 THRESHOLDS = (80, 90)
 WINDOW = "seven_day"
+# The per-model weekly window has its own ceiling: on 2026-09-28 it reached 97%
+# while seven_day was still under 80, so the gate above stayed silent. It gets an
+# earlier 70% step and goes to the main agent only (no owner Telegram), who
+# decides what to tell the owner (card b2530292).
+OPUS_THRESHOLDS = (70, 80, 90)
+OPUS_WINDOW = "seven_day_opus"
 OWNER_CHAT_ID = "7544590867"
 API = "http://127.0.0.1:3420"
 
@@ -134,6 +141,18 @@ def message_text(t, snapshot):
     )
 
 
+def opus_message_text(t, snapshot):
+    w = snapshot["claude"]["windows"]
+    op = w.get(OPUS_WINDOW, {})
+    sd = w.get(WINDOW, {})
+    return (
+        f"[KVOTA] Heti Opus-ablak (seven_day_opus) {op.get('used_percent')}% (kuszob {t}%). "
+        f"Reset: {fmt_reset(op.get('resets_at'))}. Heti teljes: {sd.get('used_percent')}%. "
+        + ("Korai jelzes: az Opus-ablak elfogyhat a reset elott, erdemes most donteni a modell-elosztasrol." if t < 90
+           else "90%: az Opus-ablak a plafon kozeleben, Opus-igenyes munkat a resetig erdemes masik modellre tenni.")
+    )
+
+
 def send_inter_agent(text):
     token_path = os.path.join(STORE, ".dashboard-token")
     with open(token_path, "r", encoding="utf-8") as f:
@@ -205,6 +224,22 @@ def self_test():
     # message text has no em dash (outgoing copy rule) and carries the reset
     m = message_text(80, snap(81, r1))
     check("—" not in m and "[KVOTA]" in m and "Reset:" in m, "message text: [KVOTA] prefix, reset, no em dash")
+    # Opus window: its own 70/80/90 thresholds and state keys, independent of seven_day
+    osnap = lambda used, opus, reset: {"claude": {"windows": {"seven_day": {"used_percent": used, "resets_at": reset}, "seven_day_opus": {"used_percent": opus, "resets_at": reset}}}}
+    f, s = decide(osnap(40, 69, r1), {}, OPUS_THRESHOLDS, OPUS_WINDOW)
+    check(f == [], "opus 69%: nothing fires")
+    f, s = decide(osnap(40, 70, r1), s, OPUS_THRESHOLDS, OPUS_WINDOW)
+    check(f == [70], "opus 70%: fires 70 only")
+    f, s = decide(osnap(40, 75, r1), s, OPUS_THRESHOLDS, OPUS_WINDOW)
+    check(f == [], "opus 75%: 70 does not repeat")
+    f, s = decide(osnap(40, 97, r1), s, OPUS_THRESHOLDS, OPUS_WINDOW)
+    check(f == [80, 90], "opus 97% after 70: fires 80 and 90")
+    f2, s2 = decide(osnap(40, 97, r1), s, THRESHOLDS, WINDOW)
+    check(f2 == [] and "claude_seven_day_opus_threshold_70" in s2, "seven_day at 40% stays silent while opus keys are kept")
+    f, s = decide(osnap(40, 72, r1 + 7 * 86400), s, OPUS_THRESHOLDS, OPUS_WINDOW)
+    check(f == [70], "opus after reset at 72%: re-armed, fires 70")
+    m = opus_message_text(70, osnap(40, 70, r1))
+    check("—" not in m and "[KVOTA]" in m and "seven_day_opus" in m and "Reset:" in m, "opus message text: [KVOTA], window name, reset, no em dash")
     # foreign keys in the shared state file survive
     f, s = decide(snap(55, r1), {"claude_five_hour_over": {"active": False}})
     check(s.get("claude_five_hour_over") == {"active": False}, "usage-collect's own state keys are preserved")
@@ -224,17 +259,23 @@ def main():
     snapshot = load_json(a.snapshot, {})
     state = load_json(a.state, {})
     to_fire, new_state = decide(snapshot, state)
-    w = (((snapshot.get("claude") or {}).get("windows") or {}).get(WINDOW) or {})
-    print(f"usage-quota-gate: seven_day={w.get('used_percent')}% reset={fmt_reset(w.get('resets_at'))} fire={to_fire or 'none'}{' (dry-run)' if a.dry_run else ''}")
-    for t in to_fire:
-        text = message_text(t, snapshot)
+    opus_fire, new_state = decide(snapshot, new_state, OPUS_THRESHOLDS, OPUS_WINDOW)
+    windows = (snapshot.get("claude") or {}).get("windows") or {}
+    w = windows.get(WINDOW) or {}
+    ow = windows.get(OPUS_WINDOW) or {}
+    print(f"usage-quota-gate: seven_day={w.get('used_percent')}% reset={fmt_reset(w.get('resets_at'))} fire={to_fire or 'none'}"
+          f" | seven_day_opus={ow.get('used_percent')}% fire={opus_fire or 'none'}{' (dry-run)' if a.dry_run else ''}")
+    sends = [(message_text(t, snapshot), True) for t in to_fire] + [(opus_message_text(t, snapshot), False) for t in opus_fire]
+    for text, to_owner in sends:
         if a.dry_run:
-            print("  would send:", text)
+            print("  would send:", text, "" if to_owner else "(main agent only)")
             continue
         try:
             print("  inter-agent:", send_inter_agent(text))
         except Exception as e:  # never crash the scheduler
             print("  inter-agent FAILED:", type(e).__name__)
+        if not to_owner:
+            continue
         try:
             print("  telegram:", send_telegram(text))
         except Exception as e:
