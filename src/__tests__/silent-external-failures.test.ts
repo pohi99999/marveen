@@ -125,7 +125,8 @@ describe('readJsonObjectForWrite never clobbers an existing config', () => {
     expect(read('src/web/routes/schedules.ts')).toContain('config = readJsonObjectForWrite(configPath)')
     expect(read('src/web/model-fallback-runner.ts')).toContain('readJsonObjectForWrite(MAIN_SETTINGS_PATH)')
     // Thirteen writers in agent-config.ts, one each in the other four.
-    expect(read('src/web/agent-config.ts').match(/= readJsonObjectForWrite\(configPath\)/g)).toHaveLength(13)
+    // FORK: +1 in agent-config.ts, writeAgentEngine (copilot/antigravity engine field).
+    expect(read('src/web/agent-config.ts').match(/= readJsonObjectForWrite\(configPath\)/g)).toHaveLength(14)
     expect(read('src/web/agent-team.ts')).toContain('config = readJsonObjectForWrite(configPath)')
     expect(read('src/web/scheduled-tasks-io.ts')).toContain('config = readJsonObjectForWrite(configPath)')
     expect(read('src/web/routes/connectors.ts')).toContain('mcpConfig = readJsonObjectForWrite(mcpPath)')
