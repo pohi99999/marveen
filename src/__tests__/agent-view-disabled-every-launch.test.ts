@@ -84,6 +84,8 @@ function* walk(dir: string): Generator<string> {
   }
 }
 
+const NOT_CLAUDE_LAUNCHERS = new Set(['src/web/antigravity-agent-process.ts'])
+
 describe('no launch path is missing the flag (enumeration)', () => {
   it('each file with a --dangerously-skip-permissions launch line also carries CLAUDE_CODE_DISABLE_AGENT_VIEW=1', () => {
     const files = [
@@ -97,6 +99,10 @@ describe('no launch path is missing the flag (enumeration)', () => {
         .filter((l) => { const t = l.trim(); return !t.startsWith('#') && !t.startsWith('//') && !t.startsWith('*') })
       if (!code.some((l) => l.includes('--dangerously-skip-permissions'))) continue
       launchers.push(relative(ROOT, f))
+      // FORK: the antigravity engine launches the Antigravity CLI (`agy`), not Claude Code, so a
+      // CLAUDE_CODE_* switch would be a no-op there. The exemption holds only while that file's
+      // launch line really is agy: if it ever starts claude, it falls back into the check.
+      if (NOT_CLAUDE_LAUNCHERS.has(relative(ROOT, f)) && code.some((l) => l.includes("['agy', '--dangerously-skip-permissions']"))) continue
       if (!code.some((l) => l.includes('CLAUDE_CODE_DISABLE_AGENT_VIEW'))) missing.push(relative(ROOT, f))
     }
     expect(launchers.length).toBeGreaterThanOrEqual(8)

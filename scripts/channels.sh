@@ -641,50 +641,18 @@ export CLAUDE_CODE_DISABLE_AGENT_VIEW=1
 # Failures are logged, never fatal: a stale claude still works, and a missing
 # one is retried by the next KeepAlive restart 30 seconds later.
 CLAUDE_UPDATE_STAMP="$INSTALL_DIR/store/.claude-update-stamp"
-# NATIVEINSTALLFIX916: `npm install -g "$CLAUDE_PKG"` here ALWAYS failed
-# (EEXIST on /home/pohi/.local/bin/claude) since 2026-09-09, when the fleet
-# moved off the npm-managed binary onto the native installer (see memory
-# "Claude npm-eltavolitas visszaallito adatlapja") -- `claude` is a symlink
-# into ~/.local/share/claude/versions/<ver>, and npm has no package registered
-# under $CLAUDE_PKG at all (`npm ls -g` confirms). Because the stamp below is
-# only written on SUCCESS, the "at most once per 24h" gate above could never
-# actually engage: this ran on every single channels.sh launch, invisibly,
-# until systemd started relaunching channels.sh fast enough (2026-09-16) for
-# the resulting Telegram-API contention to visibly start the whole session.
-# Same two jobs as before, same stamp/logging pattern, native commands instead:
-#   * claude PRESENT ("daily check"): `claude update`, the binary's own
-#     updater -- npm was never the source of truth for it either.
-#   * claude MISSING ("binary missing -- self-heal"): the native bootstrap
-#     already used by scripts/fix-avx.sh, pinned on an AVX-less host for the
-#     same reason CLAUDE_PKG is pinned above (a Bun binary SIGILLs there).
 claude_install() {
   local why="$1"
-  if command -v claude >/dev/null 2>&1; then
-    echo "$(date '+%F %T') claude install START ($why): claude update" >&2
-    if claude update >/dev/null 2>&1; then
-      : > "$CLAUDE_UPDATE_STAMP"
-      echo "$(date '+%F %T') claude install OK ($why)" >&2
-    else
-      echo "$(date '+%F %T') claude install FAILED ($why)" >&2
-    fi
-    return 0
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "$(date '+%F %T') claude install SKIPPED ($why): npm not on PATH" >&2
+    return 1
   fi
-  if [ "$AVX_LESS" = "1" ]; then
-    echo "$(date '+%F %T') claude install START ($why): install.sh (pinned @${CLAUDE_PIN})" >&2
-    if curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_PIN}" >/dev/null 2>&1; then
-      : > "$CLAUDE_UPDATE_STAMP"
-      echo "$(date '+%F %T') claude install OK ($why)" >&2
-    else
-      echo "$(date '+%F %T') claude install FAILED ($why)" >&2
-    fi
+  echo "$(date '+%F %T') claude install START ($why): $CLAUDE_PKG" >&2
+  if npm install -g "$CLAUDE_PKG" >/dev/null 2>&1; then
+    : > "$CLAUDE_UPDATE_STAMP"
+    echo "$(date '+%F %T') claude install OK ($why)" >&2
   else
-    echo "$(date '+%F %T') claude install START ($why): install.sh (latest)" >&2
-    if curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1; then
-      : > "$CLAUDE_UPDATE_STAMP"
-      echo "$(date '+%F %T') claude install OK ($why)" >&2
-    else
-      echo "$(date '+%F %T') claude install FAILED ($why)" >&2
-    fi
+    echo "$(date '+%F %T') claude install FAILED ($why)" >&2
   fi
 }
 
@@ -795,7 +763,26 @@ if ! command -v claude >/dev/null 2>&1; then
     claude_install "binary missing -- self-heal"
   fi
 elif claude_is_native; then
-  echo "$(date '+%F %T') claude update SKIPPED: native install, npm path disabled" >&2
+  # FORK (NATIVEINSTALLFIX916, kept through v1.40.0): a native host is never sent to
+  # npm (upstream's rule above), but it IS kept current with the binary's own
+  # updater, once per 24h in the background. Measured on this install 09-19..10-01:
+  # `claude update` moved 2.1.280 -> 2.1.286 natively and no npm copy appeared.
+  # Its own stamp: $CLAUDE_UPDATE_STAMP is upstream's evidence of a successful NPM
+  # install (claude_host_is_native_now reads it), so a native update must not touch it.
+  CLAUDE_NATIVE_UPDATE_STAMP="$INSTALL_DIR/store/.claude-native-update-stamp"
+  if [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_NATIVE_UPDATE_STAMP" -mtime -1 2>/dev/null)" ]; then
+    (
+      echo "$(date '+%F %T') claude update START (native daily check)" >&2
+      if claude update >/dev/null 2>&1; then
+        : > "$CLAUDE_NATIVE_UPDATE_STAMP"
+        echo "$(date '+%F %T') claude update OK (native daily check)" >&2
+      else
+        echo "$(date '+%F %T') claude update FAILED (native daily check)" >&2
+      fi
+    ) &
+  else
+    echo "$(date '+%F %T') claude update SKIPPED: native install, checked within 24h" >&2
+  fi
 elif [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_UPDATE_STAMP" -mtime -1 2>/dev/null)" ]; then
   # AVX-less hosts are excluded on purpose: their claude is pinned, and
   # "keep it current" is exactly what breaks them.

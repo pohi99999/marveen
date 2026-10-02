@@ -236,8 +236,9 @@ export function readAgentEngine(name: string): 'claude' | 'copilot' | 'antigravi
 
 export function writeAgentEngine(name: string, engine: 'claude' | 'copilot' | 'antigravity'): void {
   const configPath = join(agentDir(name), 'agent-config.json')
-  let config: Record<string, unknown> = {}
-  try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
+  // Same read-for-write as the sibling setters: an unreadable or corrupt
+  // agent-config.json throws instead of being silently replaced by {engine}.
+  const config = readJsonObjectForWrite(configPath)
   config.engine = engine
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }

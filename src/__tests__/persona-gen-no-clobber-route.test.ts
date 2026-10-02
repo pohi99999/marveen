@@ -41,6 +41,8 @@ vi.mock('../web/agent-config.js', async (importOriginal) => {
     agentDir: (name: string) => join(h.root, name),
     writeAgentModel: vi.fn(),
     writeAgentSecurityProfile: vi.fn(),
+    // FORK: POST /api/agents also records the engine (copilot/antigravity support)
+    writeAgentEngine: vi.fn(),
     writeAgentDisplayName: vi.fn(),
     listAgentNames: () => [],
   }
