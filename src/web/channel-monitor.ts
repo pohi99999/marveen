@@ -1,4 +1,5 @@
 import { tmuxStderr } from './tmux-stderr.js'
+import { decideSkipTrace, decideMenuPassTrace, type SkipTraceState } from './monitor-trace.js'
 import { existsSync, readFileSync, statSync, writeFileSync, utimesSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
@@ -6,6 +7,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { makeLazyBinResolver } from '../platform.js'
 import { WEB_PORT } from '../config.js'
 import { logger } from '../logger.js'
+import { mainRelaunchSucceeded } from '../auto-restart.js'
 import { MAIN_AGENT_ID, SERVICE_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
 import { DISTRIBUTION_DEFAULT_AGENT_MODEL } from '../config-registry.js'
 import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
@@ -35,7 +37,7 @@ import { sendSystemDirective } from './system-directive.js'
 import { isRestartInFlight, beginRestart, endRestart } from './restart-lock.js'
 import { resolveMainConfigDecision, type MainConfigDecision } from './main-config-decision.js'
 import { withSessionSendLock } from './session-send-lock.js'
-import { reapChannelOrphans, reapDetachedChannelClaudes, collectPollerEvidence } from './channel-poller-reap.js'
+import { reapChannelOrphans, reapDetachedChannelClaudes, collectPollerEvidence, reapForeignMainPollers } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn, wasPluginConfirmedAbsent, clearPluginAbsent } from './channel-plugin-unlock.js'
 import { getInjectedPrompt, matchesInjectedPrompt } from './injected-prompt-registry.js'
@@ -77,6 +79,15 @@ import { getDesiredAgents } from './agent-desired-state.js'
 // mirrors the pattern already used in agent-process.ts.
 const tmuxBin = makeLazyBinResolver('tmux')
 const claudeBin = makeLazyBinResolver('claude')
+// Resolves a token-mode plan's vault secret to its plaintext value at launch
+// time, inside the respawned session's own shell -- see
+// buildMainSessionRespawnCmd's tokenSecretId branch. Never invoked from THIS
+// process; only its path is interpolated into the respawn command string.
+// Falls back to the fleet token (and fails loudly rather than exporting an
+// empty token) when the plan's own secret is missing -- see the script's own
+// header and PR #1304 review (c).
+const RESOLVE_PLAN_TOKEN_PATH = join(PROJECT_ROOT, 'scripts', 'resolve-plan-token-env.mjs')
+const CHANNELS_FAILURES_LOG_PATH = join(PROJECT_ROOT, 'store', 'channels-failures.log')
 
 // How long the agent's claude process has been running. Returns -1 when it
 // cannot be determined, which the restart policy treats as "do not restart".
@@ -444,6 +455,32 @@ export async function recoverStuckInputForSession(
 // that did NOT clear the parked text is logged and the next tick escalates
 // within the attempts budget (decideStuckInputRecovery caps it). 'hold' and
 // 'clear-preamble' submit nothing, so there is nothing to verify there.
+// CLEARLANE925. The two clear-only recovery actions (clear-preamble,
+// clear-scheduled) used to call clearInputBuffer() OUTSIDE the per-pane send
+// lane, while every clear+re-inject path above takes it in 'recover' mode. The
+// gap is not theoretical. Measured 2026-09-25 on the main pane, five times in
+// five hours: a scheduled prompt is still being typed into the box (the
+// sendPromptToSession emit span holds the lane), the 15s watcher samples the
+// half-typed text, reads it as a parked scheduled tick, and clears it. The
+// clear removes the head, the emit keeps typing, and the TAIL is submitted as
+// a headless prompt 2-4s later -- the "Scheduled task fired" line lands AFTER
+// the "could not be emptied" line every time. Taking the lane here makes the
+// clear fail-closed against a live delivery, exactly like the re-inject paths:
+// a genuinely parked box is still there on the next tick.
+export type ParkedClearResult = 'skipped-locked' | 'cleared' | 'left-fragment'
+
+export async function clearParkedInputUnderLane(
+  session: string,
+  clear: (session: string) => Promise<boolean> = s => clearInputBuffer(s),
+): Promise<ParkedClearResult> {
+  let cleared = false
+  const res = await withSessionSendLock(session, null, 'recover', async () => {
+    cleared = await clear(session)
+  })
+  if (!res.ran) return 'skipped-locked'
+  return cleared ? 'cleared' : 'left-fragment'
+}
+
 async function performStuckInputAction(
   session: string,
   action: StuckInputAction,
@@ -526,18 +563,26 @@ async function performStuckInputAction(
       }
       case 'clear-preamble': {
         logger.warn({ session, attempt }, 'Stuck input -- truncated safety preamble, clearing buffer (no re-inject)')
-        const cleared = await clearInputBuffer(session)
-        if (!cleared) logger.warn({ session, attempt }, 'Stuck input -- clear-preamble left text in the box; the leftover stays parked')
+        const result = await clearParkedInputUnderLane(session)
+        if (result === 'skipped-locked') {
+          logger.info({ session, attempt }, 'Stuck-input recovery (clear-preamble) skipped: a delivery is in flight into this pane (fail-closed)')
+          break
+        }
+        if (result === 'left-fragment') logger.warn({ session, attempt }, 'Stuck input -- clear-preamble left text in the box; the leftover stays parked')
         break
       }
       case 'clear-scheduled': {
         logger.warn({ session, attempt }, 'Stuck input -- parked scheduled-task tick, clearing buffer (no re-inject; next schedule fire re-delivers)')
-        const cleared = await clearInputBuffer(session)
+        const result = await clearParkedInputUnderLane(session)
+        if (result === 'skipped-locked') {
+          logger.info({ session, attempt }, 'Stuck-input recovery (clear-scheduled) skipped: a delivery is in flight into this pane (fail-closed)')
+          break
+        }
         // A half-cleared tick is the 2026-09-03 wedge: the fragment left behind
         // stops matching a delivery wrapper, so every later restart decision
         // reads it as a human draft. Say so in the log rather than reporting a
         // clean clear that did not happen.
-        if (!cleared) logger.warn({ session, attempt }, 'Stuck input -- clear-scheduled left a fragment in the box; expect machineOrigin=false on the next tick')
+        if (result === 'left-fragment') logger.warn({ session, attempt }, 'Stuck input -- clear-scheduled left a fragment in the box; expect machineOrigin=false on the next tick')
         break
       }
       case 'enter':
@@ -767,12 +812,15 @@ export function buildMainSessionRespawnCmd(opts: {
    * dir (it carries its own .credentials.json -- explicit or a rotated
    * claude-plans entry; injecting the fleet token on top would swap that
    * login for the flotta's shared one, CLAUDEPLANWATCHDOG912); `isolatedConfigDir`
-   * set without `ownCredentials` => export the dir plus the fleet setup-token
-   * (parity with channels.sh CFG_ENV, the credential-less flotta dir); null
-   * with `fleetToken` => export the token alone, which is what keeps a
-   * wizard-entered token reaching a respawned main session at all (2026-07-15
-   * bootcamp, bug 2 latent path); null with no token => the shared root,
-   * unchanged for installs with isolation off.
+   * set with `tokenSecretId` => export the dir plus THAT plan's vault-stored
+   * token instead of the fleet's (token-mode claude-plans rotation -- every
+   * token-mode plan shares this same credential-less dir, only the exported
+   * token changes); `isolatedConfigDir` set with neither => export the dir
+   * plus the fleet setup-token (parity with channels.sh CFG_ENV, the plain
+   * flotta dir); null with `fleetToken` => export the token alone, which is
+   * what keeps a wizard-entered token reaching a respawned main session at
+   * all (2026-07-15 bootcamp, bug 2 latent path); null with no token => the
+   * shared root, unchanged for installs with isolation off.
    */
   config: MainConfigDecision
   /**
@@ -782,28 +830,19 @@ export function buildMainSessionRespawnCmd(opts: {
    */
   extraPluginIds?: string[]
   /**
-   * Which channel provider the main session serves. REQUIRED: the respawned
-   * claude must carry `<PROVIDER>_STATE_DIR` exactly like channels.sh's own
-   * new-session does (channels.sh STATE_DIR_ENV), because the plugin reads its
-   * bot token from `<state dir>/.env` and falls back to ~/.claude/channels/
-   * <provider> -- which does not exist on a migrated install. Until 2026-09-21
-   * this path relied on the tmux SERVER's global env still holding the var
-   * (exported by the pre-33258ff2 channels.sh); once channels.sh stopped
-   * leaking it (1c98864) and the host rebooted, every dashboard-driven respawn
-   * (nightly 03:00 fresh, stage-3 --continue, hard restart) came up with
-   * "TELEGRAM_BOT_TOKEN required" and the channel stayed dark ~75 min per
-   * night (09-20, 09-21). See reference_respawn-pane-state-dir-hianya.
+   * The channel plugin's state-dir env var and value, from
+   * mainChannelStateEnv(). REQUIRED: since #915 the main agent's bot token
+   * lives in the install-scoped dir, and a plugin launched without
+   * *_STATE_DIR falls back to ~/.claude/channels/<provider>/, finds no .env
+   * and exits ("TELEGRAM_BOT_TOKEN required") -- every in-process respawn came
+   * up channel-deaf (measured 2026-09-24, 21:04 and 22:03 CEST). channels.sh
+   * and channel-watchdog.sh already export it; this is the third launcher.
    */
-  provider: ChannelProviderType
+  channelStateEnv: { name: string; dir: string }
 }): string {
-  const stateEnvVar = channelStateDirEnvVar(opts.provider)
-  const stateDir = channelStateDir(opts.provider)
   return [
     'export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
-    // Channel state dir -- parity with channels.sh STATE_DIR_ENV (same
-    // `export VAR='dir' &&` shape). The value is a path we resolved ourselves,
-    // single-quoted so it stays one shell word.
-    `&& export ${stateEnvVar}='${stateDir}'`,
+    `&& export ${opts.channelStateEnv.name}=${shSingleQuote(opts.channelStateEnv.dir)}`,
     // MCP startup-batch tuning (parity with channels.sh + startAgentProcess):
     // the --channels plugin is a stdio MCP server; the main session runs the
     // most MCP servers (filesystem/playwright/chrome + claude.ai connectors +
@@ -813,15 +852,31 @@ export function buildMainSessionRespawnCmd(opts: {
     // env as the channels.sh boot path, else a recovery respawn comes up
     // un-tuned and can re-starve under load.
     '&& export MCP_SERVER_CONNECTION_BATCH_SIZE=10 MCP_CONNECTION_NONBLOCKING=1 MCP_TIMEOUT=60000',
+    // CHANSPARE925: no Agent view -- parity with channels.sh (Left backgrounds the
+    // session into the daemon, whose --channels copy takes the bot poller).
+    '&& export CLAUDE_CODE_DISABLE_AGENT_VIEW=1',
     // macOS main-agent config isolation -- parity with channels.sh CFG_ENV. The
     // token is read at launch via $(cat) so the secret never lands in argv/`ps`.
     // An own-credential dir (explicit or a rotated claude-plans entry) gets NO
     // token: it already has its own .credentials.json, and injecting the fleet
-    // token on top would authenticate as the flotta instead of that login.
+    // token on top would authenticate as the flotta instead of that login. A
+    // token-mode rotated plan gets the dir PLUS its own token, resolved via
+    // resolve-plan-token-env.mjs at launch time (same "never touches this
+    // process, never lands in argv/ps" property as FLEET_OAUTH_TOKEN_PATH's
+    // $(cat)) -- tokenSecretId is a vault reference id, not the secret itself,
+    // so it is safe to interpolate directly (PLAN_ID_ALLOWED-restricted
+    // charset). `_plan_token=$(...)` is a BARE assignment (no command word
+    // before it), so ITS exit status is the script's own -- when the plan's
+    // vault secret AND the fleet-token fallback are both unavailable, the
+    // script exits 1 and this `&&` chain stops right here, before `claude`
+    // ever launches (PR #1304 review (c): a missing secret must not start an
+    // unauthenticated session).
     ...(opts.config.isolatedConfigDir
       ? (opts.config.ownCredentials
           ? [`&& export CLAUDE_CONFIG_DIR='${opts.config.isolatedConfigDir}'`]
-          : [`&& export CLAUDE_CONFIG_DIR='${opts.config.isolatedConfigDir}' && export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`])
+          : opts.config.tokenSecretId
+            ? [`&& export CLAUDE_CONFIG_DIR='${opts.config.isolatedConfigDir}' && _plan_token="$(node '${RESOLVE_PLAN_TOKEN_PATH}' '${opts.config.tokenSecretId}' '${FLEET_OAUTH_TOKEN_PATH}' '${CHANNELS_FAILURES_LOG_PATH}')" && export CLAUDE_CODE_OAUTH_TOKEN="$_plan_token"`]
+            : [`&& export CLAUDE_CONFIG_DIR='${opts.config.isolatedConfigDir}' && export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`])
       : opts.config.fleetToken
         ? [`&& export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`]
         : []),
@@ -837,6 +892,13 @@ export function buildMainSessionRespawnCmd(opts: {
     ...(opts.model ? ['--model', shSingleQuote(opts.model)] : []),
     [`--channels plugin:${opts.pluginId}`, ...(opts.extraPluginIds ?? []).map((p) => `plugin:${p}`)].join(' '),
   ].join(' ')
+}
+
+// The *_STATE_DIR export every main-session respawn must carry -- the same
+// directory channels.sh resolves at boot (install-scoped, or the legacy shared
+// dir on a not-yet-migrated install).
+export function mainChannelStateEnv(provider: ChannelProviderType): { name: string; dir: string } {
+  return { name: channelStateDirEnvVar(provider), dir: channelStateDir(provider) }
 }
 
 // FRESH respawn of the main channels session, for hosts with no launchd.
@@ -871,15 +933,39 @@ export function respawnMainSessionFresh(): void {
   const claudeCmd = buildMainSessionRespawnCmd({
     claudePath: claudeBin(),
     pluginId: provider.pluginId,
-    provider: provider.type,
     extraPluginIds: readExtraChannelPluginIds(),
+    channelStateEnv: mainChannelStateEnv(provider.type),
     model: readConfiguredMainModel(),
     // The main session always starts a new conversation -- this is the whole
     // point of the nightly restart (drop the accumulated context).
     continueSession: false,
     config: resolveMainConfigDecision(),
   })
-  execFileSync(tmuxBin(), ['respawn-pane', '-k', '-t', MAIN_CHANNELS_SESSION, claudeCmd], { timeout: 15000 })
+  // c5296a52: the two reaps above kill the pane's claude, and channels.sh starts the session
+  // WITHOUT remain-on-exit -- so the pane and the session can already be gone by the time we get
+  // here. `respawn-pane -k` then throws "can't find pane", the caller only logs it, lastRestart
+  // stays unset, and the slot stays DUE: every idle tick tries again (176 'restart failed' lines
+  // between 03:00Z and 08:01Z on 2026-09-18, one attempt every 6-7 minutes).
+  //
+  // When the session is gone we do NOT hand-roll a tmux new-session here: createMainChannelsSession()
+  // already runs channels.sh -- the same path the guard uses -- with the first-run dialog handling,
+  // the /rename and the plugin bring-up. A second, bespoke launch command is exactly how the two
+  // paths drift apart. 'grace' means a launch is already in flight and the session is booting;
+  // that is a success for our purposes (something IS coming up), not a failure to retry.
+  if (mainChannelsSessionExists()) {
+    execFileSync(tmuxBin(), ['respawn-pane', '-k', '-t', MAIN_CHANNELS_SESSION, claudeCmd], { timeout: 15000 })
+  } else {
+    const created = createMainChannelsSession()
+    logger.warn({ session: MAIN_CHANNELS_SESSION, created },
+      'respawnMainSessionFresh: session gone after reap, relaunched via channels.sh')
+    if (!mainRelaunchSucceeded(created)) {
+      throw new Error(`main channels session gone and relaunch failed: ${created}`)
+    }
+    // A fresh session starts its own claude: the respawn-specific follow-ups below
+    // (identity, plugin unlock) are channels.sh's job on this path, not ours.
+    writeRespawnStamp()
+    return
+  }
   // Stamp IMMEDIATELY after the respawn, before the scheduling follow-ups.
   // The stamp is a coordination contract, not bookkeeping: five watchers read
   // lastMainRespawnAt() / store/.channel-last-respawn and suppress themselves
@@ -944,8 +1030,8 @@ export async function resumeMarveenSession(): Promise<boolean> {
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: claudeBin(),
       pluginId: provider.pluginId,
-    provider: provider.type,
       extraPluginIds: readExtraChannelPluginIds(),
+      channelStateEnv: mainChannelStateEnv(provider.type),
       model: readConfiguredMainModel(),
       continueSession: true,
       // Parity with channels.sh: a recovery respawn must also land on the
@@ -1203,8 +1289,8 @@ function respawnMarveenSessionFresh(): boolean {
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: claudeBin(),
       pluginId: provider.pluginId,
-    provider: provider.type,
       extraPluginIds: readExtraChannelPluginIds(),
+      channelStateEnv: mainChannelStateEnv(provider.type),
       model: readConfiguredMainModel(),
       continueSession: false,
       // Same channels.sh-bypass concern as resumeMarveenSession: this fresh
@@ -1544,6 +1630,38 @@ const KEEPALIVE_RESPAWN_GRACE_MS = 15 * 60 * 1000 // let a respawned session re-
 const KEEPALIVE_LIVENESS_TRUST_CEILING_MS = 45 * 60 * 1000
 let marveenLastKeepaliveRespawn = 0
 
+// LOOP BREAKER (KEEPALIVELOOP923). Measured 2026-09-23: the keepalive producer
+// (launchd probe) hung, the file stayed stale from ~01:34 with a LIVE poller,
+// and this path respawned a healthy main session 28 times (02:19-13:32), each
+// time losing the conversation and alerting the owner. A respawn cannot fix a
+// dead PRODUCER. So: when the poller is alive and the file has NOT advanced
+// since our previous keepalive respawn, count it as a useless respawn; after
+// KEEPALIVE_USELESS_RESPAWN_LIMIT of them stop respawning, alert ONCE, and
+// resume normal behaviour as soon as the file moves again. A dead poller is
+// real deafness and is never held back by this breaker.
+export const KEEPALIVE_USELESS_RESPAWN_LIMIT = 2
+let keepaliveUselessRespawns = 0
+let keepaliveMtimeAtLastRespawn: number | null = null
+let keepaliveLoopAlerted = false
+
+export type KeepaliveLoopDecision = 'respawn' | 'hold' | 'hold-and-alert'
+
+export function decideKeepaliveLoop(opts: {
+  pollerAlive: boolean
+  keepaliveMtimeMs: number | null
+  mtimeAtLastRespawn: number | null
+  uselessRespawns: number
+  alreadyAlerted: boolean
+  limit: number
+}): { decision: KeepaliveLoopDecision; uselessRespawns: number } {
+  if (!opts.pollerAlive) return { decision: 'respawn', uselessRespawns: 0 }
+  const advanced = opts.mtimeAtLastRespawn == null || opts.keepaliveMtimeMs == null
+    || opts.keepaliveMtimeMs > opts.mtimeAtLastRespawn
+  const useless = advanced ? 0 : opts.uselessRespawns + (opts.mtimeAtLastRespawn == null ? 0 : 1)
+  if (useless < opts.limit) return { decision: 'respawn', uselessRespawns: useless }
+  return { decision: opts.alreadyAlerted ? 'hold' : 'hold-and-alert', uselessRespawns: useless }
+}
+
 /**
  * Pure decision: should the keepalive respawn be deferred because the
  * main session pane is actively busy?
@@ -1652,11 +1770,13 @@ function checkMainKeepaliveStaleness(): void {
   // during idle periods, each one losing the running --continue context).
   // The bun-child check is the same liveness signal channel-plugin-unlock
   // already uses; reuse it here so the two paths agree on "alive".
+  let pollerAlive = false
   try {
     const claudePid = getClaudePidForSession(MAIN_CHANNELS_SESSION)
     if (claudePid != null) {
       const provider = getProvider(getMainAgentProvider())
       if (hasChannelPluginAlive(claudePid, provider.type)) {
+        pollerAlive = true
         // A live poller is trusted only while the keepalive is freshly stale.
         // Past KEEPALIVE_LIVENESS_TRUST_CEILING_MS a live-but-non-delivering
         // poller reads as deafness, so we do NOT skip -- we fall through to the
@@ -1683,6 +1803,14 @@ function checkMainKeepaliveStaleness(): void {
     ageMs = null // file missing -> keep-alive not yet established
   }
   const now = Date.now()
+  const keepaliveMtimeMs = ageMs == null ? null : now - ageMs
+  if (keepaliveLoopAlerted && keepaliveMtimeAtLastRespawn != null && keepaliveMtimeMs != null
+      && keepaliveMtimeMs > keepaliveMtimeAtLastRespawn) {
+    logger.info('Keepalive advanced again -- loop breaker released')
+    keepaliveLoopAlerted = false
+    keepaliveUselessRespawns = 0
+    keepaliveMtimeAtLastRespawn = null
+  }
   // B2 fix: cross-path grace — use the later of the two respawn timestamps so
   // an inbound-probe respawn also suppresses the keepalive path for the grace window.
   const msSinceLastRespawn = lastMainRespawnAt() ? now - lastMainRespawnAt() : null
@@ -1704,8 +1832,26 @@ function checkMainKeepaliveStaleness(): void {
     return
   }
   const ageMin = Math.round((ageMs ?? 0) / 60000)
+  const loop = decideKeepaliveLoop({
+    pollerAlive,
+    keepaliveMtimeMs,
+    mtimeAtLastRespawn: keepaliveMtimeAtLastRespawn,
+    uselessRespawns: keepaliveUselessRespawns,
+    alreadyAlerted: keepaliveLoopAlerted,
+    limit: KEEPALIVE_USELESS_RESPAWN_LIMIT,
+  })
+  keepaliveUselessRespawns = loop.uselessRespawns
+  if (loop.decision !== 'respawn') {
+    if (loop.decision === 'hold-and-alert') {
+      keepaliveLoopAlerted = true
+      logger.warn({ ageMs, uselessRespawns: loop.uselessRespawns }, 'Keepalive loop breaker: respawns did not advance the keepalive while the poller is alive -- holding further respawns (KEEPALIVELOOP923)')
+      sendAlert(`⚠️ A fő channel keep-alive ${ageMin} perce nem frissül, de a Telegram-poller él, és ${loop.uselessRespawns} újraindítás sem segített. További újraindítást NEM csinálok (csak a beszélgetést vinné el). Valószínűleg a jelző-forrás akadt el: nézd meg a com.marveen.channel-keepalive-probe launchd jobot és a store/channel-keepalive-probe.log-ot. Ha a jelző újra frissül, a figyelő magától visszaáll.`)
+    }
+    return
+  }
   logger.warn({ ageMs, paneState }, 'Channel keep-alive stale -- main session likely wedged/deaf, respawning via respawn-pane')
   sendRoutineAlert('keepalive-respawn', `⚠️ A fő channel keep-alive ${ageMin} perce nem frissült -- respawn-pane a ${MAIN_CHANNELS_SESSION} session-on (a beszelgetes elveszik, memoria marad).`)
+  keepaliveMtimeAtLastRespawn = keepaliveMtimeMs
   if (respawnMarveenSessionFresh()) {
     marveenLastKeepaliveRespawn = now
     // Suppress the process-down handler during the respawn window (reuses the
@@ -1742,7 +1888,13 @@ async function handleMarveenDown(): Promise<void> {
     // cause instead of leaving the operator to infer it from a pane scan.
     if (providerLabel === 'telegram' && !marveenDownState.conflictProbed) {
       marveenDownState.conflictProbed = true
-      const tokenPath = join(channelStateDir(providerLabel, PROJECT_ROOT), '.env')
+      // Main-agent token lives at the HOME-default state dir
+      // (~/.claude/channels/<provider>/.env), NOT under PROJECT_ROOT -- every
+      // other main-agent channelStateDir() callsite omits the agentDir arg.
+      // Passing PROJECT_ROOT here pointed at a nonexistent .env, so
+      // readChannelToken returned null and this 409 conflict probe never ran
+      // (the very evidence log that would have named the orphan-poller cause).
+      const tokenPath = join(channelStateDir(providerLabel), '.env')
       const tok = readChannelToken(providerLabel, tokenPath)
       if (tok) {
         probeTelegramConflict(tok)
@@ -1762,6 +1914,24 @@ async function handleMarveenDown(): Promise<void> {
           .catch(err => {
             logger.warn({ err }, 'Telegram conflict probe failed to complete')
           })
+      }
+    }
+    // Before any reconnect/respawn: kill a THIEF poller contending for the
+    // MAIN bot token. The 2026-07-18 "half-afternoon silence" was a
+    // local-agent-mode claude (project settings auto-load the telegram plugin)
+    // grabbing the default-state-dir token and 409-racing the live poller. The
+    // existing recovery restarts the VICTIM, not the thief -- so remove the
+    // thief here and the LIVE poller resumes getUpdates with no respawn. This
+    // reaper is fail-safe: it spares the legit poller (its owning claude is the
+    // channels pane leader) and does nothing when the session can't be resolved.
+    if (providerLabel === 'telegram') {
+      try {
+        const killed = reapForeignMainPollers({ provider: 'telegram', mainSession: MAIN_CHANNELS_SESSION, tmuxPath: tmuxBin() })
+        if (killed.length > 0) {
+          logger.warn({ killed }, 'Marveen down: reaped foreign main-token poller(s) -- live poller should recover without respawn')
+        }
+      } catch (err) {
+        logger.warn({ err }, 'foreign-main poller reap failed (continuing to soft reconnect)')
       }
     }
     if (softReconnectMarveen()) marveenDownState.softAttempts += 1
@@ -1870,6 +2040,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
   const mainProvider = getMainAgentProvider()
 
   let checkRunning = false
+  // MODALOROSHATOKOR922: tick-trace state. Counts skipped ticks and menu passes
+  // so a silent menu pass is measurable (see src/web/monitor-trace.ts -- the
+  // trace does NOT fix the silence, it makes its cause readable from the log).
+  let skipTrace: SkipTraceState = { consecutive: 0 }
+  let ticksSkippedSinceTrace = 0
+  let menuPassesSinceTrace = 0
+  let menuTraceLastAt: number | null = null
   async function check() {
     // Re-entrancy guard: check() now awaits the tmux-driving sends (async), and
     // setInterval fires on a fixed cadence regardless of whether the prior tick
@@ -1878,9 +2055,20 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     // stacked restarts / duplicate re-injects). State advances each tick, so a
     // skipped tick is picked up by the next one.
     if (checkRunning) {
-      logger.debug('channel-monitor: previous check still running, skipping this tick')
+      const skip = decideSkipTrace(skipTrace)
+      skipTrace = skip.next
+      ticksSkippedSinceTrace++
+      if (skip.emit) {
+        // INFO on purpose: a check() wedged behind a hung await would otherwise
+        // skip every tick at DEBUG, and the monitor's silence would look exactly
+        // like "nothing to report" (measured 2026-09-22, MODALOROSHATOKOR922).
+        logger.info({ consecutiveSkips: skipTrace.consecutive }, 'channel-monitor: previous check still running -- consecutive ticks skipped')
+      } else {
+        logger.debug('channel-monitor: previous check still running, skipping this tick')
+      }
       return
     }
+    skipTrace = { consecutive: 0 }
     checkRunning = true
     try {
     // Restore persisted failure counts on first tick so a dashboard restart
@@ -1940,8 +2128,12 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     // the thinking-block error this is safe to auto-recover. Same debounce
     // machine as the error pass (alert == "recover now") so a one-tick frame
     // never fires and the Escape is not re-sent every tick.
+    let menuTargetsWalked = 0
+    let menuTargetsInMenu = 0
+    let menuTargetsFirstRun = 0
     for (const t of targets) {
       const pane = capturePane(t.session)
+      menuTargetsWalked++
       // First-run gates (fresh-install folder-trust / bypass acceptance /
       // login picker) are detected SEPARATELY from generic blocking menus,
       // because the recovery differs: Escape on the trust/bypass dialogs
@@ -1952,6 +2144,8 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       // login picker is alert-only (nobody can log in on the operator's behalf).
       const firstRunGate = pane != null ? detectsFirstRunGate(pane) : null
       const inMenu = firstRunGate != null || (pane != null && detectsBlockingMenu(pane))
+      if (firstRunGate != null) menuTargetsFirstRun++
+      if (inMenu) menuTargetsInMenu++
       const prev = paneMenuState.get(t.session) ?? { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
       const decision = decidePaneErrorAlert(inMenu, prev, Date.now(), {
         confirmMs: MENU_RECOVER_CONFIRM_MS,
@@ -2017,6 +2211,27 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             sendRoutineAlert(`menu-escape:${label}`, `⌨️ A(z) ${label} session beragadt egy interaktív menübe (pl. /mcp) és nem dolgozott fel üzeneteket. Kiküldtem egy Escape-et, visszatérítettem a prompthoz. Ha ismétlődik: tmux attach -t ${t.session}`)
           }
         }
+      }
+    }
+    // MODALOROSHATOKOR922: the menu pass reports that it RAN, rate-limited to
+    // one INFO line per interval. Without this a pass that walks every target
+    // and sees nothing is byte-identical in the log to a pass that never ran.
+    // The line does not change what the pass does; it only makes its silence
+    // measurable -- see src/web/monitor-trace.ts for the measured incident.
+    menuPassesSinceTrace++
+    {
+      const traceNow = Date.now()
+      if (decideMenuPassTrace(menuTraceLastAt, traceNow)) {
+        logger.info({
+          targets: menuTargetsWalked,
+          inMenu: menuTargetsInMenu,
+          firstRunGates: menuTargetsFirstRun,
+          passesSinceLastTrace: menuPassesSinceTrace,
+          ticksSkippedSinceLastTrace: ticksSkippedSinceTrace,
+        }, 'channel-monitor: menu-pass trace')
+        menuTraceLastAt = traceNow
+        menuPassesSinceTrace = 0
+        ticksSkippedSinceTrace = 0
       }
     }
 
@@ -2350,6 +2565,19 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
       } catch (err) {
         logger.warn({ err }, 'channel-monitor: periodic detached-claude reap failed')
+      }
+      // Also sweep foreign MAIN-token pollers (a thief that never fully tripped
+      // the down cascade -- flapping getUpdates when a local-agent-mode subagent
+      // holds the token intermittently). Telegram only; fail-safe internally.
+      if (getMainAgentProvider() === 'telegram') {
+        try {
+          const killed = reapForeignMainPollers({ provider: 'telegram', mainSession: MAIN_CHANNELS_SESSION, tmuxPath: tmuxBin() })
+          if (killed.length > 0) {
+            logger.warn({ killed }, 'channel-monitor: periodic reap removed foreign main-token poller(s)')
+          }
+        } catch (err) {
+          logger.warn({ err }, 'channel-monitor: periodic foreign-main poller reap failed')
+        }
       }
     }
     } finally {

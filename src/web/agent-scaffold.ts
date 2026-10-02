@@ -9,6 +9,7 @@ import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { findDuplicateJsonKeys } from './json-dup-keys.js'
 import { logger } from '../logger.js'
+import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
 import { agentDir, agentConfigRoot, listAgentNames, readAgentCapabilities, readAgentToolDeny } from './agent-config.js'
 import { resolveProfilePlaceholders, type ProfileTemplate } from './profiles.js'
 import { sanitizeCapabilityTag, CAPABILITY_TAG_MAX_PER_AGENT } from '../prompt-safety.js'
@@ -346,6 +347,90 @@ export function hookScriptAlreadyEffectiveInOtherScope(
   } catch { return false }
 }
 
+// HOSTMOVE923: install-anchored absolute paths survive a host move.
+//
+// The scaffold bakes PROJECT_ROOT into two places as an ABSOLUTE path: the
+// curl recipes in every agent's CLAUDE.md (deliberately absolute -- a relative
+// `store/.dashboard-token` 401s from agents/<name>/, measured 2026-07-25, see
+// `tokenPath` above) and the PreCompact agent-hook prompt in settings.json.
+// Both are written once and never re-derived, so after the store/ and agents/
+// trees are copied to a machine with a different home or install dir the
+// recipes keep naming the OLD root. `cat` of a missing token file yields an
+// empty Bearer, every call 401s, and nothing alerts. Measured 2026-09-23 on
+// the book -> mini move: all four sub-agents' CLAUDE.md (5 lines each) and
+// PreCompact prompts (5 occurrences each) still named /Users/<old-user>/...
+// for a full day while the hook backfill logged "backfilled" -- it only ADDS
+// missing entries, it never re-reads an existing prompt.
+//
+// The fix stays with absolute paths (the relative form is the measured 401)
+// and instead re-anchors them on every boot: any absolute path that ends in
+// one of the install-anchored suffixes below but starts with a root other
+// than the CURRENT PROJECT_ROOT is rewritten to the current root. Suffixes,
+// not a remembered old root, are the detector, so it needs no migration
+// record and is idempotent: a second run finds nothing foreign.
+const INSTALL_ANCHORED_SUFFIXES = ['/store/.dashboard-token', '/scripts/hooks/', '/scripts/skill-index.sh'] as const
+// An absolute path prefix: starts with a `/` that is not the tail of something
+// else (`~/x`, `{{X}}/x`, `a/x` are not absolute roots -- the lookbehind keeps
+// them out), runs until the suffix, and never crosses whitespace, quotes,
+// backticks or brackets -- so `$(cat /a/b/store/…)` captures `/a/b`, not
+// `$(cat`. Lazy, so the prefix is the shortest root that makes the suffix
+// follow.
+const FOREIGN_ROOT_RE = new RegExp(
+  `(?<![\\w~}.\\-/])(/[^\\s"'\`()<>\\[\\]]*?)(${INSTALL_ANCHORED_SUFFIXES.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`,
+  'g',
+)
+
+export interface ForeignRootRewrite {
+  text: string
+  /** Number of path occurrences re-anchored. 0 means `text` is unchanged. */
+  replaced: number
+  /** Distinct foreign roots that were replaced, for the log line. */
+  foreignRoots: string[]
+}
+
+/**
+ * Re-anchor install-anchored absolute paths onto `currentRoot`. Pure; exported
+ * for unit tests. A path already under `currentRoot` is left byte-identical,
+ * and text with no such path comes back with replaced=0.
+ */
+export function rewriteForeignProjectRoot(text: string, currentRoot: string): ForeignRootRewrite {
+  const root = currentRoot.replace(/\/+$/, '')
+  const foreign = new Set<string>()
+  let replaced = 0
+  const out = text.replace(FOREIGN_ROOT_RE, (whole, prefix: string, suffix: string) => {
+    if (prefix === root) return whole
+    foreign.add(prefix)
+    replaced++
+    return root + suffix
+  })
+  return { text: out, replaced, foreignRoots: [...foreign] }
+}
+
+/**
+ * In-place pass over an agent's hooks block: every `prompt` string (the
+ * `type: "agent"` hooks -- PreCompact today) gets its install-anchored paths
+ * re-anchored on `currentRoot`. Commands are NOT touched here: they are
+ * owned by upgradeLegacyHookCommands (basename-matched to the template).
+ * Exported for unit tests.
+ */
+export function upgradeForeignRootInHookPrompts(existingHooks: Record<string, unknown>, currentRoot: string): boolean {
+  let changed = false
+  for (const entries of Object.values(existingHooks)) {
+    if (!Array.isArray(entries)) continue
+    for (const entry of entries as HookEntry[]) {
+      for (const hook of entry.hooks ?? []) {
+        if (typeof hook.prompt !== 'string') continue
+        const r = rewriteForeignProjectRoot(hook.prompt, currentRoot)
+        if (r.replaced > 0) {
+          hook.prompt = r.text
+          changed = true
+        }
+      }
+    }
+  }
+  return changed
+}
+
 // Idempotent migration: every agent's settings.json should carry the
 // PreCompact hook (memory save + skill reflection). Pre-refactor agents
 // were scaffolded before scaffoldAgentDir seeded the template, so their
@@ -404,6 +489,9 @@ export function ensureAgentHooks(
     //   3. Sync the timeout of any command hook whose command matches but timeout differs.
     const existingHooks = existing.hooks as Record<string, unknown>
     let changed = upgradeLegacyHookCommands(existingHooks, tplHooks)
+    // HOSTMOVE923: an existing PreCompact prompt inherited from another
+    // install/host names a dead root; the add pass below would never see it.
+    if (upgradeForeignRootInHookPrompts(existingHooks, PROJECT_ROOT)) changed = true
     // Matcher pass: a widened template matcher (e.g. SessionStart gaining
     // `clear`) must reach agents whose command string is unchanged.
     if (syncHookMatchers(existingHooks, tplHooks)) changed = true
@@ -641,6 +729,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   }
   if (agentGetsTelegramCopyGate(name)) injectTelegramCopyGate(existing)
   injectEgressGate(existing)
+  if (agentGetsBashEgressParser(name)) injectBashEgressParser(existing)
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
 }
 
@@ -809,12 +898,16 @@ const SELF_PACE_TOOL_DENY = ['ScheduleWakeup', 'CronCreate', 'CronDelete', 'Cron
 //     `allow`, so "any http:// host except localhost" is NOT expressible: a
 //     `*http://*` rule would also match the dashboard's own
 //     `http://localhost:<WEB_PORT>/` calls and mute the entire fleet (memory,
-//     kanban, message queue, approvals all ride that URL). The residual gap is
-//     stated out loud rather than papered over:
-//     plain-http external fetches, an interpreter one-liner (python3 -c,
-//     node -e), and a URL hidden in a shell variable all still pass. Closing
-//     those needs a Bash PreToolUse hook that parses the command, which is a
-//     separate and larger decision.
+//     kanban, message queue, approvals all ride that URL). This list alone
+//     lets through plain-http external fetches, an interpreter one-liner
+//     (python3 -c, node -e), and a URL hidden in a shell variable. On
+//     SUB-AGENTS those three shapes are now closed by the Bash PreToolUse hook
+//     scripts/hooks/bash-egress-parser.mjs (EGRESSPARSER923), which parses the
+//     command and always lets localhost through. It is a longer named list,
+//     not a complete one: a script file, a heredoc-fed interpreter, a URL built
+//     from pieces, and every other network-capable binary still pass, and the
+//     main agent is not covered by the hook. Closing those needs an allowlist
+//     or network-level gate, which is a separate owner decision.
 export const BASH_EGRESS_DENY = [
   // curl: the https:// form only -- see the localhost note above.
   'Bash(curl *https://*)',
@@ -1016,6 +1109,41 @@ export function injectEgressGate(existing: Record<string, unknown>): void {
   ]
 }
 
+// Which agents get the Bash egress parser (EGRESSPARSER923): every sub-agent,
+// NOT the main agent -- the same population the BASH_EGRESS_DENY list binds on
+// every install. The main agent's Bash deny lands only in its OWN config dir
+// (bashEgressDenyTargetPath), because the shared ~/.claude is also the owner's
+// interactive shell; a hook in the repo-shipped project settings would bind the
+// owner's sessions in this project the same way. Widening it to the main agent
+// is a separate owner decision, not a side effect of this gate.
+export function agentGetsBashEgressParser(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+// Idempotently wire the bash-egress-parser PreToolUse hook. It closes the three
+// shapes BASH_EGRESS_DENY names as open (plain-http curl, an interpreter
+// one-liner with a network primitive, a URL hidden in a variable) by PARSING the
+// command, with localhost always allowed. See the script header for what stays
+// open. The dedupe key is the script basename, which deliberately does NOT
+// contain 'egress-gate.mjs' -- injectEgressGate's filter would drop it.
+export function injectBashEgressParser(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'bash-egress-parser.mjs'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('bash-egress-parser.mjs')),
+    entry,
+  ]
+}
+
 // Which Telegram tools carry copyable text out of the install. `reply` is the
 // send route; `edit_message` rewrites a message already on the phone and can
 // just as easily replace a working code block with a broken one.
@@ -1123,6 +1251,34 @@ export function ensureEgressGate(name: string): boolean {
   if (isUnsafeHookCommand(command)) return false
   injectEgressGate(settings)
   if (name !== MAIN_AGENT_ID) mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Idempotent migration for the EXISTING fleet: the scaffold only rewrites a
+// sub-agent's settings on spawn, so without this the parser would reach the
+// running agents no sooner than their next respawn. Returns true if written.
+// A settings file that is not there is not created: a sub-agent without one
+// has never been spawned, and its first spawn writes the hook.
+export function ensureBashEgressParser(name: string): boolean {
+  if (!agentGetsBashEgressParser(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'bash-egress-parser.mjs'))
+  const hooks = (settings.hooks && typeof settings.hooks === 'object')
+    ? settings.hooks as Record<string, unknown>
+    : {}
+  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
+  // Wired only when the entry carries the CURRENT command under the Bash
+  // matcher: a stale node path or a different matcher is silently
+  // non-enforcing, so both fall through to an in-place replace.
+  const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === 'Bash'
+    && hookCommandWired(JSON.stringify(e), command))
+  if (wired) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectBashEgressParser(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }
@@ -1641,14 +1797,28 @@ export function scaffoldAgentDir(name: string) {
   if (!existsSync(memoryMd)) writeFileSync(memoryMd, '')
   const mcpJson = join(dir, '.mcp.json')
   if (!existsSync(mcpJson)) {
-    // Copy shared MCP config so agents get access to common tools (e.g. aiam-blog)
+    // MCPOROKLES923: a new agent inherits from the project-root .mcp.json ONLY the
+    // servers on AGENT_INHERITED_MCP_SERVERS (mcp-inheritance.ts). This used to be a
+    // plain copy, so whatever the operator put into the root -- a mail connector is a
+    // natural thing to put there -- reached every new agent unasked.
     const sharedMcp = join(PROJECT_ROOT, '.mcp.json')
+    let inherited: Record<string, unknown> = { mcpServers: {} }
     if (existsSync(sharedMcp)) {
-      copyFileSync(sharedMcp, mcpJson)
-    } else {
-      // Valid empty shape -- `claude /doctor` rejects plain "{}"
-      atomicWriteFileSync(mcpJson, JSON.stringify({ mcpServers: {} }, null, 2))
+      try {
+        const parsed = JSON.parse(readFileSync(sharedMcp, 'utf-8')) as Record<string, unknown>
+        const servers = parsed && typeof parsed.mcpServers === 'object' && parsed.mcpServers !== null && !Array.isArray(parsed.mcpServers)
+          ? parsed.mcpServers as Record<string, unknown>
+          : {}
+        const { kept, dropped } = filterInheritableMcpServers(servers, readInheritableMcpServerNames())
+        logNotInherited(name, 'scaffold', dropped)
+        inherited = { ...parsed, mcpServers: kept }
+      } catch (err) {
+        // Unparseable root config: inherit nothing rather than copy what we cannot filter.
+        logger.warn({ err, name }, 'MCP inheritance: project .mcp.json unreadable, new agent inherits no servers')
+      }
     }
+    // Valid empty shape when nothing is inherited -- `claude /doctor` rejects plain "{}"
+    atomicWriteFileSync(mcpJson, JSON.stringify(inherited, null, 2))
   }
   // Seed settings.json from template so the agent gets the PreCompact
   // hook (memory save + skill reflection) out of the box. Only if the
@@ -1814,7 +1984,8 @@ function buildAutonomyBody(name: string): string {
     `{"from":"${name}","to":"${MAIN_AGENT_ID}","content":"[FELHÍVÁS] CATEGORY_KEY: MIT akartam elvégezni, de level 1 miatt csak jelzek."}`,
     'JSON',
     '```',
-    'FIGYELEM, a `-d "{...}"` DUPLA idézőjeles alak TILOS inter-agent üzenetnél: a shell a backtickot',
+    'FIGYELEM, a `-d "{...}"` DUPLA idézőjeles alak TILOS **MINDEN API-payloadnál** -- inter-agent',
+    'üzenet, memória-mentés és -PATCH, napi napló, eset-jegyzet, kanban egyaránt: a shell a backtickot',
     'és a `$(...)`-t végrehajtja a payloadon belül, a szöveg helyére a parancs KIMENETE kerül, és a',
     'küldés HTTP 200-at ad -- semmi nem jelzi. Idézett heredoc (fent) vagy `--data-binary @fájl`.',
     'A header `$(cat ...)`-ja szándékosan interpolál, az maradhat.',
@@ -1822,6 +1993,10 @@ function buildAutonomyBody(name: string): string {
     "mint a dupla idézőjel, csak a `<<'JSON'` nem. És mivel az idézettben semmit nem lehet",
     'behelyettesíteni, ha a payloadba EGY változó is kell, ne a shell állítsa össze: `python3` +',
     '`json.dumps` (vagy `jq`) írja fájlba, és `curl --data-binary @fájl` küldje.',
+    'Nem az üzenet-típus számít, hanem hogy a szöveg BACKTICKET vagy `$(...)`-t tartalmaz-e: egy',
+    '`python3 -c "..."` dupla idézőjeles parancsban a backtickkel körbevett mezőnevek parancsként futnak le',
+    '("command not found"), és némán kiesnek a mentett szövegből, miközben a mentés HTTP 200-at ad.',
+    'Ezért csak az ÍRÁS UTÁNI VISSZAOLVASÁS fogja meg.',
     '',
     '**Level 2 (jóváhagyás szükséges)**: kérj jóváhagyást az API-n MIELŐTT cselekszel.',
     '',
@@ -1869,7 +2044,38 @@ export function recipientLedgerEnabledForScaffold(): boolean {
   return !(v === 'off' || v === '0' || v === 'false')
 }
 
-export function buildEvidenceBody(ledgerOn: boolean = recipientLedgerEnabledForScaffold()): string {
+// `isMainAgent`: the recipient-ledger hook (scripts/email-send-gate.mjs) is
+// wired ONLY into sub-agent settings (writeAgentSettingsFromProfile, guarded by
+// `name !== MAIN_AGENT_ID`); the main agent's own sends go through the
+// approval gate (envelope-hash approval) and the Hungarian copy gate under
+// scripts/hooks/, neither of which reads the ledger. The hook FILE NAMES are
+// deliberately not written into the generated text: the seeding-surface scan in
+// hook-registration-completeness.test.ts reads this file as a corpus and would
+// take a name mention for a registration.
+// Measured 2026-09-22 (LEDGERFOAGENS922): the main agent's settings carry no
+// email-send-gate entry and its two email hooks contain zero ledger references.
+// The same paragraph cannot be true for both audiences: for a sub-agent the
+// ledger IS a machine gate, for the main agent it is NOT. Wiring the ledger for
+// the main agent is a separate owner decision; this text only stops promising a
+// protection that is not there.
+// FORK: with EMAIL_RECIPIENT_LEDGER=off the ledger gate is off for EVERY audience, so both
+// get the same switched-off paragraph; with it on, the main/sub split above applies.
+export function buildEvidenceBody(isMainAgent = false, ledgerOn: boolean = recipientLedgerEnabledForScaffold()): string {
+  const gateParagraphs: string[] = !ledgerOn
+    ? [
+        'Ezen a telepítésen a címzett-ledger (`store/verified-recipients.json`) KI van kapcsolva (`EMAIL_RECIPIENT_LEDGER=off` a gyökér `.env`-ben, tulajdonosi döntés 2026-09-23): a kimenő levél `to`/`cc`/`bcc` címeit a PreToolUse hook NEM méri ledgerhez, bárkinek írható levél és piszkozat. A forrás-szabály ettől nem gyengül: a cím továbbra is forrásból jön (From fejléc, élő oldal, rendelés, szerződés), és a forrást a levél kísérőjében vagy a kártyán nevezd meg. Ha a kapcsolót visszaveszik, a címek felvétele:',
+      ]
+    : isMainAgent
+    ? [
+        'Kimenő levélnél a címzett-ledger (`store/verified-recipients.json`) **nálad NEM gépi kapu**: az `email-send-gate.mjs` hook csak a sub-ügynökök settingsébe van bekötve, a tiédbe nem (mérve 2026-09-22). Ami nálad fut, az a jóváhagyás-kapu (a küldés csak a boríték -- címzett, cc, bcc, tárgy, törzs -- hash-ére adott, el nem használt jóváhagyás mellett megy át) és a magyar copy-kapu (ékezet és szöveg-QA a küldés előtt), mindkettő a `scripts/hooks/` alatt. Ezek a KÜLDÉST szigorúan kapuzzák, de a **címet nem mérik a ledgerhez**: egy rossz cím pontosan úgy megy be a jóváhagyásba, ahogy te írtad. A címforrás-szabály nálad tehát szabály, nem gép -- ne olvasd védelemnek ott, ahol nincs.',
+        '',
+        'A ledger ettől még a flottáé: a sub-ügynökök küldését méri, és ha nekik kell egy cím, forrással veszed fel. A ledger bekötése a fő ügynökre külön, gazda-döntés: magadtól ne kösd be, és ne is számolj vele, amíg nincs bekötve.',
+      ]
+    : [
+        'Kimenő levélnél van gépi kapu is, de **szűkebb, mint a szabály** -- és a különbség csendes, ezért tudni kell róla. Amit a PreToolUse hook lát: a `to`/`cc`/`bcc` mezőt **hordozó** tool-hívást (küldés, piszkozat). Azt a `store/verified-recipients.json` ledgerhez méri, és ismeretlen címre nem engedi át. **Amit NEM lát: a szkriptbe zárt címet.** Ha a levelet egy futtatott szkript állítja össze (`python3 kuldes.py`), a címzett a hook elől rejtve marad; ezt a kapu forrása maga mondja ki, mert tetszőleges értelmezőkód statikus elemzése eldönthetetlen. A gépi kapu tehát a szabály EGY részét fedi le, a maradékot a szabály tartja -- **ne olvasd védelemnek ott, ahol nincs.**',
+        '',
+        'És egy következmény, ami a hiányzó ledgerből jön: amíg a `verified-recipients.json` nem létezik, a kapu fail-closed, tehát MINDEN címet hordozó küldés tiltott. Ez helyes irány, de ha egy jóváhagyott, ismétlődő feladat emiatt akad el, a helyes lépés a **cím felvétele forrással** -- nem a kapu megkerülése egy szkripttel. Ha megkerülnéd, állj meg és jelezd.',
+      ]
   return [
     '## Tények és találgatás',
     '',
@@ -1904,19 +2110,11 @@ export function buildEvidenceBody(ledgerOn: boolean = recipientLedgerEnabledForS
     '',
     'Ha nem találsz forrást, ez a válasz: "ezt a címet/számot nem találom sehol". Ez teljes értékű, és sokkal olcsóbb, mint egy jó levél, ami senkihez nem ér el.',
     '',
-    ...(ledgerOn ? [
-      'Kimenő levélnél ez gépi kapu is, nem csak szabály: a `to`/`cc`/`bcc` minden címét a `store/verified-recipients.json` ledgerhez méri a PreToolUse hook, és ismeretlen címre még piszkozatot sem enged. Új cím felvétele forrás megnevezésével:',
-      '',
-      '```bash',
-      `node ${join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs')} add <cim> --source mail:<messageId>|site:<url>|owner|crm:<ref>|order:<id>|doc:<ref> --note "<honnan>"`,
-      '```',
-    ] : [
-      'Ezen a telepítésen a címzett-ledger (`store/verified-recipients.json`) KI van kapcsolva (`EMAIL_RECIPIENT_LEDGER=off` a gyökér `.env`-ben, tulajdonosi döntés 2026-09-23): a kimenő levél `to`/`cc`/`bcc` címeit a PreToolUse hook NEM méri ledgerhez, bárkinek írható levél és piszkozat. A forrás-szabály ettől nem gyengül: a cím továbbra is forrásból jön (From fejléc, élő oldal, rendelés, szerződés), és a forrást a levél kísérőjében vagy a kártyán nevezd meg. Ha a kapcsolót visszaveszik, a címek felvétele:',
-      '',
-      '```bash',
-      `node ${join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs')} add <cim> --source mail:<messageId>|site:<url>|owner|crm:<ref>|order:<id>|doc:<ref> --note "<honnan>"`,
-      '```',
-    ]),
+    ...gateParagraphs,
+    '',
+    '```bash',
+    `node ${join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs')} add <cim> --source mail:<messageId>|site:<url>|owner|crm:<ref>|order:<id>|doc:<ref> --note "<honnan>"`,
+    '```',
   ].join('\n')
 }
 
@@ -1932,7 +2130,7 @@ export function ensureEvidenceSection(name: string): void {
     : join(agentDir(name), 'CLAUDE.md')
   if (!existsSync(claudeMdPath)) return
 
-  const block = `${EVIDENCE_BEGIN}\n${buildEvidenceBody()}\n${EVIDENCE_END}`
+  const block = `${EVIDENCE_BEGIN}\n${buildEvidenceBody(name === MAIN_AGENT_ID)}\n${EVIDENCE_END}`
 
   let existing: string
   try {
@@ -1980,6 +2178,70 @@ export function ensureMcpListChannelSection(name: string): void {
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
+
+  if (updated === existing) return
+  atomicWriteFileSync(claudeMdPath, updated)
+}
+
+// ---- Message close: notify:false for an incoming report (ACKONCLOSE927) ----
+//
+// Closing a message (PUT /api/messages/:id, status done/failed) sends an
+// '[Eredmény]' ack back to the original sender by default (routes/messages.ts,
+// shouldNotifyDelegator). For a DELEGATED task that ack is the result; for an
+// INCOMING report or notification it only lengthens the sender's queue and costs
+// it a turn. Measured on an external install (2026-09-27): three closes took the
+// sender's pending queue from 1 to 4. The `notify: false` switch (#1207, released)
+// already lets the closer skip it, but no recipe told any agent about it, so the
+// rule ships as a section: the reader is the agent at the moment it closes.
+const MSGCLOSE_BEGIN = '<!-- BEGIN GENERATED: message-close (auto-generated, do not edit by hand) -->'
+const MSGCLOSE_END = '<!-- END GENERATED: message-close -->'
+const MSGCLOSE_BLOCK_RE = new RegExp(
+  `${MSGCLOSE_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${MSGCLOSE_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+)
+
+export function buildMessageCloseBody(): string {
+  return [
+    '## Üzenet lezárása: bejövő riportnál `notify:false`',
+    '',
+    'Egy neked jött inter-agent üzenetet a `PUT /api/messages/<id>` zár le (`"status":"done"` vagy',
+    '`"failed"`). A lezárás ALAPBÓL egy `[Eredmény] msg_id:<id>` nyugtát küld vissza az eredeti feladónak.',
+    '',
+    '- DELEGÁLT FELADAT (a feladó az eredményre vár): zárd a szokásos módon, a nyugta maga az',
+    '  eredmény -- a `result` mezőbe írd, mit csináltál.',
+    '- BEJÖVŐ RIPORT vagy ÉRTESÍTÉS (a feladó nem vár választ): zárd `"notify":false`-szal. Itt a nyugta',
+    '  csak a feladó sorát növeli, és nála egy ágens-kört visz el (mérve 2026-09-27: három lezárás a',
+    '  feladó várakozó sorát 1-ről 4-re vitte).',
+    '',
+    '```bash',
+    `curl -s -X PUT ${dashboardOrigin}/api/messages/<id> -H "Content-Type: application/json" \\`,
+    `  -H "Authorization: Bearer $(cat ${tokenPath})" --data-binary '{"status":"done","notify":false}'`,
+    '```',
+    'A `notify` csak valódi JSON boolean lehet: a `"false"` string 400-at kap, és ilyenkor a lezárás sem',
+    'történik meg. A `system` feladójú üzenet lezárása eleve nem küld nyugtát.',
+  ].join('\n')
+}
+
+// Idempotently ensures the message-close block is present and current in the
+// agent's CLAUDE.md; same contract as ensureMcpListChannelSection, called from
+// the same two surfaces (web.ts for the main agent, agent-process.ts for the rest).
+export function ensureMessageCloseSection(name: string): void {
+  const claudeMdPath = name === MAIN_AGENT_ID
+    ? join(PROJECT_ROOT, 'CLAUDE.md')
+    : join(agentDir(name), 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return
+
+  const block = `${MSGCLOSE_BEGIN}\n${buildMessageCloseBody()}\n${MSGCLOSE_END}`
+
+  let existing: string
+  try {
+    existing = readFileSync(claudeMdPath, 'utf-8')
+  } catch {
+    return
+  }
+
+  const updated = MSGCLOSE_BLOCK_RE.test(existing)
+    ? existing.replace(MSGCLOSE_BLOCK_RE, block)
+    : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
   atomicWriteFileSync(claudeMdPath, updated)
@@ -2056,6 +2318,30 @@ export function ensureFleetRosterSection(name: string): void {
 
   if (updated === existing) return
   atomicWriteFileSync(claudeMdPath, updated)
+}
+
+// HOSTMOVE923: the CLAUDE.md side of the same re-anchoring (see
+// rewriteForeignProjectRoot above). The generated curl recipes are absolute on
+// purpose; this makes them follow the install when the tree is copied to a
+// different home or directory. Runs on every boot and respawn like the other
+// ensure*Section passes; a file already on the current root is not rewritten.
+// Returns true when the file changed, so the caller can log which agents were
+// re-anchored and from which foreign roots.
+export function ensureProjectRootInClaudeMd(name: string): boolean {
+  const claudeMdPath = join(agentDir(name), 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return false
+  let existing: string
+  try {
+    existing = readFileSync(claudeMdPath, 'utf-8')
+  } catch {
+    return false
+  }
+  const r = rewriteForeignProjectRoot(existing, PROJECT_ROOT)
+  if (r.replaced === 0) return false
+  atomicWriteFileSync(claudeMdPath, r.text)
+  logger.info({ agent: name, replaced: r.replaced, foreignRoots: r.foreignRoots, projectRoot: PROJECT_ROOT },
+    'ensureProjectRootInClaudeMd: install-anchored paths re-anchored on the current PROJECT_ROOT')
+  return true
 }
 
 // SKILLUTCSAPDA822 -> SKILLSGIT914 (2026-09-14, card 37647f9c): the fleet's
@@ -2453,7 +2739,7 @@ Ha a kérdés az, hogy VAN-E EGYÁLTALÁN emlékünk valamiről (hiány-állít�
 
 ### Átsorolás (hot -> cold/warm), amikor egy feladat lezárult
 
-A hot tier árát MINDEN session-indulás újra kifizeti, ezért a lezárt sorokat át kell sorolni.
+A dashboard-memória EGYIK tierje sem töltődik be magától a kontextusodba, se session-induláskor, se üzenetenként: csak az kerül be, amit te magad lekérdezel, és csak abba a fordulóba. Magától a CLAUDE.md, a Claude Code saját fájl-memóriája (a MEMORY.md index és a memory/*.md fájlok) és a SessionStart hookok saját blokkjai töltődnek be. A lezárt sort mégis át kell sorolni: a hot a te "mi van most folyamatban" listád (az alábbi 1. lépés ezt kérdezi le), és egy lezárt sor ott hamis aktív feladatnak látszik.
 Az átsorolás memory_maintenance = level 3, AUTONÓM: a SAJÁT emlékeiden magadtól megteheted.
 
 1. Kell az ID -- a listázó ÉS a kereső ág is visszaadja:
@@ -2464,7 +2750,7 @@ curl -s -X PATCH ${dashboardOrigin}/api/memories/<ID> -H "Content-Type: applicat
 
 Az updated_by az, AKI ÍRT (írás-nyom). Az agent_id mezőt NE küldd: az a sort ÁTADJA másik ágensnek, nem a tier-t állítja.
 
-TÖRLÉS NINCS, ÉS SZÁNDÉKOSAN NE IS LEGYEN. A DELETE /api/memories/:id létezik, de a törlés data_delete = level 1, locked, tehát a gazda döntése. Az átsorolás elég: a költség a hot-halmaz BETÖLTÉSÉBŐL jön, nem a sorok létezéséből.
+TÖRLÉS NINCS, ÉS SZÁNDÉKOSAN NE IS LEGYEN. A DELETE /api/memories/:id létezik, de a törlés data_delete = level 1, locked, tehát a gazda döntése. Az átsorolás elég: a gond a hot-listában álló lezárt sor (hamis aktív feladat), nem a sor létezése.
 
 ## Ütemezett feladatok
 

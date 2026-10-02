@@ -93,6 +93,16 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "slack.*reply",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/slack_progress_reply_clear.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/slack_progress_reply_clear.py; exit 0'",
+            "timeout": 15
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [
@@ -122,6 +132,11 @@
           },
           {
             "type": "command",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/memory-lookup-nudge.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/memory-lookup-nudge.py; exit 0'",
+            "timeout": 3
+          },
+          {
+            "type": "command",
             "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/channel-inbox-drain.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/channel-inbox-drain.py; exit 0'",
             "timeout": 5
           },
@@ -137,12 +152,17 @@
           },
           {
             "type": "command",
-            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/claude-usage.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/claude-usage.py; exit 0'",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/marveen-commands.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/marveen-commands.py; exit 0'",
             "timeout": 45
           }
           ,{
             "type": "command",
             "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/telegram_progress.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/telegram_progress.py; exit 0'",
+            "timeout": 15
+          }
+          ,{
+            "type": "command",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/slack_progress.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/slack_progress.py; exit 0'",
             "timeout": 15
           }
         ]
@@ -177,6 +197,20 @@
             "type": "command",
             "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/telegram_progress_clear.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/telegram_progress_clear.py; exit 0'",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/slack_progress_clear.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/slack_progress_clear.py; exit 0'",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/marveen-commands.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/marveen-commands.py --stop; exit 0'",
+            "timeout": 10
           }
         ]
       }

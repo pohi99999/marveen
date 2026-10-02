@@ -159,7 +159,7 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     default: 30,
     min: 1,
     max: 365,
-    description: 'Ennyi napnál régebbi "done" kártyák automatikusan archiválódnak a listKanbanCards() hívásakor.',
+    description: 'Ennyi napnál régebbi "done" kártyák automatikusan archiválódnak. Az óránként futó kanban-archiváló runner végzi (nem a lekérdezés).',
     module: 'kanban',
     secret: false,
     requiresRestart: false,
@@ -508,6 +508,15 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     valueSet: ['Europe/London', 'Europe/Budapest', 'UTC', 'Europe/Dublin', 'Europe/Berlin', 'Europe/Bucharest', 'America/New_York'],
   },
   {
+    key: 'AGENT_INHERITED_MCP_SERVERS',
+    type: 'string',
+    default: '',
+    description: 'Vesszővel elválasztott MCP-szerver-nevek, amelyeket egy ÚJ ügynök örökölhet (pl. aiam-blog). Minden más kimarad, amíg valaki név szerint oda nem adja. Üresen hagyva az új ügynök semmilyen connectort nem örököl (szűk alapértelmezés). Két helyről örököl: a projekt-gyökér .mcp.json-jából és a közös ~/.claude.json-ból, és a lista mindkettőre vonatkozik. A meglévő ügynöktől semmit nem vesz el. A fő ügynökre nem vonatkozik.',
+    module: 'agents',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
     key: 'DEFAULT_AGENT_MODEL',
     type: 'string',
     default: DISTRIBUTION_DEFAULT_AGENT_MODEL,
@@ -516,8 +525,11 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     secret: false,
     requiresRestart: true,
     valueSet: [
+      // Opus 5.5: ONLY the 1M variant is offered (owner decision 2026-09-23, Marveen 28541).
+      'claude-opus-5-5[1m]',
       'claude-opus-5',
       'claude-opus-5[1m]',
+      'claude-sonnet-5-5',
       'claude-sonnet-5',
       'claude-fable-5',
       'claude-fable-5-1',
@@ -537,6 +549,33 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     type: 'boolean',
     default: '0',
     description: 'Automata Claude-kulcs rotáció: ha a fő agent aktív előfizetése kifogy, automatikusan váltson egy másik regisztrált planre. Előfeltétel: MAIN_AGENT_ISOLATED_CONFIG=1 és legalább 2 regisztrált plan a claude-plans.json-ban. A váltás a fő agent session-jének újraindításával jár.',
+    module: 'claude-plans',
+    secret: false,
+    requiresRestart: false,
+  },
+  // Opt-in: the shared fleet token (store/.claude-oauth-token) follows the
+  // main agent's rotation. Default OFF -- with it off, a rotation touches the
+  // main agent only, exactly as before. Read at rotation time by
+  // POST /api/claude-plans/rotate (src/web/claude-plan-fleet-wiring.ts).
+  {
+    key: 'CLAUDE_ROTATION_FLEET',
+    type: 'boolean',
+    default: '0',
+    description: 'A flotta is kövesse a rotációt: amikor a fő agent egy token-módú planre vált, a közös flotta-token (store/.claude-oauth-token) is erre a plan tokenjére cserélődik (mentéssel), és minden olyan sub-agent újraindul, amely ezt a közös tokent használja. Saját tokenes / saját configDir-os agenteket nem érint. configDir-módú célplannél a flotta-lépés kimarad. Előfeltétel: CLAUDE_ROTATION_ENABLED=1.',
+    module: 'claude-plans',
+    secret: false,
+    requiresRestart: false,
+  },
+  // Opt-in background refresh of IDLE plans' 5h/7d usage by the rotation
+  // heartbeat (scripts/claude-plan-rotate-check.ts -> refreshIdlePlans). Each
+  // probe is a real Messages API call that spends the probed plan's own quota,
+  // so it is off by default and independent of CLAUDE_ROTATION_ENABLED: an
+  // operator can keep the Settings bars fresh without automatic rotation.
+  {
+    key: 'CLAUDE_PLAN_USAGE_REFRESH',
+    type: 'boolean',
+    default: '0',
+    description: 'A tétlen (épp nem használt) token-módú planek 5 órás és heti keretét a rotációs heartbeat a háttérben is lekérdezi, planenként legfeljebb 30 percenként. Minden lekérdezés egy valódi, minimális API-hívás, ami az adott plan saját keretéből fogy, ezért alapból KI. A rotációtól (CLAUDE_ROTATION_ENABLED) függetlenül bekapcsolható, ha csak a Beállítások sávjait akarod frissen tartani.',
     module: 'claude-plans',
     secret: false,
     requiresRestart: false,
