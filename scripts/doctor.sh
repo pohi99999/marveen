@@ -363,7 +363,9 @@ if [ -d "$SKILLS_DIR/.git" ]; then
 else
   fail "skills-fa NEM git-checkout: $SKILLS_DIR (klonozd: scripts/skills-sync.sh utmutatoja)"
 fi
-S_GLOBAL="$(ls -d "$HOME"/.claude/skills/*/ 2>/dev/null | wc -l)"
+# ~/.claude/skills/synced/ is Claude Code's own folder (claude.ai-synced skills), not a fleet copy:
+# counting it made this check fail on every install that has it (measured 2026-10-04, v1.40.0 cutover).
+S_GLOBAL="$(ls -d "$HOME"/.claude/skills/*/ 2>/dev/null | grep -v '/synced/$' | wc -l)"
 if [ "$S_GLOBAL" = "0" ]; then ok "nincs globalis ~/.claude/skills masolat"; else fail "$S_GLOBAL globalis skill-masolat a ~/.claude/skills alatt (dupla listazas; a fa a forras, a masolat torlendo)"; fi
 S_AGENT="$(ls -d "$INSTALL_DIR"/agents/*/.claude/skills/*/ 2>/dev/null | wc -l)"
 if [ "$S_AGENT" = "0" ]; then ok "nincs agens-szintu skill-masolat"; else fail "$S_AGENT agens-szintu skill-masolat az agents/*/.claude/skills alatt (megszunt reteg, torlendo)"; fi
