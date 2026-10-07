@@ -131,6 +131,7 @@ describe('startAntigravityAgentProcess', () => {
     expect(args).toContain('agent-coder')
     const cmd = args[args.length - 1]
     expect(cmd).toContain('agy --dangerously-skip-permissions')
+    expect(cmd.startsWith('{ [ "$(id -u)" != 0 ] || export IS_SANDBOX=1; } && agy ')).toBe(true) // ROOTRESPAWN1001
     expect(cmd).not.toContain('--continue')
     // Sentinel should be written after successful tmux launch
     expect(writeFileSyncMock).toHaveBeenCalled()

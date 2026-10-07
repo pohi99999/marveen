@@ -44,14 +44,22 @@ const EXPECTED: Record<string, string[]> = {
   PostToolUse: [
     'ledger-outbound.py', 'tool-log-capture.py',
     'telegram_progress_reply_clear.py', 'slack_progress_reply_clear.py',
-    'skill-usage-capture.py',
+    'skill-usage-capture.py', 'memory-frontmatter-bash-gate.py',
+    // The persona guard watches the main agent's own CLAUDE.md/SOUL.md and
+    // every agents/*/ pair, and it must fire on EVERY tool call: the first
+    // version filtered on the Write/Edit file_path and a python3 heredoc
+    // walked straight past it. PostToolUse is the event that cannot be
+    // dodged by choosing a different tool.
+    'persona-change-notify.py',
   ],
   // A failed tool call fires PostToolUseFailure, never PostToolUse
   // (TOOLLOGVAKSIKER921): without this entry tool_call_log cannot hold a 0.
-  PostToolUseFailure: ['tool-log-capture.py'],
+  // KAPUEGYUT918: a failed Bash call can still have written a memory file.
+  PostToolUseFailure: ['tool-log-capture.py', 'memory-frontmatter-bash-gate.py'],
   PreToolUse: [
     'outgoing-copy-gate.py', 'email-approval-gate.py',
     'channel-image-resize.sh', 'egress-gate.mjs', 'memory-frontmatter-gate.py',
+    'memory-frontmatter-bash-gate.py',
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   SessionStart: ['ledger-replay.py', 'taskstate-replay.py', 'clear-replay.py', 'marveen-commands.py'],

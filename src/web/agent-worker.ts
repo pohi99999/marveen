@@ -6,6 +6,7 @@ import { homedir, userInfo } from 'node:os'
 import { createHash } from 'node:crypto'
 import { resolveFromPath, tryResolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
+import { launchableInstallDefaultSync } from './default-model-guard.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT, DEFAULT_AGENT_MODEL } from '../config.js'
 import {
   capturePane,
@@ -21,6 +22,7 @@ import { withSessionSendLock } from './session-send-lock.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
+import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
 
 // =============================================================================
 // Interactive-tmux agent worker (jun.15 subscription migration).
@@ -519,11 +521,13 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
   // Priority: MARVEEN_WORKER_MODEL override > main-agent custom provider > default.
   let workerModel = WORKER_MODEL_OVERRIDE ?? DEFAULT_AGENT_MODEL
   let customEnvPrefix = ''
+  let fromCustomProvider = false
   if (!WORKER_MODEL_OVERRIDE) {
     try {
       const cpEnv = buildCustomProviderLaunchEnv(MAIN_AGENT_ID)
       if (cpEnv) {
         workerModel = cpEnv.model
+        fromCustomProvider = true
         customEnvPrefix = cpEnv.envPrefix
         if (cpEnv.customApiKeyForApproval) {
           stampCustomApiKeyApproval(join(ctx.configDir, '.claude.json'), cpEnv.customApiKeyForApproval)
@@ -532,6 +536,9 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     } catch (err) {
       logger.warn({ err }, 'agent-worker: could not resolve main-agent custom provider; falling back to default model')
     }
+    // DEFAULTCLIGUARD927: the default path only -- a CLI that cannot run the
+    // shipped default gets the previous tier instead of a deaf worker.
+    if (!fromCustomProvider) workerModel = launchableInstallDefaultSync('worker')
   }
 
   const claudeLaunchBin = tryResolveFromPath('claude') ?? 'claude'
@@ -541,6 +548,8 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     `export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false; ` +
     // CHANSPARE925: no Agent view (Left would background the worker into the daemon).
     `export CLAUDE_CODE_DISABLE_AGENT_VIEW=1; ` +
+    // ROOTRESPAWN1001: IS_SANDBOX=1 on a root host (see root-sandbox-env.ts).
+    `${ROOT_SANDBOX_ENV}; ` +
     customEnvPrefix +
     `cd ${shArg(ctx.home)} && ` +
     `${shArg(claudeLaunchBin)} --dangerously-skip-permissions --model ${shArg(workerModel)}`

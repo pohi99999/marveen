@@ -4,7 +4,11 @@
  * are pinned without a binary.
  */
 import { describe, it, expect } from 'vitest'
-import { parseClaudeVersion, compareVersions, baseModelId, isModelUnsupportedByCli, claudeSupportForCli, CLAUDE_MODEL_MIN_CLI } from '../claude-cli-support.js'
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parseClaudeVersion, compareVersions, baseModelId, isModelUnsupportedByCli, claudeSupportForCli, launchableDefaultModel, CLAUDE_MODEL_MIN_CLI } from '../claude-cli-support.js'
+import { DISTRIBUTION_DEFAULT_AGENT_MODEL, DISTRIBUTION_DEFAULT_FALLBACK_MODEL } from '../config-registry.js'
 
 describe('parseClaudeVersion', () => {
   it('reads the dotted version out of `claude --version` output', () => {
@@ -66,5 +70,34 @@ describe('the table and the gate', () => {
       expect(req.measured, id).toMatch(/\d{4}-\d{2}-\d{2}/)
       expect(req.minCli, id).toMatch(/^\d+\.\d+\.\d+$/)
     }
+  })
+})
+
+// DEFAULTCLIGUARD927 (Szotasz review of #1609): the DEFAULT path consults the
+// same table. A model-less launch on a CLI measured too old for the shipped
+// default gets the previous tier; an unmeasured CLI changes nothing.
+describe('launchableDefaultModel (DEFAULTCLIGUARD927)', () => {
+  it('the AVX-less pin 2.1.110 falls back to claude-opus-5[1m], naming what it replaced', () => {
+    expect(launchableDefaultModel('claude-opus-5-5[1m]', 'claude-opus-5[1m]', '2.1.110')).toEqual({
+      model: 'claude-opus-5[1m]', replaced: 'claude-opus-5-5[1m]', minCli: '2.1.280',
+    })
+  })
+  it('2.1.278 (the other measured-bad point) falls back too', () => {
+    expect(launchableDefaultModel('claude-opus-5-5[1m]', 'claude-opus-5[1m]', '2.1.278').model).toBe('claude-opus-5[1m]')
+  })
+  it('2.1.280 gets claude-opus-5-5[1m] (positive control)', () => {
+    expect(launchableDefaultModel('claude-opus-5-5[1m]', 'claude-opus-5[1m]', '2.1.280')).toEqual({
+      model: 'claude-opus-5-5[1m]', replaced: null, minCli: null,
+    })
+  })
+  it('an UNMEASURED version keeps the default (fail-open, same rule as the picker)', () => {
+    expect(launchableDefaultModel('claude-opus-5-5[1m]', 'claude-opus-5[1m]', null).model).toBe('claude-opus-5-5[1m]')
+  })
+  it('the SHIPPED fallback is launchable by the oldest pinned CLI, read from channels.sh (not a literal)', () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+    const pin = /^CLAUDE_PIN="([^"]+)"/m.exec(readFileSync(join(root, 'scripts', 'channels.sh'), 'utf-8'))?.[1] ?? null
+    expect(pin).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(isModelUnsupportedByCli(DISTRIBUTION_DEFAULT_FALLBACK_MODEL, pin)).toBe(false)
+    expect(DISTRIBUTION_DEFAULT_FALLBACK_MODEL).not.toBe(DISTRIBUTION_DEFAULT_AGENT_MODEL)
   })
 })

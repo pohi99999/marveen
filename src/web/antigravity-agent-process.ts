@@ -12,6 +12,7 @@ import { logger } from '../logger.js'
 import { agentDir, readAgentModel } from './agent-config.js'
 import { agentSessionName, isAgentRunning, runTmux, shSingleQuote } from './agent-process.js'
 import { withSessionSendLock } from './session-send-lock.js'
+import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
 import type { AgentMessageCategory } from './agent-message-wrap.js'
 
 export function buildAntigravityLaunchCommand(opts: {
@@ -49,7 +50,9 @@ export function startAntigravityAgentProcess(
   const resume = existsSync(sentinelPath) && !opts.fresh
 
   const model = readAgentModel(name)
-  const cmd = buildAntigravityLaunchCommand({ resume, model })
+  // ROOTRESPAWN1001 (upstream v1.41.0): every --dangerously-skip-permissions launch handles IS_SANDBOX on a
+  // root host, evaluated in the pane like agent-process.ts does; a no-op on a non-root host.
+  const cmd = `${ROOT_SANDBOX_ENV} && ${buildAntigravityLaunchCommand({ resume, model })}`
 
   try {
     runTmux(null, ['new-session', '-d', '-s', session, '-c', dir, cmd])

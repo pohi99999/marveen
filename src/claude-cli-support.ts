@@ -85,6 +85,35 @@ export function isModelUnsupportedByCli(model: string, installedVersion: string 
   return compareVersions(installedVersion, req.minCli) < 0
 }
 
+export interface DefaultModelLaunchDecision {
+  /** The model to launch. */
+  model: string
+  /** The distribution default that was replaced, or null when it launches as is. */
+  replaced: string | null
+  /** The CLI minimum of the replaced default, or null when nothing was replaced. */
+  minCli: string | null
+}
+
+/**
+ * DEFAULTCLIGUARD927: the model a MODEL-LESS launch should use. Callers pass
+ * the shipped distribution default ONLY when no operator value resolved (an
+ * explicit value is the operator's choice, and the picker already guards it).
+ * When the installed CLI is measured not to launch that default, the previous
+ * tier is used instead. Same fail-open rule as the picker gate: an unmeasured
+ * version (null) changes nothing.
+ */
+export function launchableDefaultModel(
+  distributionDefault: string,
+  fallback: string,
+  installedVersion: string | null,
+): DefaultModelLaunchDecision {
+  if (!isModelUnsupportedByCli(distributionDefault, installedVersion)) {
+    return { model: distributionDefault, replaced: null, minCli: null }
+  }
+  const req = CLAUDE_MODEL_MIN_CLI[baseModelId(distributionDefault)]
+  return { model: fallback, replaced: distributionDefault, minCli: req?.minCli ?? null }
+}
+
 export interface ClaudeSupportSummary {
   /** Whether the installed version was measured at all. */
   measured: boolean

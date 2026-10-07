@@ -1,9 +1,10 @@
 import { CronExpressionParser } from 'cron-parser'
-import { hostname } from 'node:os'
+import { hostname, homedir } from 'node:os'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readEnvFile } from './env.js'
+import { resolveFleetVenvDir } from './fleet-venv.js'
 import { DISTRIBUTION_DEFAULT_AGENT_MODEL } from './config-registry.js'
 import { getProviderType, getChannelToken, getChannelChatId, type ChannelProviderType } from './channel-provider.js'
 
@@ -112,6 +113,11 @@ export const APP_TZ_INVALID = appTz.invalid
 // reconfigures a running fleet.
 export const DEFAULT_AGENT_MODEL =
   cfg('DEFAULT_AGENT_MODEL') || DISTRIBUTION_DEFAULT_AGENT_MODEL
+// DEFAULTCLIGUARD927: true when no operator configured DEFAULT_AGENT_MODEL, so
+// the value above is the SHIPPED default. Only then may a launch swap it for
+// the previous tier on a CLI that cannot run it (default-model-guard.ts); a
+// configured value is the operator's choice and is never replaced.
+export const DEFAULT_AGENT_MODEL_IS_DISTRIBUTION = !cfg('DEFAULT_AGENT_MODEL')
 
 export const TELEGRAM_BOT_TOKEN = env['TELEGRAM_BOT_TOKEN'] ?? ''
 export const ALLOWED_CHAT_ID = env['ALLOWED_CHAT_ID'] ?? ''
@@ -332,6 +338,19 @@ export const DASHBOARD_PUBLIC_URL = cfg('DASHBOARD_PUBLIC_URL') ?? ''
 // the other cannot be correct for both deployment shapes, so it is its own key.
 // Empty preserves the previous behaviour exactly (public URL, else localhost).
 export const AGENT_API_ORIGIN = cfg('AGENT_API_ORIGIN') ?? ''
+
+// FLEETVENV923: the fleet's shared Python virtualenv. When `<dir>/bin` exists it
+// is prepended to every agent launch PATH (sub-agents via startAgentProcess,
+// the main session via channels.sh and the recovery relaunch in
+// channel-monitor.ts), so a skill's plain `python3` and the venv's own CLIs
+// (markitdown, ...) resolve to the venv without per-skill interpreter paths.
+// Measured 2026-09-23 on the Mac mini: the Homebrew python3 carried zero
+// packages, so every skill `python3` call import-failed while a venv with the
+// packages sat next to it. A `~` prefix means the home directory; the default
+// is EMPTY (off), and a nonexistent directory disables the prefix too.
+// Resolved by fleet-venv.ts, the same function channels.sh reaches through
+// scripts/fleet-venv-prefix.mjs, so the two launch paths cannot disagree.
+export const FLEET_PYTHON_VENV = resolveFleetVenvDir(PROJECT_ROOT, homedir(), process.env.CLAUDECLAW_ENV_DIR ?? PROJECT_ROOT)
 // Extra browser origins allowed to make state-changing dashboard requests
 // (CORS + CSRF allowlist), comma-separated, e.g. for VPN/LAN addresses that
 // aren't covered by WEB_HOST or DASHBOARD_PUBLIC_URL. Empty by default so

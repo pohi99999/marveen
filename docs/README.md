@@ -34,27 +34,33 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **49**, egyedi `/api/...` útvonal-literál bennük: **137**
-- Claude Code hookok (`.claude/settings.json`): **7** esemény, **34** bejegyzés, **24** szkript a `scripts/hooks/` alatt
-- Seed ütemezett feladatok (`scheduled-tasks/`): **4** -- dream-engine, ledger-live-drain, memoria-heartbeat, reggeli-napindito
-- Git-hook telepítők (`scripts/install-*-hook.sh`): **7** -- channel-image, git-guard, hook-proof, prod-tree-guard, secret-gate, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **43**, ebből a fenti táblázat linkel **16**
+- Route-modulok (`src/web/routes/*.ts`): **53**, egyedi `/api/...` útvonal-literál bennük: **155**
+- Claude Code hookok (`.claude/settings.json`): **7** esemény, **45** bejegyzés, **30** szkript a `scripts/hooks/` alatt
+- Seed ütemezett feladatok (`scheduled-tasks/`): **5** -- dream-engine, ledger-live-drain, memoria-heartbeat, reggeli-napindito, usage-collect
+- Git-hook telepítők (`scripts/install-*-hook.sh`): **8** -- channel-image, git-guard, hook-proof, prod-tree-guard, secret-gate, slack-progress, telegram-image, telegram-progress
+- Dokumentációs lapok a `docs/` alatt: **50**, ebből a fenti táblázat linkel **16**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
 - [MIGRATION](MIGRATION.md)
+- [agens-azonositas-api](agens-azonositas-api.md)
+- [agent-state-observer](agent-state-observer.md)
 - [archivalt-kartyak](archivalt-kartyak.md)
 - [channel-reply-guard](channel-reply-guard.md)
 - [config-reference](config-reference.md)
 - [conversation-continuity](conversation-continuity.md)
+- [custom-providers](custom-providers.md)
+- [destruktiv-kapu-hamis-pozitiv-meres](destruktiv-kapu-hamis-pozitiv-meres.md)
 - [disk-modal-guards](disk-modal-guards.md)
 - [external-skill-catalog](external-skill-catalog.md)
 - [flotta-migracio](flotta-migracio.md)
+- [google-calendar-drive-service-account](google-calendar-drive-service-account.md)
 - [google-docs](google-docs.md)
 - [ideabox](ideabox.md)
 - [inter-agent-send-reliability](inter-agent-send-reliability.md)
 - [kutatas](kutatas.md)
 - [mcp-list-channel-plugin](mcp-list-channel-plugin.md)
+- [memoria-szuro-hamis-pozitiv-negativ-meres](memoria-szuro-hamis-pozitiv-negativ-meres.md)
 - [mobil-dashboard](mobil-dashboard.md)
 - [munkamodszer](munkamodszer.md)
 - [naplo-audit](naplo-audit.md)
@@ -63,6 +69,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [scheduled-tasks](scheduled-tasks.md)
 - [security-hardening](security-hardening.md)
 - [skills-git-forras](skills-git-forras.md)
+- [slack-progress-indicator](slack-progress-indicator.md)
 - [telegram-live-progress](telegram-live-progress.md)
 - [telegram-progress-indicator](telegram-progress-indicator.md)
 - [telegram-reply-enforcement-2026-08-02](telegram-reply-enforcement-2026-08-02.md)
