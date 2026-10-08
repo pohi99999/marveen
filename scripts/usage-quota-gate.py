@@ -4,9 +4,11 @@ usage-quota-gate.py -- weekly Max-quota EMERGENCY GATE (card 6d9de12c, 2026-09-1
 
 Runs right after scripts/usage-collect.py (same command task, usage-collect-hourly).
 Reads store/usage-latest.json (never calls the provider itself), and when the
-Claude seven_day window's used_percent reaches a threshold (80, then 90) it
-sends ONCE per threshold per window (the seven_day_opus window has its own
-70/80/90 steps, inter-agent only):
+Claude seven_day window's used_percent reaches a threshold (70, then 80, then
+90) it sends ONCE per threshold per window (the seven_day_opus window has its
+own 70/80/90 steps, inter-agent only). The 70 step is an early warning only:
+no model switch (the switch line is 80, owner decision 2026-09-22), its text
+says so, and it is not sent in a run where 80 or 90 fires too (card c394dc95):
   - an inter-agent message to the main agent, prefixed [KVOTA], via the
     dashboard API (bearer from store/.dashboard-token). The API accepts only
     registered agent ids as `from`, so the note is sent from the main agent
@@ -38,7 +40,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STORE = os.path.join(ROOT, "store")
 SNAPSHOT_PATH = os.path.join(STORE, "usage-latest.json")
 STATE_PATH = os.path.join(STORE, "usage-alert-state.json")
-THRESHOLDS = (80, 90)
+# 70 = early weekly warning (card c394dc95, owner GO 2026-10-08): it fires once per
+# window like the others, but it only informs -- the switch rule starts at 80.
+THRESHOLDS = (70, 80, 90)
+EARLY_WARNING = 70
 WINDOW = "seven_day"
 # The per-model weekly window has its own ceiling: on 2026-09-28 it reached 97%
 # while seven_day was still under 80, so the gate above stayed silent. It gets an
@@ -88,6 +93,30 @@ def fmt_reset(resets_at):
         return "ismeretlen"
 
 
+def time_to_reset(resets_at, now=None):
+    """Human-readable time left until resets_at ("2,3 nap", "5 ora"), or a fallback."""
+    try:
+        left = float(resets_at) - (datetime.now(timezone.utc).timestamp() if now is None else float(now))
+    except (TypeError, ValueError):
+        return "ismeretlen ido"
+    if left <= 0:
+        return "kevesebb mint 1 ora"
+    if left < 86400:
+        return f"{max(1, round(left / 3600))} ora"
+    return f"{left / 86400:.1f} nap".replace(".", ",")
+
+
+def seven_day_sends(to_fire):
+    """Which of the fired seven_day thresholds get a message. The 70 early warning
+    says "no switch now"; in a run where 80 or 90 fires too (a jump past 80 between
+    two hourly reads, or a reset found above 80) that text would contradict the
+    switch rule, so only the higher ones are sent. decide() has already recorded
+    70 as fired, so it does not come back later in the same window."""
+    if EARLY_WARNING in to_fire and any(t > EARLY_WARNING for t in to_fire):
+        return [t for t in to_fire if t != EARLY_WARNING]
+    return list(to_fire)
+
+
 def _reset_key(resets_at):
     """Round resets_at to the nearest minute for dedup comparisons.
 
@@ -128,11 +157,18 @@ def decide(snapshot, state, thresholds=THRESHOLDS, window=WINDOW):
     return to_fire, new_state
 
 
-def message_text(t, snapshot):
+def message_text(t, snapshot, now=None):
     w = snapshot["claude"]["windows"]
     sd = w.get(WINDOW, {})
     fh = w.get("five_hour", {})
     op = w.get("seven_day_opus", {})
+    if t == EARLY_WARNING:
+        return (
+            f"[KVOTA] Korai jelzes: a heti Max-keret {sd.get('used_percent')}% (kuszob {t}%), "
+            f"{time_to_reset(sd.get('resets_at'), now)} van a resetig ({fmt_reset(sd.get('resets_at'))}). "
+            f"Most nincs atallas (az atallasi hatar 80%), a marveen figyeli az utemet. "
+            f"5 oras: {fh.get('used_percent')}%, Fable-heti: {op.get('used_percent')}%."
+        )
     return (
         f"[KVOTA] Heti Max-keret {sd.get('used_percent')}% (kuszob {t}%). "
         f"Reset: {fmt_reset(sd.get('resets_at'))}. 5 oras: {fh.get('used_percent')}%, Fable-heti: {op.get('used_percent')}%. "
@@ -190,7 +226,14 @@ def self_test():
     # allowed direction: below every threshold nothing fires, state stays armed
     f, s = decide(snap(55, r1), {})
     check(f == [], "55%: nothing fires")
-    # 80 crossed: fires 80 once, not 90
+    # 70 crossed: the early warning fires once (card c394dc95)
+    f, s = decide(snap(69, r1), s)
+    check(f == [], "69%: nothing fires")
+    f, s = decide(snap(70, r1), s)
+    check(f == [70], "70%: fires 70 only")
+    f, s = decide(snap(75, r1), s)
+    check(f == [], "75%: 70 does not repeat")
+    # 80 crossed: fires 80 once, not 90 (70 already fired does not hold it back)
     f, s = decide(snap(81, r1), s)
     check(f == [80], "81%: fires 80 only")
     f, s = decide(snap(85, r1), s)
@@ -202,7 +245,8 @@ def self_test():
     check(f == [], "97%: neither repeats")
     # window reset: resets_at changes -> re-armed, high usage fires both again
     f, s = decide(snap(92, r1 + 7 * 86400), s)
-    check(sorted(f) == [80, 90], "after reset at 92%: both fire again")
+    check(sorted(f) == [70, 80, 90], "after reset at 92%: all three fire again")
+    check(seven_day_sends(f) == [80, 90], "after reset at 92%: the 70 text is not sent next to 80/90")
     # reset with low usage: re-armed but silent
     f, s = decide(snap(30, r1 + 14 * 86400), s)
     check(f == [] and s["claude_seven_day_threshold_80"] == {}, "after reset at 30%: silent and re-armed")
@@ -210,20 +254,23 @@ def self_test():
     # window: same reset, three slightly different floats -> fires once, not thrice
     r2 = r1 + 21 * 86400
     f, s = decide(snap(81, r2 + 0.204469), {})
-    check(f == [80], "jitter: first hourly read at 81% fires 80")
+    check(f == [70, 80], "jitter: first hourly read at 81% fires 70 and 80")
     f, s = decide(snap(82, r2 + 0.940767), s)
     check(f == [], "jitter: next hourly read, different fractional resets_at, does not refire")
     f, s = decide(snap(83, r2 + 0.263748), s)
     check(f == [], "jitter: a third differing fractional resets_at still does not refire")
     # a real rollover (~7 days later) still re-arms despite similar jitter
     f, s = decide(snap(85, r2 + 7 * 86400 + 0.5), s)
-    check(f == [80], "jitter: a genuine reset 7 days later still re-arms")
+    check(f == [70, 80], "jitter: a genuine reset 7 days later still re-arms")
     # missing data never fires and never crashes
     f, s = decide({}, s)
     check(f == [], "empty snapshot: nothing")
     # message text has no em dash (outgoing copy rule) and carries the reset
     m = message_text(80, snap(81, r1))
     check("—" not in m and "[KVOTA]" in m and "Reset:" in m, "message text: [KVOTA] prefix, reset, no em dash")
+    m = message_text(70, snap(70, r1), now=r1 - 2.3 * 86400)
+    check("Korai jelzes" in m and "nincs atallas" in m and "2,3 nap" in m and "Sonnet" not in m and "—" not in m,
+          "70 text: early warning, no switch rule, time to reset, no em dash")
     # Opus window: its own 70/80/90 thresholds and state keys, independent of seven_day
     osnap = lambda used, opus, reset: {"claude": {"windows": {"seven_day": {"used_percent": used, "resets_at": reset}, "seven_day_opus": {"used_percent": opus, "resets_at": reset}}}}
     f, s = decide(osnap(40, 69, r1), {}, OPUS_THRESHOLDS, OPUS_WINDOW)
@@ -265,7 +312,7 @@ def main():
     ow = windows.get(OPUS_WINDOW) or {}
     print(f"usage-quota-gate: seven_day={w.get('used_percent')}% reset={fmt_reset(w.get('resets_at'))} fire={to_fire or 'none'}"
           f" | seven_day_opus={ow.get('used_percent')}% fire={opus_fire or 'none'}{' (dry-run)' if a.dry_run else ''}")
-    sends = [(message_text(t, snapshot), True) for t in to_fire] + [(opus_message_text(t, snapshot), False) for t in opus_fire]
+    sends = [(message_text(t, snapshot), True) for t in seven_day_sends(to_fire)] + [(opus_message_text(t, snapshot), False) for t in opus_fire]
     for text, to_owner in sends:
         if a.dry_run:
             print("  would send:", text, "" if to_owner else "(main agent only)")

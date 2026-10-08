@@ -6,5 +6,5 @@
   "command": "cd /home/pohi/marveen && python3 scripts/usage-collect.py; python3 scripts/usage-quota-gate.py",
   "timeoutMs": 60000,
   "failThreshold": 3,
-  "description": "Max-kvota ablakok oras merese (usage-collect.py): store/usage-latest.json + usage-history.jsonl. CSAK MERES, nincs LLM, nincs beavatkozas -- a per-ugynok keret (5715dad4) kalibracios adatforrasa Utana usage-quota-gate.py: heti 80%/90% kuszobnel EGYSZER [KVOTA] uzenet marveennek + Telegram Peternek (6d9de12c), csak olvas es uzen."
+  "description": "Max-kvota ablakok oras merese (usage-collect.py): store/usage-latest.json + usage-history.jsonl. CSAK MERES, nincs LLM, nincs beavatkozas -- a per-ugynok keret (5715dad4) kalibracios adatforrasa Utana usage-quota-gate.py: heti 70% (korai jelzes, atallas nelkul, c394dc95) / 80% / 90% kuszobnel EGYSZER [KVOTA] uzenet marveennek + Telegram Peternek (6d9de12c), csak olvas es uzen."
 }
