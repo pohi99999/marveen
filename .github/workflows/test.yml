@@ -78,4 +78,8 @@ jobs:
       # hermetic (LEDGER_DB_PATH on a throwaway DB, temp dirs).
       - run: python3 scripts/__tests__/telegram-reply-guard.test.py
       - run: python3 scripts/__tests__/ledger-replay-reply-tool.test.py
+      # QUOTA70EARLY1008: the weekly quota gate decides who hears about the quota
+      # and when; a silent regression there is found only when the quota runs out.
+      # Hermetic: throwaway snapshot/state files, both senders captured.
+      - run: python3 scripts/__tests__/usage-quota-gate.test.py
       - run: bash scripts/__tests__/conversation-ledger.test.sh
