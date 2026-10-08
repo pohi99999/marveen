@@ -411,6 +411,27 @@ export function checkTaskDeliveryIntegrity(
   return verdict
 }
 
+// FASTTURN1007: the moment from which a transcript event proves OUR prompt started a turn.
+// `injectedAt` is `submittedAt`, stamped AFTER sendPromptToSession returned; the Enter lands
+// inside that call, so a fast round (measured 2026-10-07 19:13 on memoria-heartbeat: events
+// 19:13:09-14, 'fired' logged 19:13:18) finishes BEFORE injectedAt and the sweep saw no
+// evidence -> 'lost' -> re-delivery -> a second, duplicate round. `typedAt` (the first
+// keystroke, set in the pane's send lock) is the earliest instant the prompt could have been
+// submitted; a remote agent has no typedAt and keeps the old threshold.
+export function transcriptEvidenceSince(entry: Pick<TaskInflightEntry, 'injectedAt' | 'typedAt'>): number {
+  return entry.typedAt ?? entry.injectedAt
+}
+
+/** The sweep's turn evidence from one sample: a busy pane, or a real transcript event after the prompt went in. */
+export function turnEvidenceSeen(
+  entry: Pick<TaskInflightEntry, 'injectedAt' | 'typedAt'>,
+  state: 'busy' | 'idle' | 'typing' | string | null,
+  newestTranscriptEventMs: number | null,
+): boolean {
+  if (state === 'busy') return true
+  return newestTranscriptEventMs != null && newestTranscriptEventMs > transcriptEvidenceSince(entry)
+}
+
 export function decideTaskTimeout(
   entry: Pick<TaskInflightEntry, 'injectedAt' | 'alerted' | 'ownerAlerted' | 'sawTurn'> & { deliveryPending?: boolean },
   paneState: PaneState | null,
@@ -2265,12 +2286,10 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // other side.
       let lastMtimeSeen: number | null = null
       if (!entry.sawTurn) {
-        if (state === 'busy') {
-          entry.sawTurn = true
-        } else {
-          lastMtimeSeen = readTranscriptMtimeAcrossConfigDirs(entry.workingDir, entry.configDirs)
-          if (lastMtimeSeen != null && lastMtimeSeen > entry.injectedAt) entry.sawTurn = true
-        }
+        if (state !== 'busy') lastMtimeSeen = readTranscriptMtimeAcrossConfigDirs(entry.workingDir, entry.configDirs)
+        // FASTTURN1007: measured against typedAt (the first keystroke), not injectedAt (after the
+        // send returned): a round that finished between the two is still OUR turn, see turnEvidenceSeen.
+        if (turnEvidenceSeen(entry, state, lastMtimeSeen)) entry.sawTurn = true
       }
       const decision = decideTaskTimeout(entry, state, now, {
         graceMs: TASK_FIRE_GRACE_MS,
@@ -2396,6 +2415,7 @@ export function startScheduleRunner(): NodeJS.Timeout {
             paneState: state,
             mtimeSeen: lastMtimeSeen,
             mtimeAheadOfInjectMs: lastMtimeSeen != null ? lastMtimeSeen - entry.injectedAt : null,
+            mtimeAheadOfTypedMs: lastMtimeSeen != null ? lastMtimeSeen - transcriptEvidenceSince(entry) : null,
           },
           'Scheduled injection never started a turn (session accepted the keystrokes but stayed idle) -- recording as lost',
         )
