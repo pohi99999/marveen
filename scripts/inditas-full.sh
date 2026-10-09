@@ -14,7 +14,7 @@ http_code() {
 
 if [ "$(http_code)" != "200" ]; then
   echo "[inditas] dashboard down, launching..." >&2
-  tmux kill-session -t marveen-dashboard 2>/dev/null
+  tmux kill-session -t "=marveen-dashboard:" 2>/dev/null
   tmux new-session -d -s marveen-dashboard "node dist/index.js >> store/dashboard.log 2>&1"
   for i in $(seq 1 20); do
     sleep 1
@@ -22,13 +22,13 @@ if [ "$(http_code)" != "200" ]; then
   done
 fi
 
-if ! tmux has-session -t marveen-channels 2>/dev/null; then
+if ! tmux has-session -t "=marveen-channels:" 2>/dev/null; then
   echo "[inditas] channels down, launching..." >&2
   nohup bash scripts/channels.sh >> store/channels-startbat.log 2>&1 &
   disown
   for i in $(seq 1 15); do
     sleep 1
-    tmux has-session -t marveen-channels 2>/dev/null && break
+    tmux has-session -t "=marveen-channels:" 2>/dev/null && break
   done
 fi
 

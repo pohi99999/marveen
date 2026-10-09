@@ -25,7 +25,9 @@ const FIXTURE = [
 ].join('\n') + '\n'
 
 function awkProgram(varName: string): string {
-  const m = src.match(new RegExp(`${varName}="\\$\\(/bin/ps eww -e 2>/dev/null \\| awk (.*?)\\)"\\n`))
+  // v1.42.0: upstream moved the second pass to `ps axeww` (PSEWWMACOSBLIND1007); either form is accepted,
+  // the awk program itself is what this test runs against the fixture.
+  const m = src.match(new RegExp(`${varName}="\\$\\(/bin/ps (?:eww -e|axeww) 2>/dev/null \\| awk (.*?)\\)"\\n`))
   expect(m, `${varName} ps|awk line not found in channels.sh`).not.toBeNull()
   return m![1]!
 }

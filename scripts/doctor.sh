@@ -53,7 +53,7 @@ for component in channels dashboard; do
     # mint a semmi, mert megtanítja az embert figyelmen kívül hagyni.
     if systemctl --user is-active "$svc.service" &>/dev/null; then
       ok "$svc: running (systemd)"
-    elif tmux has-session -t "$svc" 2>/dev/null; then
+    elif tmux has-session -t "=$svc:" 2>/dev/null; then
       ok "$svc: running (tmux session)"
     else
       fail "$svc: NOT running (sem systemd unit, sem tmux session)"
@@ -63,7 +63,7 @@ done
 
 # --- Tmux sessions ---
 echo -e "\n${BOLD}Tmux sessions${RESET}"
-if tmux has-session -t "${MAIN_AGENT_ID}-channels" 2>/dev/null; then
+if tmux has-session -t "=${MAIN_AGENT_ID}-channels:" 2>/dev/null; then
   ok "${MAIN_AGENT_ID}-channels: alive"
 else
   warn "${MAIN_AGENT_ID}-channels: not running"
@@ -79,7 +79,7 @@ if [ -z "$HB_AGENT" ] && [ -f store/config-overrides.json ]; then
   HB_AGENT=$(python3 -c "import json,sys;print(json.load(open('store/config-overrides.json')).get('HEARTBEAT_AGENT_ENABLED',''))" 2>/dev/null)
 fi
 if [ "$HB_AGENT" = "1" ]; then
-  if tmux has-session -t "agent-heartbeat" 2>/dev/null; then
+  if tmux has-session -t "=agent-heartbeat:" 2>/dev/null; then
     ok "agent-heartbeat: alive"
   else
     warn "agent-heartbeat: enabled but NOT running"

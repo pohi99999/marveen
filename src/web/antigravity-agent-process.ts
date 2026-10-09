@@ -9,6 +9,8 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { logger } from '../logger.js'
+// TMUXEXACT1771 (v1.42.0): `=NAME:` so a missing session is never prefix-matched to a sibling
+import { exactTmuxTarget } from '../tmux-target.js'
 import { agentDir, readAgentModel } from './agent-config.js'
 import { agentSessionName, isAgentRunning, runTmux, shSingleQuote } from './agent-process.js'
 import { withSessionSendLock } from './session-send-lock.js'
@@ -144,9 +146,9 @@ export function formatAntigravityInboundMessage(
 export async function sendPromptToAntigravitySession(session: string, text: string): Promise<'sent'> {
   const oneLine = text.replace(/\r?\n/g, ' ')
   const result = await withSessionSendLock(session, null, 'deliver', async () => {
-    runTmux(null, ['send-keys', '-t', session, '-l', oneLine])
+    runTmux(null, ['send-keys', '-t', exactTmuxTarget(session), '-l', oneLine])
     await new Promise((resolve) => setTimeout(resolve, 300))
-    runTmux(null, ['send-keys', '-t', session, 'Enter'])
+    runTmux(null, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'])
   })
   if (result.failedOpen) {
     // Fail-open: the wait budget elapsed against a stuck holder and we wrote

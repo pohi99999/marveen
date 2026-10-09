@@ -166,7 +166,7 @@ print('REPORTS|%s' % ((c.get('team') or {}).get('reportsTo') or ''))
 
   # 4. tmux session -- informational only. An agent that is simply not running
   #    is not broken, so this never fails the check.
-  if tmux has-session -t "agent-$agent" 2>/dev/null; then
+  if tmux has-session -t "=agent-$agent:" 2>/dev/null; then
     ok "tmux session agent-$agent: running"
   else
     skip "tmux session agent-$agent: not running (not an error)"

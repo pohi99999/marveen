@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { execSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -71,6 +71,41 @@ describe('skill-index.sh -- no-arg mode (backward compat)', () => {
     runScript([], { HOME: tmpHome })
     const agentIndex = join(agentDir, '.claude', 'skills', '.skill-index.md')
     expect(existsSync(agentIndex)).toBe(false)
+  })
+})
+
+describe('skill-index.sh -- description truncation', () => {
+  let tmpHome: string
+
+  afterEach(() => {
+    rmSync(tmpHome, { recursive: true, force: true })
+  })
+
+  // `cut -c` in GNU coreutils counts bytes, not characters, even under a UTF-8
+  // locale. A description of accented text long enough to hit the 120 cut then
+  // loses its last character mid-encoding, and the index every agent reads
+  // carries a broken byte.
+  it('truncates a long accented description without splitting a character', () => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'skill-index-test-'))
+    mkdirSync(join(tmpHome, '.claude', 'skills', 'skill-accents'), { recursive: true })
+    // 'é' is two bytes, so a byte-cut at 120 lands inside a character.
+    const longAccented = 'é'.repeat(200)
+    writeFileSync(
+      join(tmpHome, '.claude', 'skills', 'skill-accents', 'SKILL.md'),
+      makeSkillMd('skill-accents', longAccented),
+    )
+
+    // FORK (SKILLSGIT914): the fork's script indexes <repo>/.claude/skills (its own
+    // root, from $0), not ~/.claude/skills. Run a COPY of the real script from a
+    // throwaway root that holds the fixture tree, so the same truncation is measured.
+    mkdirSync(join(tmpHome, 'scripts'), { recursive: true })
+    copyFileSync(SCRIPT, join(tmpHome, 'scripts', 'skill-index.sh'))
+    execSync(`bash "${join(tmpHome, 'scripts', 'skill-index.sh')}"`, { encoding: 'utf-8', env: { ...process.env, HOME: tmpHome } })
+
+    const raw = readFileSync(join(tmpHome, '.claude', 'skills', '.skill-index.md'))
+    // A replacement char means the bytes did not decode: the cut split a char.
+    expect(raw.toString('utf-8')).not.toContain('\uFFFD')
+    expect(raw.toString('utf-8')).toContain('é'.repeat(120))
   })
 })
 

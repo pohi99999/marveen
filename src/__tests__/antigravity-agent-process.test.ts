@@ -229,8 +229,8 @@ describe('sendPromptToAntigravitySession', () => {
   it('sends the literal text then Enter, both with host=null (local pane)', async () => {
     await sendPromptToAntigravitySession('agent-coder', 'hello')
     expect(runTmuxMock.mock.calls.map(([host]) => host)).toEqual([null, null])
-    expect(runTmuxMock.mock.calls[0][1]).toEqual(['send-keys', '-t', 'agent-coder', '-l', 'hello'])
-    expect(runTmuxMock.mock.calls[1][1]).toEqual(['send-keys', '-t', 'agent-coder', 'Enter'])
+    expect(runTmuxMock.mock.calls[0][1]).toEqual(['send-keys', '-t', '=agent-coder:', '-l', 'hello'])  // TMUXEXACT1771: exact target, never a prefix match
+    expect(runTmuxMock.mock.calls[1][1]).toEqual(['send-keys', '-t', '=agent-coder:', 'Enter'])
   })
 
   // DELIVLOCK805: two writers into the same pane splice foreign text into one
