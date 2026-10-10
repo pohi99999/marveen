@@ -90,4 +90,7 @@ jobs:
       # and when; a silent regression there is found only when the quota runs out.
       # Hermetic: throwaway snapshot/state files, both senders captured.
       - run: python3 scripts/__tests__/usage-quota-gate.test.py
+      # SKILLBASH1010: skill_usage feeds the dream-engine's "unused skill" verdicts; a regression in
+      # the Bash classification would silently bring back the measuring gap. Hermetic (pure functions).
+      - run: python3 scripts/__tests__/skill-usage-capture.test.py
       - run: bash scripts/__tests__/conversation-ledger.test.sh
