@@ -187,5 +187,85 @@ class TestProjectScopedSkills(unittest.TestCase):
 
 
 
+
+class TestBashSkillRead(unittest.TestCase):
+    """2026-10-10 (Zeph 3261, Marveen 3263): a SKILL.md read from Bash is a skill_read row too.
+
+    Before, only the Read tool counted, so every "unused skill" conclusion of the dream-engine stood on
+    a measuring gap (the gws skills, for one, are read with cat/sed). Both directions are pinned: the
+    reads that must count, and the commands that only NAME the file without reading it.
+    """
+
+    def _bash(self, command):
+        return hook._classify_all("Bash", {"command": command})
+
+    def _names(self, command):
+        return [n for n, t in self._bash(command) if t == "skill_read"]
+
+    # must count ------------------------------------------------------------
+    def test_cat_relative(self):
+        self.assertEqual(self._bash("cat .claude/skills/x/SKILL.md"), [("x", "skill_read")])
+
+    def test_sed_n_absolute(self):
+        self.assertEqual(self._names("sed -n 1,40p /home/pohi/marveen/.claude/skills/fleet-helper/SKILL.md"), ["fleet-helper"])
+
+    def test_head_in_a_pipeline(self):
+        self.assertEqual(self._names("head -50 ~/x/.claude/skills/gws-gmail/SKILL.md | grep -n send"), ["gws-gmail"])
+
+    def test_after_cd_and_env_prefix(self):
+        self.assertEqual(self._names("cd /home/pohi/marveen && LC_ALL=C grep -n Mikor .claude/skills/meresi-csapdak/SKILL.md"), ["meresi-csapdak"])
+
+    def test_python_dash_c(self):
+        self.assertEqual(self._names("python3 -c \"print(open('.claude/skills/y/SKILL.md').read()[:200])\""), ["y"])
+
+    def test_python_heredoc(self):
+        cmd = "python3 - <<'PY'\ntext = open('/home/pohi/marveen/.claude/skills/z/SKILL.md').read()\nprint(len(text))\nPY"
+        self.assertEqual(self._names(cmd), ["z"])
+
+    def test_two_skills_in_one_command_both_count_once(self):
+        cmd = "cat .claude/skills/a/SKILL.md .claude/skills/b/SKILL.md; cat .claude/skills/a/SKILL.md"
+        self.assertEqual(self._names(cmd), ["a", "b"])
+
+    # must NOT count --------------------------------------------------------
+    def test_cat_of_another_file(self):
+        self.assertEqual(self._bash("cat README.md"), [])
+
+    def test_a_reference_file_of_a_skill(self):
+        self.assertEqual(self._bash("cat .claude/skills/x/references/notes.md"), [])
+
+    def test_naming_without_reading(self):
+        for cmd in ("ls -la .claude/skills/x/SKILL.md", "git add .claude/skills/x/SKILL.md",
+                    "git -C .claude/skills diff -- x/SKILL.md", "stat .claude/skills/x/SKILL.md",
+                    "cp /tmp/new.md .claude/skills/x/SKILL.md"):
+            self.assertEqual(self._bash(cmd), [], cmd)
+
+    def test_in_place_edit_is_not_use(self):
+        self.assertEqual(self._bash("sed -i 's/a/b/' .claude/skills/x/SKILL.md"), [])
+        self.assertEqual(self._bash("sed -i.bak -e 's/a/b/' .claude/skills/x/SKILL.md"), [])
+
+    def test_redirect_target_is_a_write(self):
+        self.assertEqual(self._bash("cat /tmp/draft.md > .claude/skills/x/SKILL.md"), [])
+        self.assertEqual(self._bash("echo hi >> .claude/skills/x/SKILL.md"), [])
+
+    def test_a_glob_is_not_one_skill(self):
+        self.assertEqual(self._bash("for f in .claude/skills/*/SKILL.md; do head -3 $f; done"), [])
+        self.assertEqual(self._bash("cat .claude/skills/*/SKILL.md | wc -l"), [])
+
+    def test_other_tools_unchanged(self):
+        self.assertEqual(hook._classify_all("Read", {"file_path": "/srv/m/.claude/skills/r/SKILL.md"}), [("r", "skill_read")])
+        self.assertEqual(hook._classify_all("Skill", {"skill": "s"}), [("s", "tool_call")])
+        self.assertEqual(hook._classify_all("Grep", {"pattern": "x", "path": ".claude/skills/x/SKILL.md"}), [])
+
+    def test_the_no_match_path_does_not_load_urllib(self):
+        # the hook runs on EVERY Bash call now; urllib.request is imported only when a row is posted
+        import subprocess, json as _json
+        out = subprocess.run(
+            [sys.executable, "-X", "importtime", _HOOK_PATH],
+            input=_json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls -la"}, "cwd": "/tmp"}),
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(out.returncode, 0)
+        self.assertNotIn("urllib.request", out.stderr)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
