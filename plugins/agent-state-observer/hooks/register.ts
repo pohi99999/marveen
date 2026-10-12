@@ -14,8 +14,11 @@ import type { EngineInterface, Register } from 'claude-code'
 //   MARVEEN_AGENT_ID           the agent's name (letters, digits, "_" and "-")
 //   MARVEEN_STATE_OBSERVER_DIR the folder it writes <agent>.json into
 // Without both (or with a name that does not fit) it writes nothing at all.
-// Kill switches, no restart needed: <dir>/DISABLE stops every agent,
-// <dir>/DISABLE-<agent> stops that one; the hooks then only pass through.
+// Kill switches, no restart needed in EITHER direction: <dir>/DISABLE stops
+// every agent, <dir>/DISABLE-<agent> stops that one; the hooks then only pass
+// through. The minute tick re-checks the files even while stopped, so deleting
+// the file resumes writing within a minute (until 2026-10-12 the tick returned
+// before that check, and resuming needed a session restart; kanban 5f3617d9).
 
 const AGENT_NAME = /^[a-z0-9_-]+$/i
 const HISTORY_MAX = 200
@@ -88,6 +91,11 @@ let disabled = false
 let agent: string | null = null
 let stateDir: string | null = null
 
+/** Re-reads the two kill-switch files; true when this agent is stopped. */
+async function checkDisabled($: EngineInterface, dir: string, name: string): Promise<boolean> {
+  return (await $.fs.exists(`${dir}/DISABLE`)) || (await $.fs.exists(`${dir}/DISABLE-${name}`))
+}
+
 function flush($: EngineInterface): void {
   const name = agent
   const dir = stateDir
@@ -95,7 +103,7 @@ function flush($: EngineInterface): void {
   const text = JSON.stringify(snap)
   chain = chain
     .then(async () => {
-      disabled = (await $.fs.exists(`${dir}/DISABLE`)) || (await $.fs.exists(`${dir}/DISABLE-${name}`))
+      disabled = await checkDisabled($, dir, name)
       if (!disabled) await $.fs.write(`${dir}/${name}.json`, text)
     })
     .catch(() => {})
@@ -177,7 +185,25 @@ export const register: Register = on => {
     } catch {}
     move($, 'idle', { reason: 'session.start' })
     $.clock.every(TICK_MS, () => {
-      if (disabled) return
+      if (disabled) {
+        // Stopped: only look whether the switch is gone. The chain keeps the
+        // check from overlapping a write; on resume the next lines write.
+        const name = agent
+        const dir = stateDir
+        if (!name || !dir) return
+        chain = chain
+          .then(async () => {
+            disabled = await checkDisabled($, dir, name)
+            if (!disabled) {
+              // resumed: write right away instead of a tick later
+              snap.alive_at = now()
+              flush($)
+              void readUsage($, false)
+            }
+          })
+          .catch(() => {})
+        return
+      }
       snap.alive_at = now()
       flush($)
       void readUsage($, false)
