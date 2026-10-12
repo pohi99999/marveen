@@ -794,6 +794,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
     injectDigestProvenanceGate(existing)
   }
   if (agentGetsTelegramCopyGate(name)) injectTelegramCopyGate(existing)
+  if (agentGetsTelegramCopyGate(name)) injectMarveenApiCopyGate(existing)
   if (agentGetsDestructiveGate(name, profile)) injectDestructiveGate(existing)
   injectEgressGate(existing)
   if (agentGetsBashEgressParser(name)) injectBashEgressParser(existing)
@@ -1351,6 +1352,40 @@ export function injectTelegramCopyGate(existing: Record<string, unknown>): void 
   ]
 }
 
+// The marveen-api MCP tools (plugins/marveen-api, kanban 5f3617d9) send
+// inter-agent text; the copy gate runs the same homoglyph rule on them as on the
+// curl path. The ROOT .claude/settings.json carries this matcher too, but that
+// file is the MAIN agent's: a sub-agent runs on its own scaffold-written
+// agents/<name>/.claude/settings.json. Measured 2026-10-12 on the aura pilot: with
+// the matcher only in the root file, a Cyrillic lookalike went out through the
+// tool unchecked. Same per-agent wiring, same set of agents, as the Telegram gate.
+export const MARVEEN_API_COPY_GATE_MATCHER = 'mcp__marveen-api__.*'
+
+// Idempotently wire the outgoing-copy-gate onto the marveen-api tools. Dedupe is
+// scoped to THIS matcher, as in injectTelegramCopyGate: the same script stays
+// wired under its other matchers.
+export function injectMarveenApiCopyGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'outgoing-copy-gate.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: MARVEEN_API_COPY_GATE_MATCHER,
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => {
+      const j = JSON.stringify(e)
+      if (!j.includes('outgoing-copy-gate.py')) return true
+      return (e as { matcher?: unknown })?.matcher !== MARVEEN_API_COPY_GATE_MATCHER
+    }),
+    entry,
+  ]
+}
+
 // Which tools the destructive-gate inspects. Bash carries the banned commands
 // (rm/mv/sudo/...) and the credential reads; the file tools are the second route
 // to the same credential files, which a Bash-only matcher would leave open.
@@ -1443,8 +1478,15 @@ export function ensureTelegramCopyGate(name: string): boolean {
     return j.includes('outgoing-copy-gate.py')
       && (e as { matcher?: unknown })?.matcher === TELEGRAM_COPY_GATE_MATCHER
   })
-  if (wiredHere && hookCommandWired(JSON.stringify(ptu), command)) return false
+  // The marveen-api tools ride on the same migration (same agents, same script).
+  const apiWired = ptu.some((e) => {
+    const j = JSON.stringify(e)
+    return j.includes('outgoing-copy-gate.py')
+      && (e as { matcher?: unknown })?.matcher === MARVEEN_API_COPY_GATE_MATCHER
+  })
+  if (wiredHere && apiWired && hookCommandWired(JSON.stringify(ptu), command)) return false
   injectTelegramCopyGate(settings)
+  injectMarveenApiCopyGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }
