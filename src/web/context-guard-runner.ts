@@ -21,6 +21,7 @@ import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError } from '../pane-state.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir } from './active-model.js'
 import { readContextGuardConfig } from './context-guard-store.js'
+import { sampleShadow } from './context-guard-shadow.js'
 import { localMidnightMs } from '../auto-restart.js'
 import { recordRescueFailure, clearRescueFailures } from './rescue-failure-tracker.js'
 import { createAgentMessage } from '../db.js'
@@ -778,6 +779,10 @@ export function startContextGuardRunner(): NodeJS.Timeout {
     try {
       const now = Date.now()
       for (const name of guardSweepAgentNames()) {
+        // Shadow measurement (kanban 5f3617d9): records the guard estimate next to the
+        // observer mod's own context %, for agents that run the mod. It decides nothing
+        // and runs before checkAgent, which returns early for an agent with every tier off.
+        try { sampleShadow(name, now) } catch (err) { logger.debug({ err, agent: name }, 'context-guard: shadow sample error') }
         try { await checkAgent(name, now) } catch (err) { logger.debug({ err, agent: name }, 'context-guard: agent check error') }
       }
     } finally {
