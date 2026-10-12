@@ -39,9 +39,9 @@ function file(name: string, content: string): string {
   writeFileSync(p, content)
   return p
 }
-function gate(cmd: string): { code: number | null; out: string; err: string } {
+function gate(cmd: string, cwd?: string): { code: number | null; out: string; err: string } {
   const r = spawnSync('python3', [GATE], {
-    input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: cmd }, hook_event_name: 'PreToolUse' }),
+    input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: cmd }, hook_event_name: 'PreToolUse', ...(cwd ? { cwd } : {}) }),
     encoding: 'utf-8',
     // hermetic: rules path (and so the gate log) inside the test dir
     env: { ...process.env, CLAUDE_PROJECT_DIR: ROOT, OUTGOING_COPY_GATE_RULES: join(dir, 'rules.json') },
@@ -138,7 +138,9 @@ describe('inter-agent message: unit and formula notation is not a homoglyph (HOM
 
 describe('inter-agent message: an UNINTERPRETABLE body PASSES, loudly (fail-open-loud)', () => {
   const cases: Array<[string, string, RegExp]> = [
-    ['missing @file', `${POST} --data-binary @/nincs/ilyen/fajl.json`, /nem olvashato/],
+    // COPYGATEBODY1012: a missing file is now answered by scanning the command
+    // text (see the block below); with nothing in it, it is still a loud pass.
+    ['missing @file', `${POST} --data-binary @/nincs/ilyen/fajl.json`, /parancs szovege lett vizsgalva/],
     ['$-path', `${POST} --data-binary @$S/msg.json`, /fel nem oldhato @utvonal/],
     ['@- from a pipe', `cat x.json | ${POST} --data-binary @-`, /stdin/],
     ['run-time -d', `${POST} -d "{\\"content\\":\\"$(cat x)\\"}"`, /shell-behelyettesitest/],
@@ -159,6 +161,49 @@ describe('inter-agent message: an UNINTERPRETABLE body PASSES, loudly (fail-open
     const log = join(dir, 'outgoing-copy-gate.log')
     expect(existsSync(log)).toBe(true)
     expect(readFileSync(log, 'utf-8')).toContain('log-proba.json')
+  })
+})
+
+// COPYGATEBODY1012 (card 9790a74c). Measured 2026-10-05..10-12 in the live gate
+// log: 91 of the 95 unchecked inter-agent sends were "nem olvashato (No such
+// file)" -- the body file is written by the SAME command right before the curl
+// (so it does not exist when the hook runs), or it is a relative @path after a
+// `cd`. Both directions for each shape: the lookalike blocks, the clean passes.
+describe('inter-agent message: a body file the command writes itself, or a relative @path', () => {
+  const writeThenSend = (content: string, name: string) =>
+    `S=${dir}; python3 - <<'PY'\nimport json\njson.dump({"from":"samu","to":"marveen","content":"${content}"}, open("${dir}/${name}","w"))\nPY\n${POST} --data-binary @$S/${name} | head -c 200`
+
+  it('a lookalike in the heredoc that writes the not-yet-existing body BLOCKS', () => {
+    const r = gate(writeThenSend(HOMO, 'later-homo.json'))
+    expect(r.code).toBe(2)
+    expect(r.err).toContain('homoglifa')
+    expect(r.err).toContain('PARANCS szovege')
+  })
+
+  it('the same shape, clean, PASSES -- loudly, saying run-time content was not checked', () => {
+    const r = gate(writeThenSend(CLEAN, 'later-clean.json'))
+    expect(r.code).toBe(0)
+    const sm = JSON.parse(r.out.trim()).systemMessage as string
+    expect(sm).toMatch(/parancs szovege lett vizsgalva: homoglifa nincs benne/)
+    expect(sm).toContain('homoglifa-ellenorzes NELKUL')
+  })
+
+  it('a relative @path after a literal cd is read from THAT directory', () => {
+    file('rel-homo.json', msg(HOMO))
+    file('rel-clean.json', msg(CLEAN))
+    expect(gate(`cd ${dir} && ${POST} --data-binary @rel-homo.json`).code).toBe(2)
+    const r = gate(`cd "${dir}" && ${POST} --data-binary @rel-clean.json`)
+    expect(r.code).toBe(0)
+    expect(r.out).toBe('')
+  })
+
+  it('a relative @path without a cd is read from the session cwd in the hook payload', () => {
+    file('cwd-homo.json', msg(HOMO))
+    file('cwd-clean.json', msg(CLEAN))
+    expect(gate(`${POST} --data-binary @cwd-homo.json`, dir).code).toBe(2)
+    const r = gate(`${POST} --data-binary @cwd-clean.json`, dir)
+    expect(r.code).toBe(0)
+    expect(r.out).toBe('')
   })
 })
 
