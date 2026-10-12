@@ -1,7 +1,7 @@
-// node --test plugins/marveen-api/core.test.mjs
-import { test } from 'node:test'
+// kanban 5f3617d9 step 4: the marveen-api MCP server core (plugins/marveen-api/core.mjs).
+import { test } from 'vitest'
 import assert from 'node:assert/strict'
-import { callTool, sendMessage } from './core.mjs'
+import { callTool, sendMessage } from '../../plugins/marveen-api/core.mjs'
 
 // A fake dashboard that stores what it gets and can be told to mangle it.
 function dashboard({ mangle = (s) => s, fail = null } = {}) {
