@@ -9,6 +9,8 @@ import {
   injectSelfPaceGate,
   injectTelegramCopyGate,
   TELEGRAM_COPY_GATE_MATCHER,
+  injectMarveenApiCopyGate,
+  MARVEEN_API_COPY_GATE_MATCHER,
 } from '../web/agent-scaffold.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { homedir, tmpdir } from 'node:os'
@@ -592,6 +594,42 @@ describe('telegram copy gate wiring', () => {
     const ptu = (settings.hooks as Record<string, unknown>).PreToolUse as unknown[]
     expect(JSON.stringify(ptu)).toContain('egress-gate.mjs')
     expect(ptu).toHaveLength(2)
+  })
+})
+
+// --- marveen-api copy gate: wired per sub-agent, not only in the root settings ---
+//
+// kanban 5f3617d9, measured 2026-10-12 on the aura pilot: with the matcher only in
+// the ROOT .claude/settings.json (the main agent's), a Cyrillic lookalike went out
+// through mcp__marveen-api__send_message unchecked, because a sub-agent runs on its
+// own scaffold-written settings. The wiring is what these tests pin.
+describe('marveen-api copy gate wiring', () => {
+  const copyEntries = (s: Record<string, unknown>) => {
+    const hooks = s.hooks as Record<string, unknown>
+    const ptu = hooks.PreToolUse as Array<Record<string, unknown>>
+    return ptu.filter((e) => JSON.stringify(e).includes('outgoing-copy-gate.py'))
+  }
+  it('wires the gate onto every marveen-api tool', () => {
+    const settings: Record<string, unknown> = {}
+    injectMarveenApiCopyGate(settings)
+    const [entry] = copyEntries(settings)
+    expect(entry.matcher).toBe(MARVEEN_API_COPY_GATE_MATCHER)
+    for (const t of ['send_message', 'save_memory', 'kanban_comment']) {
+      expect(new RegExp(`^(?:${entry.matcher})$`).test(`mcp__marveen-api__${t}`)).toBe(true)
+    }
+  })
+  it('is idempotent and keeps the Telegram entry of the same script', () => {
+    const settings: Record<string, unknown> = {}
+    injectTelegramCopyGate(settings)
+    injectMarveenApiCopyGate(settings)
+    injectMarveenApiCopyGate(settings)
+    injectTelegramCopyGate(settings)
+    const matchers = copyEntries(settings).map((e) => e.matcher).sort()
+    expect(matchers).toEqual([MARVEEN_API_COPY_GATE_MATCHER, TELEGRAM_COPY_GATE_MATCHER].sort())
+  })
+  it('the same agents as the Telegram gate: every sub-agent, not the main one', () => {
+    expect(agentGetsTelegramCopyGate(MAIN_AGENT_ID)).toBe(false)
+    expect(agentGetsTelegramCopyGate('aura')).toBe(true)
   })
 })
 
