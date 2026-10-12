@@ -1323,6 +1323,26 @@ def _ia_resolve_local_vars(cmd: str, ref: str) -> str:
     return re.sub(r"\$\{(\w+)\}|\$(\w+)", sub, ref)
 
 
+# COPYGATEBODY1012 (card 9790a74c): a RELATIVE @path was opened against the
+# hook's own cwd, not the command's. Measured 2026-10-05..10-12 in the live
+# gate log: 91 of the 95 "NEM vizsgalhato" inter-agent lines were "nem
+# olvashato (No such file)", a part of them `@k.json` after a `cd`. curl reads
+# the path from where the command runs: the last LITERAL `cd <dir>` in the
+# command, else the session cwd that Claude Code puts in the hook payload.
+_HOOK_CWD = ""
+_IA_CD = re.compile(r"""(?:^|[;&|\n(]\s*)cd\s+(?:"([^"$`]+)"|'([^']+)'|([^\s;&|$`'"()]+))""")
+
+
+def _ia_absolute(cmd: str, path: str) -> str:
+    if os.path.isabs(path):
+        return path
+    base = _HOOK_CWD or os.getcwd()
+    for m in _IA_CD.finditer(cmd):
+        d = os.path.expanduser(next(g for g in m.groups() if g is not None))
+        base = d if os.path.isabs(d) else os.path.join(base, d)
+    return os.path.join(base, path)
+
+
 def _curl_payload_raw(cmd: str, toks, all_flags: bool = False):
     """(raw_body, unreadable_reason) of a curl data flag, from the three shapes
     (inline -d, @file, quoted heredoc via @-). raw_body is None when the call
@@ -1360,6 +1380,7 @@ def _curl_payload_raw(cmd: str, toks, all_flags: bool = False):
                 path = os.path.expandvars(os.path.expanduser(_ia_resolve_local_vars(cmd, ref)))
                 if "$" in path:
                     return None, f"a torzs fel nem oldhato @utvonalrol jon (@{ref})"
+                path = _ia_absolute(cmd, path)
                 try:
                     with open(path, encoding="utf-8", errors="replace") as fh:
                         raw = fh.read()
@@ -1406,6 +1427,19 @@ def inter_agent_homoglyph_gate(cmd: str) -> None:
     if toks is None:
         sys.exit(0)
     text, unreadable = _ia_payload(cmd, toks)
+    if unreadable and "No such file" in unreadable:
+        # COPYGATEBODY1012: the body file does not exist YET because the same
+        # command writes it first (`python3 - <<'PY' ... json.dump(..., open(S+'/m.json','w'))`,
+        # then `curl ... @$S/m.json`) -- the fleet's everyday send shape, and the
+        # bulk of the unchecked lines. The file cannot be read before it runs,
+        # but the text that goes into it is in the command itself, heredoc
+        # bodies included. Scan that: a lookalike there blocks like one in the
+        # body would. Anything the command reads at run time stays unchecked,
+        # so a clean result keeps the loud pass (INTERAGENTHOMOGLIF923).
+        missing, text, unreadable = unreadable, cmd, None
+        fallback = True
+    else:
+        fallback = False
     if unreadable:
         msg = ("outgoing-copy-gate (inter-agent, homoglifa): a torzs NEM vizsgalhato -- "
                f"{unreadable}. Az uzenet ATMENT, homoglifa-ellenorzes NELKUL. "
@@ -1431,8 +1465,17 @@ def inter_agent_homoglyph_gate(cmd: str) -> None:
             f"{len(mixed)} db: {shown}{more}.\n"
             "Egy kartya-azonositoban, agens-nevben vagy utvonalban ez neman felreiranyit. "
             "Javitsd a szoveget es kuldd ujra. (Itt CSAK a homoglifa fut, ekezet- es copy-szabaly nem.)\n"
+            + ("A torzsfajl a kuldes elott meg nem letezett, ezert a PARANCS szovege lett vizsgalva "
+               "(a fajlt iro heredoc-kal egyutt).\n" if fallback else "")
         )
         sys.exit(2)
+    if fallback:
+        msg = ("outgoing-copy-gate (inter-agent, homoglifa): a torzsfajl a kuldes elott nem "
+               f"letezett ({missing}; jellemzoen ugyanaz a parancs irja meg), ezert a parancs szovege "
+               "lett vizsgalva: homoglifa nincs benne. Az uzenet ATMENT; ami futasidoben kerul a fajlba "
+               "(nem a parancs szovegebol), az homoglifa-ellenorzes NELKUL ment.")
+        _gate_log(msg)
+        print(json.dumps({"systemMessage": msg}))
     sys.exit(0)
 
 
@@ -1444,6 +1487,8 @@ def main():
 
     tool = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input") or {}
+    global _HOOK_CWD
+    _HOOK_CWD = str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
     # A tool_input that is not a dict crashed every branch on its first .get(),
     # which the Telegram arm then reported as an internal gate error and passed
     # through fail-open. Measured 2026-09-05: the log holds exactly one such
