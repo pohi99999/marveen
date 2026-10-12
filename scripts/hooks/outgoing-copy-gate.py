@@ -1479,6 +1479,35 @@ def inter_agent_homoglyph_gate(cmd: str) -> None:
     sys.exit(0)
 
 
+MARVEEN_API_TOOL_RE = re.compile(r"^mcp__marveen-api__(send_message|save_memory|kanban_comment)$")
+
+
+def marveen_api_gate(tool_input: dict) -> None:
+    """The marveen-api MCP tools (kanban 5f3617d9) carry inter-agent text as JSON:
+    the same homoglyph rule as the curl path, on every string argument. The text is
+    always readable here, so there is no loud pass: clean -> exit 0, lookalike -> 2."""
+    text = "\n".join(str(v) for v in tool_input.values() if isinstance(v, str))
+    try:
+        mixed = mixed_script_words(text)
+    except MixedScriptUnavailable as exc:
+        sys.stderr.write(
+            "KIMENO-SZOVEG KAPU (marveen-api): TILTVA -- a vegyes-irasrendszer szabaly "
+            f"NEM TOLTHETO BE (scripts/lib/mixed_script.py: {exc}). Szandekosan fail-closed.\n"
+        )
+        sys.exit(2)
+    if mixed:
+        shown = "; ".join(f"{w!r} -- benne {name}" for w, _c, name in mixed[:5])
+        more = f" (+{len(mixed) - 5} tovabbi)" if len(mixed) > 5 else ""
+        sys.stderr.write(
+            "KIMENO-SZOVEG KAPU (marveen-api): TILTVA -- VEGYES IRASRENDSZERU SZO (homoglifa), "
+            f"{len(mixed)} db: {shown}{more}.\n"
+            "Egy kartya-azonositoban, agens-nevben vagy utvonalban ez neman felreiranyit. "
+            "Javitsd a szoveget es hivd ujra. (Itt CSAK a homoglifa fut, mint a curl-uton.)\n"
+        )
+        sys.exit(2)
+    sys.exit(0)
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -1516,6 +1545,9 @@ def main():
             "Hivd ujra rendes parameterekkel.\n"
         )
         sys.exit(2)
+
+    if MARVEEN_API_TOOL_RE.search(tool):
+        marveen_api_gate(tool_input)  # exits; never falls through
 
     # GATECOPY828 (#1184): the scaffold wires this hook onto reply AND
     # edit_message (an edit can replace a working code block with a broken
