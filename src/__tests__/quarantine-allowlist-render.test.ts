@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { renderQuarantineReader, ownerAllowedDomains, quarantineReaderDomains, quarantineReaderUnrestricted, isPublicFetchHost } from '../web/agent-scaffold.js'
+import { renderQuarantineReader, ownerAllowedDomains, quarantineReaderDomains, quarantineReaderUnrestricted, quarantineReaderPosture, isPublicFetchHost } from '../web/agent-scaffold.js'
 
 // The quarantine reader may only fetch from an allowlist, and that list used to
 // exist TWICE: once in this template and once in store/egress-allowlist.json,
@@ -328,36 +328,32 @@ describe('the unrestricted quarantine tier', () => {
     expect(quarantineReaderUnrestricted(dir)).toBe(false)
   })
 
-  it('renders a sentence, not a list, and says the bullets are not the limit', () => {
-    const out = renderQuarantineReader(TEMPLATE, [], true)
-    expect(out).toContain('open to every public domain')
-    expect(out).toContain('not the limit')
-    // The shipped defaults stay: an open tier adds permission, it never removes.
+  // v1.43.0 sync: the open tier renders upstream's posture block (e708d096); the fork's "*"
+  // wildcard is one of the two switches that select it (quarantineReaderPosture).
+  it('renders the open posture block for the wildcard store, and keeps the shipped defaults', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'egress-star-render-'))
+    write(dir, { domains: ['a.com'], quarantine_domains: ['*'] })
+    expect(quarantineReaderPosture(dir)).toBe('denylist')
+    const out = renderQuarantineReader(TEMPLATE, [], quarantineReaderPosture(dir))
+    expect(out).toContain('This install runs the open posture.')
     for (const d of ['status.anthropic.com', 'hnrss.org', 'www.reddit.com']) {
       expect(out).toContain(`- \`${d}\``)
     }
   })
 
-  it('still spells out the inward hosts that stay refused', () => {
-    const out = renderQuarantineReader(TEMPLATE, [], true)
-    for (const inward of ['localhost', '.local', '.internal', 'nip.io']) {
-      expect(out).toContain(inward)
-    }
+  it('renders no posture block without either switch', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'egress-nostar-render-'))
+    write(dir, { domains: ['a.com'], quarantine_domains: ['com'] })
+    expect(quarantineReaderPosture(dir)).toBe('allowlist')
+    expect(renderQuarantineReader(TEMPLATE, [], 'allowlist')).not.toContain('open posture')
   })
 
-  it('lands inside the Domain restriction section, like the enumerated block', () => {
-    const out = renderQuarantineReader(TEMPLATE, [], true)
-    expect(out.indexOf('every public domain')).toBeLessThan(out.indexOf('For any other domain'))
-  })
-
-  it('a re-render replaces the block instead of stacking copies', () => {
-    // Both directions: open -> enumerated must not leave the open sentence
-    // behind, or revoking the sentinel would be cosmetic.
-    const open = renderQuarantineReader(TEMPLATE, [], true)
-    const reclosed = renderQuarantineReader(open, ['claude.com'], false)
-    expect(reclosed).not.toContain('every public domain')
+  it('a re-render replaces the posture block instead of stacking copies', () => {
+    const open = renderQuarantineReader(TEMPLATE, [], 'denylist')
+    const reclosed = renderQuarantineReader(open, ['claude.com'], 'allowlist')
+    expect(reclosed).not.toContain('open posture')
     expect(reclosed).toContain('- `claude.com`')
-    expect(renderQuarantineReader(open, [], true)).toEqual(open)
+    expect(renderQuarantineReader(open, [], 'denylist')).toEqual(open)
   })
 
   it('does not touch the domains tier, which stays enumerated on purpose', () => {

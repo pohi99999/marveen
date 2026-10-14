@@ -94,3 +94,8 @@ jobs:
       # the Bash classification would silently bring back the measuring gap. Hermetic (pure functions).
       - run: python3 scripts/__tests__/skill-usage-capture.test.py
       - run: bash scripts/__tests__/conversation-ledger.test.sh
+      # 723bbb70 (3): the hook-load watcher is a gate instrument -- a watcher whose
+      # contract only runs by hand rots like the rest of this list warns. Hermetic:
+      # a throwaway install root, stand-in python and node gates, a local stub for
+      # the alert POST.
+      - run: python3 scripts/__tests__/hook-load-watch.test.py

@@ -34,8 +34,8 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **53**, egyedi `/api/...` útvonal-literál bennük: **155**
-- Claude Code hookok (`.claude/settings.json`): **7** esemény, **45** bejegyzés, **30** szkript a `scripts/hooks/` alatt
+- Route-modulok (`src/web/routes/*.ts`): **55**, egyedi `/api/...` útvonal-literál bennük: **162**
+- Claude Code hookok (`.claude/settings.json`): **7** esemény, **46** bejegyzés, **30** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **5** -- dream-engine, ledger-live-drain, memoria-heartbeat, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **8** -- channel-image, git-guard, hook-proof, prod-tree-guard, secret-gate, slack-progress, telegram-image, telegram-progress
 - Dokumentációs lapok a `docs/` alatt: **50**, ebből a fenti táblázat linkel **16**
