@@ -47,6 +47,7 @@ MARKER = "// MARVEEN-PATCH(elsokor922-d4): /status and /help belong to the comma
 FWD_MARKER = "// MARVEEN-PATCH(elsokor922-fwd): forwarded flag for the command hook"
 EVID_MARKER = "// MARVEEN-PATCH(cmd920-evid): inbound evidence for owner write commands"
 KBD_MARKER = "// MARVEEN-PATCH(c67f5f34-kbd): one-tap answer buttons"
+APR_MARKER = "// MARVEEN-PATCH(tg3558-apr): approval buttons are recorded for the dashboard"
 
 # Each anchor is the handler's full block, up to its closing `})` at column 0.
 ANCHORS = [
@@ -111,6 +112,22 @@ KBD_SEND = ("reply send options", re.compile(
     "kbdButtons.map(label => [{{ text: label }}]), one_time_keyboard: true, resize_keyboard: true }} : "
     "{{ remove_keyboard: true as const }} }} : {{}}), " + KBD_MARKER + "\n")
 
+# Card 3558: the owner's approval buttons (callback_data `apr:<id>:<nonce>:a|r`). The plugin's own
+# handler answers every non-`perm:` callback with an empty answer and drops it (server.ts 709-716,
+# measured 2026-10-15), so the press never reached anyone. Same pattern as evid: one JSON line into
+# <STATE_DIR>/approval-callbacks.jsonl (from.id, data, the callback id), written by the only process a
+# real Telegram update reaches; the dashboard reads it (src/web/approval-callbacks.ts), checks the
+# owner's id and the nonce, resolves, and answers the callback itself. No token, no URL in the plugin.
+APR_ANCHOR = ("callback data read", re.compile(
+    r"^bot\.on\('callback_query:data', async ctx => \{\n( *)const data = ctx\.callbackQuery\.data\n", re.MULTILINE))
+APR_INSERT = (
+    "{indent}if (typeof data === 'string' && data.startsWith('apr:')) {{ try {{ const aprFile = join(STATE_DIR, 'approval-callbacks.jsonl'); "
+    "try {{ if (statSync(aprFile).size > 262144) renameSync(aprFile, aprFile + '.1') }} catch {{}}; "
+    "writeFileSync(aprFile, JSON.stringify({{ callback_query_id: ctx.callbackQuery.id, data, from_id: ctx.from.id, "
+    "chat_id: ctx.callbackQuery.message?.chat?.id ?? null, message_id: ctx.callbackQuery.message?.message_id ?? null, at: Date.now() }}) + '\\n', "
+    "{{ flag: 'a', mode: 0o600 }}) }} catch {{}}; return }} " + APR_MARKER + "\n"
+)
+
 # Independent patches: each has its own marker and is all-or-nothing on its
 # own, so a plugin update that moves one anchor does not undo the other.
 PATCHES = [
@@ -125,6 +142,9 @@ PATCHES = [
     # an anchor may carry its own mode and insert (name, regex, mode, insert): the three kbd lines differ
     {"name": "kbd", "marker": KBD_MARKER, "anchors": [KBD_SCHEMA, KBD_CHECK, KBD_SEND], "mode": "insert-after",
      "fallback": "the reply tool has no buttons: a question goes out without them and is answered by typing"},
+    {"name": "apr", "marker": APR_MARKER, "anchors": [APR_ANCHOR], "mode": "insert-after",
+     "insert": APR_INSERT,
+     "fallback": "approval buttons are swallowed by the plugin; the owner decides with /approvals <n> approve|reject <nonce> or on the dashboard"},
 ]
 
 

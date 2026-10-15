@@ -58,13 +58,13 @@ describe('patch-telegram-plugin.py', () => {
   it('2nd run is a no-op: returns `already`, byte-identical, silent', () => {
     const state = join(cache, 'state.json')
     run(['--state', state])
-    expect(readState(state).files).toEqual([{ version: '0.0.7', path: server, status: 'patched', patches: { d4: 'patched', fwd: 'patched', evid: 'patched', kbd: 'patched' } }])
+    expect(readState(state).files).toEqual([{ version: '0.0.7', path: server, status: 'patched', patches: { d4: 'patched', fwd: 'patched', evid: 'patched', kbd: 'patched', apr: 'patched' } }])
     const once = readFileSync(server, 'utf-8')
     const r = run(['--state', state])
     expect(r.status).toBe(0)
     expect(r.stderr).toBe('')
     expect(readFileSync(server, 'utf-8')).toBe(once)
-    expect(readState(state).files).toEqual([{ version: '0.0.7', path: server, status: 'already', patches: { d4: 'already', fwd: 'already', evid: 'already', kbd: 'already' } }])
+    expect(readState(state).files).toEqual([{ version: '0.0.7', path: server, status: 'already', patches: { d4: 'already', fwd: 'already', evid: 'already', kbd: 'already', apr: 'already' } }])
   })
 
   it('a changed anchor (plugin update): loud line, THAT patch left out, the other still applied, exit 0', () => {
@@ -79,7 +79,7 @@ describe('patch-telegram-plugin.py', () => {
     expect(text).toContain("bot.command('help', async ctx => {")
     expect(text).toContain('elsokor922-fwd')
     expect(syntaxErrors(text)).toEqual([])
-    expect(readState(state).files[0].patches).toEqual({ d4: 'anchor-missing:status handler', fwd: 'patched', evid: 'patched', kbd: 'patched' })
+    expect(readState(state).files[0].patches).toEqual({ d4: 'anchor-missing:status handler', fwd: 'patched', evid: 'patched', kbd: 'patched', apr: 'patched' })
   })
 
   // #1530 review: owner write commands need evidence the owner's chat sent
@@ -281,7 +281,7 @@ describe('kbd: reply-keyboard buttons (c67f5f34)', () => {
     expect(r.status).toBe(0)
     expect(r.stderr).toMatch(/LOUD: reply send options not found exactly once.*the kbd patch left out, the reply tool has no buttons/)
     expect(readFileSync(server, 'utf-8')).not.toContain(KBD)
-    expect(readState(state).files[0].patches).toEqual({ d4: 'patched', fwd: 'patched', evid: 'patched', kbd: 'anchor-missing:reply send options' })
+    expect(readState(state).files[0].patches).toEqual({ d4: 'patched', fwd: 'patched', evid: 'patched', kbd: 'anchor-missing:reply send options', apr: 'patched' })
   })
 
   it('a file patched by the previous version (d4, fwd, evid) gets kbd on the next run', () => {
@@ -311,5 +311,22 @@ describe('channels.sh wiring (review #1529, point 1)', () => {
 
   it('an isolated/explicit config dir is handed to the patcher, so it writes the cache the session launches from', () => {
     expect(code).toMatch(/if \[ -n "\$CFG_ENV" \]; then\n\s*CLAUDE_CONFIG_DIR="\$_cfg_dir" python3 "\$INSTALL_DIR\/scripts\/patch-telegram-plugin\.py"/)
+  })
+
+  // Card 3558: the owner's approval buttons are recorded for the dashboard, before the plugin's own
+  // `perm:` regex drops every other callback (measured on 0.0.7: an unknown callback got an empty answer).
+  it('apr: the approval-button line sits right after the callback data is read, once, and the file still parses', () => {
+    expect(run().status).toBe(0)
+    const text = readFileSync(server, 'utf-8')
+    const lines = text.split('\n')
+    const at = lines.findIndex(l => l.includes('MARVEEN-PATCH(tg3558-apr)'))
+    expect(at).toBeGreaterThan(0)
+    expect(lines[at - 1].trim()).toBe('const data = ctx.callbackQuery.data')
+    expect(lines[at]).toContain("data.startsWith('apr:')")
+    expect(lines[at]).toContain("join(STATE_DIR, 'approval-callbacks.jsonl')")
+    expect(lines[at]).toContain('from_id: ctx.from.id')
+    expect(lines[at + 1].trim()).toContain("/^perm:(allow|deny|more)")
+    expect(text.split('MARVEEN-PATCH(tg3558-apr)').length).toBe(2)
+    expect(syntaxErrors(text)).toEqual([])
   })
 })

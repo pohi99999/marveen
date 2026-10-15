@@ -118,14 +118,16 @@ export async function refreshMarveenBotUsername(): Promise<void> {
   } catch { /* offline; cache stays stale */ }
 }
 
-export async function sendTelegramMessage(token: string, chatId: string, text: string): Promise<number | null> {
+// `extra` is merged into the Bot API body (card 3558: an inline keyboard under the owner's approval
+// notification). Nothing else about the send changes.
+export async function sendTelegramMessage(token: string, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<number | null> {
   // Test-run marking happens HERE too, not only in notifyChannel: this path
   // reads its token from .env FILES (schedule-runner alerts), so blanking
   // CHANNEL_TOKEN/CHANNEL_CHAT_ID in a test's environment does not stop it.
   const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text: markIfTestRun(text) }),
+    body: JSON.stringify({ ...extra, chat_id: chatId, text: markIfTestRun(text) }),
     signal: AbortSignal.timeout(TOOL_TIMEOUTS['telegram']),
   })
   // fetch does not throw on 4xx -- a wrong chat_id or revoked token resolves
@@ -157,6 +159,31 @@ export async function sendTelegramMessage(token: string, chatId: string, text: s
     throw new Error(`Telegram API${code}: ok:false ${String(data.description ?? '').slice(0, 200)}`)
   }
   return typeof data?.result?.message_id === 'number' ? data.result.message_id : null
+}
+
+// Card 3558: after the owner's decision the notification is rewritten (and its buttons removed), so
+// a second look at the chat shows the outcome, not a live button. Best effort: a failure is logged
+// by the caller, the decision itself is already in the DB.
+export async function editTelegramMessageText(token: string, chatId: string, messageId: number, text: string): Promise<boolean> {
+  const resp = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: markIfTestRun(text), reply_markup: { inline_keyboard: [] } }),
+    signal: AbortSignal.timeout(TOOL_TIMEOUTS['telegram']),
+  })
+  if (!resp.ok) throw new Error(`Telegram API ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`)
+  return true
+}
+
+export async function answerTelegramCallbackQuery(token: string, callbackQueryId: string, text: string): Promise<boolean> {
+  const resp = await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callback_query_id: callbackQueryId, text: text.slice(0, 200) }),
+    signal: AbortSignal.timeout(TOOL_TIMEOUTS['telegram']),
+  })
+  if (!resp.ok) throw new Error(`Telegram API ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`)
+  return true
 }
 
 export async function sendTelegramPhoto(token: string, chatId: string, photoPath: string, caption: string): Promise<void> {

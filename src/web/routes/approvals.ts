@@ -5,13 +5,14 @@ import { PROJECT_ROOT, MAIN_AGENT_ID, TELEGRAM_BOT_TOKEN } from '../../config.js
 import {
   consumeApproval,
   createApproval, getApproval, resolveApproval, listApprovals, expireTimedOutApprovals,
-  createAgentMessage, setApprovalTelegramMessageId,
+  createAgentMessage, setApprovalTelegramMessageId, resolveApprovalByOwner,
   type Approval,
 } from '../../db.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { resolveOwnerChatId } from '../../owner-chat.js'
-import { sendTelegramMessage } from '../telegram.js'
+import { sendTelegramMessage, editTelegramMessageText, answerTelegramCallbackQuery } from '../telegram.js'
+import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, checkOwnerCallback, OWNER_RESOLVER, type OwnerDecision } from '../telegram-approval.js'
 import type { RouteContext } from './types.js'
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -90,12 +91,53 @@ export function buildOwnerApprovalText(approval: Approval): string {
   const expires = approval.timeout_at
     ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
     : 'nincs'
-  return [
+  const lines = [
     `[JÓVÁHAGYÁS KELL] ${approval.agent_id} | ${approval.category}`,
     approval.action_description,
+    ...(approval.category === 'email_send' ? emailSummaryLines(approval) : []),
     `Lejárat: ${expires}`,
-    `Döntés: Dashboard -> Jóváhagyások (id: ${approval.id})`,
-  ].join('\n')
+  ]
+  // Card 3558: the owner decides here, on Telegram -- with the buttons under this message, or
+  // with the command that carries this approval's nonce. The dashboard stays as the third way.
+  if (approval.owner_nonce) {
+    lines.push(`Döntés: a gombokkal lent, vagy: /approvals <n> approve|reject ${approval.owner_nonce} (n: a sorszám a /approvals listában)`)
+  }
+  lines.push(`Dashboard -> Jóváhagyások (id: ${approval.id})`)
+  return lines.join('\n')
+}
+
+// Card 3558: ONE server-side resolution for every Telegram entry point (button callback, /approvals
+// command). Identity and nonce are checked by the caller's path (callback: from.id == owner; command:
+// the dispatcher's owner-chat + write-evidence gates); the state check and the write are one
+// conditional UPDATE in the DB. The notification is rewritten with the outcome, best effort.
+export type OwnerDecisionResult =
+  | { ok: true; approval: Approval }
+  | { ok: false; reason: 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired'; approval?: Approval }
+export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDecision, nowS = Math.floor(Date.now() / 1000)): OwnerDecisionResult {
+  const r = resolveApprovalByOwner({ id, nonce, decision, resolvedBy: OWNER_RESOLVER, nowS })
+  if (r.ok) {
+    logger.info({ id, decision, resolved_by: OWNER_RESOLVER }, 'Approval resolved by the owner on Telegram')
+    const a = r.approval
+    if (TELEGRAM_BOT_TOKEN && a.telegram_message_id != null) {
+      const ownerChat = resolveOwnerChatId()
+      if (ownerChat) {
+        void editTelegramMessageText(TELEGRAM_BOT_TOKEN, ownerChat, a.telegram_message_id, `${buildOwnerApprovalText(a)}\n\n${decisionText(a, decision, new Date(nowS * 1000))}`)
+          .catch((err) => logger.warn({ err, id }, 'approval decision: notification rewrite failed (decision is saved)'))
+      }
+    }
+  }
+  return r
+}
+
+export function ownerDecisionRefusalText(reason: string): string {
+  switch (reason) {
+    case 'not_found': return 'Nincs ilyen jóváhagyás.'
+    case 'no_nonce': return 'Ehhez a jóváhagyáshoz nincs Telegram-kód; a dashboardon dönthető el.'
+    case 'wrong_nonce': return 'A kód nem ehhez a jóváhagyáshoz tartozik; nem változtattam semmit.'
+    case 'already_resolved': return 'Ez a jóváhagyás már eldőlt; nem változtattam semmit.'
+    case 'expired': return 'Ez a jóváhagyás lejárt; nem változtattam semmit.'
+    default: return 'Nem sikerült feloldani; nem változtattam semmit.'
+  }
 }
 
 // When the owner send is suppressed or fails AND the requester is the main
@@ -142,7 +184,8 @@ function notifyOwner(approval: Approval): void {
       return
     }
     try {
-      const messageId = await sendTelegramMessage(TELEGRAM_BOT_TOKEN, ownerChat, buildOwnerApprovalText(approval))
+      const extra = approval.owner_nonce ? { reply_markup: ownerApprovalKeyboard(approval.id, approval.owner_nonce) } : {}
+      const messageId = await sendTelegramMessage(TELEGRAM_BOT_TOKEN, ownerChat, buildOwnerApprovalText(approval), extra)
       if (messageId != null) setApprovalTelegramMessageId(approval.id, messageId)
       logger.info({ approvalId: approval.id, messageId }, 'approval owner notification sent')
     } catch (err) {
@@ -237,6 +280,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       action_payload: typeof action_payload === 'string' ? action_payload : null,
       timeout_at,
       content_hash: typeof content_hash === 'string' ? content_hash : null,
+      owner_nonce: newApprovalNonce(),
     })
 
     notifyOwner(approval)
@@ -322,6 +366,48 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       return true
     }
     json(res, approval)
+    return true
+  }
+
+  // POST /api/approvals/:id/telegram-decision -- the owner's button press, relayed by the coordinator
+  // (card 3558). Identity: from_id must equal the configured owner chat/user id; the nonce must be
+  // the approval's own. Any agent can reach this route with the fleet bearer, which is why the
+  // nonce (known only from the owner's Telegram message) is required, not just the id.
+  const decMatch = path.match(/^\/api\/approvals\/([^/]+)\/telegram-decision$/)
+  if (decMatch && method === 'POST') {
+    let body: { nonce?: unknown; decision?: unknown; from_id?: unknown; callback_query_id?: unknown; callback_data?: unknown }
+    try {
+      body = JSON.parse((await readBody(req)).toString())
+    } catch {
+      json(res, { error: 'Invalid JSON' }, 400)
+      return true
+    }
+    const ownerId = resolveOwnerChatId()
+    const data = typeof body.callback_data === 'string'
+      ? body.callback_data
+      : `apr:${decMatch[1]}:${typeof body.nonce === 'string' ? body.nonce : ''}:${body.decision === 'approved' ? 'a' : body.decision === 'rejected' ? 'r' : '?'}`
+    const check = checkOwnerCallback(data, body.from_id as number | string | null | undefined, ownerId)
+    if (!check.ok) {
+      logger.warn({ id: decMatch[1], reason: check.reason }, 'telegram-decision refused')
+      json(res, { error: check.reason }, check.reason === 'malformed' ? 400 : 403)
+      return true
+    }
+    if (check.parsed.approvalId !== decMatch[1]) {
+      json(res, { error: 'callback_data names another approval' }, 400)
+      return true
+    }
+    const r = applyOwnerDecision(decMatch[1], check.parsed.nonce, check.parsed.decision)
+    const cbId = typeof body.callback_query_id === 'string' ? body.callback_query_id : null
+    if (cbId && TELEGRAM_BOT_TOKEN) {
+      void answerTelegramCallbackQuery(TELEGRAM_BOT_TOKEN, cbId, r.ok ? (check.parsed.decision === 'approved' ? 'Jóváhagyva.' : 'Elutasítva.') : ownerDecisionRefusalText(r.reason))
+        .catch((err) => logger.warn({ err }, 'answerCallbackQuery failed'))
+    }
+    if (!r.ok) {
+      const status = r.reason === 'not_found' ? 404 : r.reason === 'wrong_nonce' ? 403 : r.reason === 'expired' ? 410 : 409
+      json(res, { error: r.reason, text: ownerDecisionRefusalText(r.reason) }, status)
+      return true
+    }
+    json(res, r.approval)
     return true
   }
 

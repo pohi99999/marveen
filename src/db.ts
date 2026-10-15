@@ -1371,6 +1371,8 @@ export function initDatabase(dbPathOverride?: string): void {
   // used it. Rows consumed by the gate leave both NULL.
   try { db.exec('ALTER TABLE approvals ADD COLUMN consumed_by TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE approvals ADD COLUMN consumed_ref TEXT') } catch { /* already exists */ }
+  // Card 3558: the per-approval nonce the owner's Telegram decision must carry (button callback or /approvals command).
+  try { db.exec('ALTER TABLE approvals ADD COLUMN owner_nonce TEXT') } catch { /* already exists */ }
   // Every consume call leaves a row here, the refused ones too: a second send
   // attempt on a used approval is exactly the event worth seeing afterwards.
   // consumed_backfill is for a one-off data fix of rows a past send never
@@ -5549,6 +5551,7 @@ export interface Approval {
   consumed_ref?: string | null
   content_hash: string | null
   consumed_at: number | null
+  owner_nonce?: string | null
 }
 
 export function createApproval(params: {
@@ -5559,11 +5562,12 @@ export function createApproval(params: {
   action_payload?: string | null
   timeout_at?: number | null
   content_hash?: string | null
+  owner_nonce?: string | null
 }): Approval {
   const now = Math.floor(Date.now() / 1000)
   db.prepare(`
-    INSERT INTO approvals (id, agent_id, category, action_description, action_payload, timeout_at, requested_at, content_hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO approvals (id, agent_id, category, action_description, action_payload, timeout_at, requested_at, content_hash, owner_nonce)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id,
     params.agent_id,
@@ -5573,6 +5577,7 @@ export function createApproval(params: {
     params.timeout_at ?? null,
     now,
     params.content_hash ?? null,
+    params.owner_nonce ?? null,
   )
   return {
     id: params.id,
@@ -5590,7 +5595,38 @@ export function createApproval(params: {
     consumed_ref: null,
     content_hash: params.content_hash ?? null,
     consumed_at: null,
+    owner_nonce: params.owner_nonce ?? null,
   }
+}
+
+// Card 3558: the owner's Telegram decision, resolved on the server in ONE conditional UPDATE:
+// only a pending row with this exact nonce, inside its window, flips -- the same shape as
+// consumeApproval, so a stale button, a guessed nonce or a second press can never decide twice.
+export type OwnerResolveRefusal = 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired'
+export function resolveApprovalByOwner(params: {
+  id: string
+  nonce: string
+  decision: 'approved' | 'rejected'
+  resolvedBy: string
+  nowS?: number
+}): { ok: true; approval: Approval } | { ok: false; reason: OwnerResolveRefusal; approval?: Approval } {
+  const now = params.nowS ?? Math.floor(Date.now() / 1000)
+  return db.transaction(() => {
+    const changes = db.prepare(`
+      UPDATE approvals SET status = ?, resolved_at = ?, resolved_by = ?
+       WHERE id = ? AND status = 'pending' AND owner_nonce IS NOT NULL AND owner_nonce = ?
+         AND (timeout_at IS NULL OR timeout_at > ?)
+    `).run(params.decision, now, params.resolvedBy, params.id, params.nonce, now).changes
+    const row = getApproval(params.id)
+    if (changes === 1 && row) return { ok: true as const, approval: row }
+    let reason: OwnerResolveRefusal
+    if (!row) reason = 'not_found'
+    else if (!row.owner_nonce) reason = 'no_nonce'
+    else if (row.owner_nonce !== params.nonce) reason = 'wrong_nonce'
+    else if (row.status !== 'pending') reason = 'already_resolved'
+    else reason = 'expired'
+    return { ok: false as const, reason, approval: row }
+  })()
 }
 
 export function getApproval(id: string): Approval | undefined {

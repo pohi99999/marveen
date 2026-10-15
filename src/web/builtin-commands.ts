@@ -6,6 +6,7 @@
 // the same `usage`; the nonce writes (/runs stop, /jobs on|off|run|skip,
 // /approvals approve|reject|renew) stay planned (CMD920 2.).
 
+import { applyOwnerDecision, ownerDecisionRefusalText } from './routes/approvals.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT, MAIN_AGENT_ID, OWNER_NAME, APP_TZ, BOT_NAME } from '../config.js'
@@ -826,8 +827,25 @@ export function registerBuiltinCommands(): void {
     name: 'jobs', kind: 'write', confirm: true, planned: true, usage: '/jobs <név> on|off|run|skip <nonce>', description: 'feladat be/ki, futtatás most, következő kihagyása',
     matches: args => args.length >= 2 && ['on', 'off', 'run', 'skip'].includes(args[1].toLowerCase()),
   })
+  // Card 3558: the owner's decision from Telegram, resolved on the server with the approval's own
+  // nonce (the same resolver the inline buttons use). The dispatcher already proved the owner's chat
+  // and the message's inbound evidence; the nonce binds the command to one approval. `renew` stays planned.
   registerCommand({
-    name: 'approvals', kind: 'write', confirm: true, planned: true, usage: '/approvals <n> approve|reject|renew <nonce>', description: 'jóváhagyás, elutasítás, megújítás',
-    matches: args => args.length >= 2 && ['approve', 'reject', 'renew'].includes(args[1].toLowerCase()),
+    name: 'approvals', kind: 'write', confirm: true, usage: '/approvals <n> approve|reject <nonce>', description: 'jóváhagyás eldöntése a Telegram-kóddal',
+    matches: args => args.length >= 3 && ['approve', 'reject'].includes(args[1].toLowerCase()),
+    run: async (ctx, args) => {
+      const n = Number(args[0])
+      const list = listApprovals({ status: 'pending', limit: 50 })
+      const a = Number.isInteger(n) && n >= 1 ? list[n - 1] : undefined
+      if (!a) { await ctx.reply(`Nincs ${args[0]}. várakozó jóváhagyás. Lásd /approvals.`); return }
+      const decision = args[1].toLowerCase() === 'approve' ? 'approved' : 'rejected'
+      const r = applyOwnerDecision(a.id, args[2], decision, Math.floor(ctx.now / 1000))
+      if (!r.ok) { await ctx.reply(`${ownerDecisionRefusalText(r.reason)} (${n}. tétel, id: ${a.id})`); return }
+      await ctx.reply(`${decision === 'approved' ? 'Jóváhagyva' : 'Elutasítva'}: ${a.category} · ${clip(a.action_description, 60)} (id: ${a.id}).`)
+    },
+  })
+  registerCommand({
+    name: 'approvals', kind: 'write', confirm: true, planned: true, usage: '/approvals <n> renew <nonce>', description: 'jóváhagyás ablakának megújítása',
+    matches: args => args.length >= 2 && args[1].toLowerCase() === 'renew',
   })
 }
