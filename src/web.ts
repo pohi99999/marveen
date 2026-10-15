@@ -34,6 +34,7 @@ import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
 import { startChannelIntakeMonitor } from './web/channel-intake-monitor.js'
 import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
 import { startMidTurnCommandWatcher } from './web/midturn-commands.js'
+import { startApprovalCallbackWatcher } from './web/approval-callbacks.js'
 import { startInboxNudgeWatcher } from './web/inbox-nudge-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
@@ -486,6 +487,8 @@ export function startWebServer(port = 3420): http.Server {
   if (!webOnly) logger.info('Stuck-input watcher started (15s poll, 20s offset)')
 
   const midTurnCommandInterval = webOnly ? undefined : startMidTurnCommandWatcher()
+  // Card 3558: the owner's approval buttons (plugin patch 'apr' -> approval-callbacks.jsonl -> here).
+  const approvalCallbackInterval = webOnly ? undefined : startApprovalCallbackWatcher()
   if (!webOnly) logger.info('Mid-turn command watcher started (3s poll)')
 
   const stuckToolCallInterval = webOnly ? undefined : startStuckToolCallWatcher()
@@ -745,6 +748,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
     if (costsSyncInterval) clearInterval(costsSyncInterval)
     clearInterval(stuckInputInterval)
     if (midTurnCommandInterval) clearInterval(midTurnCommandInterval)
+    if (approvalCallbackInterval) clearInterval(approvalCallbackInterval)
     clearInterval(stuckToolCallInterval)
     if (inboxNudgeInterval) clearInterval(inboxNudgeInterval)
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)
