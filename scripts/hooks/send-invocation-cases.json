@@ -910,6 +910,46 @@
       "name": "#1855 control: a cat heredoc without a pipe that mentions send.py --to",
       "cmd": "cat <<'EOF'\npython3 scripts/support-mail/send.py --to a@example.invalid\nEOF",
       "expected": false
+    },
+    {
+      "name": "gws gmail +send with --to (card e6287e47)",
+      "cmd": "gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice!' 2>/dev/null",
+      "expected": true
+    },
+    {
+      "name": "gws gmail users messages send with --to (card e6287e47)",
+      "cmd": "gws gmail users messages send --to alice@example.com --subject Report --body 'See attached' -a report.pdf",
+      "expected": true
+    },
+    {
+      "name": "gws gmail +send with --to= form and --cc",
+      "cmd": "gws gmail +send --to=alice@example.com --cc bob@example.com --subject x --body y --html",
+      "expected": true
+    },
+    {
+      "name": "gws gmail +send --draft only creates a draft (owner presses send)",
+      "cmd": "gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft",
+      "expected": false
+    },
+    {
+      "name": "gws gmail read-only: messages list",
+      "cmd": "gws gmail users messages list --maxResults 5 2>/dev/null",
+      "expected": false
+    },
+    {
+      "name": "gws gmail read-only: messages get",
+      "cmd": "gws gmail users messages get --id 18f --format full",
+      "expected": false
+    },
+    {
+      "name": "gws +send help text, no --to",
+      "cmd": "gws gmail +send --help",
+      "expected": false
+    },
+    {
+      "name": "another gws service with a send word is not a mail send",
+      "cmd": "gws chat spaces messages send --space x --text hi",
+      "expected": false
     }
   ]
 }

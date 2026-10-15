@@ -94,6 +94,25 @@ _PYTHON = re.compile(r"^python3?$", re.I)
 # teszt-hibakent jelenjen meg, ne incidenskent (Marveen, msg 14289).
 _NODEISH = re.compile(r"^(node|tsx|ts-node|deno|bun|npx)$", re.I)
 _GRAPHMAIL = re.compile(r"^graph-mail(\.ts|\.js)?$", re.I)
+# Card e6287e47 (marveen 2070, 2026-09-27): the gws CLI's Gmail send ran past both gates. The CLI's
+# send forms are `gws gmail +send` and `gws gmail users messages send`, always with --to. A `--draft`
+# only creates a draft (the owner presses send), so it is not a send invocation.
+_GWS = re.compile(r"^gws$", re.I)
+
+
+def _gws_gmail_send(rest) -> bool:
+    if len(rest) < 2 or rest[0] != "gmail":
+        return False
+    sub = rest[1:]
+    if sub[0] == "+send":
+        args = sub[1:]
+    elif sub[:3] == ["users", "messages", "send"]:
+        args = sub[3:]
+    else:
+        return False
+    if "--draft" in args:
+        return False
+    return any(t == "--to" or t.startswith("--to=") for t in args)
 _WRAPPER_SHELL = re.compile(r"^(sh|bash|zsh|dash)$", re.I)
 _CURLISH = re.compile(r"^(curl|wget|http)$", re.I)
 # Interpreter kod-string argumentum (python -c / node -e): az interpreternek
@@ -417,6 +436,9 @@ def _head_is_send(toks, depth: int) -> bool:
         return True
     # graph-mail kimeno alparanccsal (tsx/node runner utan is)
     if any(_GRAPHMAIL.match(_basename(t)) for t in toks) and "send" in rest:
+        return True
+    # gws gmail +send / users messages send --to ... (card e6287e47)
+    if _GWS.match(prog) and _gws_gmail_send(rest):
         return True
     # curl/wget: a cel-token akkor is muvelet, ha idezojelben allt -- a
     # horgonyzott minta valasztja el a payload-belseji emlitestol.

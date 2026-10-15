@@ -91,6 +91,19 @@ const ENV_ASSIGN = /^[A-Za-z_][A-Za-z_0-9]*=/
 const CMD_POSITION_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '{', '!'])
 const SENDER_PROG = /^(sendmail|msmtp|swaks)$/i
 const SENDPY = /^send\.py$/i
+// Card e6287e47: the gws CLI's Gmail send (`gws gmail +send`, `gws gmail users messages send`, with
+// --to). A `--draft` only creates a draft and is not a send. Same rule as the python twin.
+const GWS = /^gws$/i
+function gwsGmailSend(rest) {
+  if (rest.length < 2 || rest[0] !== 'gmail') return false
+  const sub = rest.slice(1)
+  let args
+  if (sub[0] === '+send') args = sub.slice(1)
+  else if (sub[0] === 'users' && sub[1] === 'messages' && sub[2] === 'send') args = sub.slice(3)
+  else return false
+  if (args.includes('--draft')) return false
+  return args.some((t) => t === '--to' || t.startsWith('--to='))
+}
 const PYTHON = /^python3?$/i
 const NODEISH = /^(node|tsx|ts-node|deno|bun|npx)$/i
 const GRAPHMAIL = /^graph-mail(\.ts|\.js)?$/i
@@ -337,6 +350,7 @@ function headIsSend(toks, depth) {
   if (candidates.some((c) => SENDPY.test(c)) &&
       rest.some((t) => t === '--to' || t.startsWith('--to='))) return true
   if (toks.some((t) => GRAPHMAIL.test(basename(t))) && rest.includes('send')) return true
+  if (GWS.test(prog) && gwsGmailSend(rest)) return true
   // RESENDGETTWIN1010: only an actual send (POST/PUT/..., or a body) fires; a
   // read-only GET/HEAD passes; an undecidable method stays fail-closed.
   if (CURLISH.test(prog) && rest.some((t) => RESEND_TARGET.test(t))) {

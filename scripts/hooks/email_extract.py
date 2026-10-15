@@ -274,6 +274,12 @@ def collect_email_envelope(tool_name: str, tool_input: dict):
             to = [f"messageId:{ti['messageId']}"]
     elif tool_name == "Bash":
         cmd = str((tool_input or {}).get("command") or "") if isinstance(tool_input, dict) else ""
+        # Card e6287e47: the gws CLI spells the attachment flag `-a <file>` too, and its `--html`
+        # is a switch (the body IS HTML), not a file. Normalise before the shared collectors so an
+        # approved gws letter cannot gain an attachment, and a bare --html is not read as a path.
+        if re.search(r"(^|[;&|]\s*|\s)gws\s+gmail\b", cmd):
+            cmd = re.sub(r"(^|\s)-a(?=[= ]\S)", r"\1--attach", cmd)
+            cmd = re.sub(r"\s--html(?=\s|$)", " ", cmd)
         text, reason = collect_bash_body(cmd)
         if not reason:
             to, cc, bcc, reason = collect_bash_recipients(cmd)

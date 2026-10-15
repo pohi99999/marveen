@@ -212,6 +212,26 @@ with tempfile.TemporaryDirectory() as td:
     check("the SAME send a SECOND time: DENIED (one-shot)",
           code == 2 and "FEL LETT HASZNALVA" in err, f"exit={code}")
 
+    # --- card e6287e47: the gws CLI's Gmail send is a send too -------------------
+    gws_cmd = ("gws gmail +send --to a@b.hu --subject 'Teszt gws tárgy' "
+               "--body 'Kedves Ügyfelünk! Ez a gws-levél törzse.' 2>/dev/null")
+    gws_payload = {"tool_name": "Bash", "tool_input": {"command": gws_cmd}}
+    code, _, err = run_gate(store, gws_payload)
+    anchor_g = anchor_from_stderr(err)
+    check("gws gmail +send at level 2 without approval: DENIED, anchor carried",
+          code == 2 and anchor_g is not None, f"exit={code} err={err[:150]!r}")
+    approve(store, anchor_g)
+    code, out, _ = run_gate(store, gws_payload)
+    check("gws gmail +send with an approved, matching anchor: ALLOWED",
+          code == 0 and "felhasznalva" in out, f"exit={code} out={out[:120]!r}")
+    code, _, _ = run_gate(store, {"tool_name": "Bash", "tool_input": {"command": "gws gmail users messages list --maxResults 5 2>/dev/null"}})
+    check("gws gmail read-only list passes untouched", code == 0, f"exit={code}")
+    code, _, _ = run_gate(store, {"tool_name": "Bash", "tool_input": {"command": "gws gmail +send --to a@b.hu --subject x --body y --draft"}})
+    check("gws gmail +send --draft is not a send (draft-required policy)", code == 0, f"exit={code}")
+    gws_att = {"tool_name": "Bash", "tool_input": {"command": "gws gmail +send --to a@b.hu --subject 'Tárgy' --body 'Törzs.' -a /nonexistent/report.pdf"}}
+    code, _, err = run_gate(store, gws_att)
+    check("gws -a attachment that cannot be read: DENIED (unanchorable)", code == 2, f"exit={code} err={err[:120]!r}")
+
     # window expiry: a different letter, approved too long ago
     payload_b = mcp_send(subject="Masik tárgy")
     _, _, err = run_gate(store, payload_b)
