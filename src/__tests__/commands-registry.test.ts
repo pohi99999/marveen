@@ -95,7 +95,9 @@ describe('/help generated from the registry (CMD920 test 3)', () => {
     const confirmSection = help.split('MODOSÍT, megerősítéssel')[1].split('SAJÁT')[0]
     expect(confirmSection).toContain('/runs stop <nonce>')
     expect(confirmSection).toContain('/jobs <név> on|off|run|skip <nonce>')
-    expect(confirmSection).toContain('/approvals <n> approve|reject|renew <nonce>')
+    // Card 3558: approve|reject is real (the owner's Telegram decision), renew stays planned.
+    expect(confirmSection).toContain('/approvals <n> approve|reject <nonce>')
+    expect(confirmSection).toContain('/approvals <n> renew <nonce>')
   })
 
   it('owner-facing text carries no dash: /help and /commands lines are "name: description" (review #1529, point 4)', () => {
@@ -140,9 +142,11 @@ describe('/help generated from the registry (CMD920 test 3)', () => {
     expect(resolveCommand('model', ['back'])?.usage).toBe('/model default')
     expect(resolveCommand('model', [])?.kind).toBe('read')
     expect(resolveCommand('context', ['clear'])?.usage).toBe('/context clear')
-    for (const usage of ['/runs stop <nonce>', '/jobs <név> on|off|run|skip <nonce>', '/approvals <n> approve|reject|renew <nonce>']) {
+    for (const usage of ['/runs stop <nonce>', '/jobs <név> on|off|run|skip <nonce>', '/approvals <n> renew <nonce>']) {
       expect(listCommands().find(x => x.usage === usage)?.planned).toBe(true)
     }
+    // Card 3558: the owner's approve|reject on Telegram is a real write (nonce-bound, server-resolved).
+    expect(listCommands().find(x => x.usage === '/approvals <n> approve|reject <nonce>')?.planned).toBeFalsy()
     // /new and /clear are shipped as default CUSTOM commands, not builtins
     expect(listCommands().some(e => e.name === 'new' || e.name === 'clear')).toBe(false)
   })
