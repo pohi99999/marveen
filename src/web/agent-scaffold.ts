@@ -114,17 +114,45 @@ export function pythonHookCommand(scriptPath: string, args: readonly string[] = 
 // The tail keeps 0 and 2 as they are and turns every other status into 2, with the reason on stderr
 // after whatever the interpreter itself printed; the gate's stdout (a deny JSON on exit 0) is untouched.
 //
-// The deadline: where the host has coreutils `timeout`, the gate runs under it, two seconds inside the
+// The deadline: where the host has coreutils `timeout`, the gate runs under it, four seconds inside the
 // hook's own timeout, so a hung gate ends here with 124 (or 137 after the one-second kill grace) and
 // blocks, instead of being cut off by Claude Code's timeout, whose outcome this wrapper does not
-// control. Without `timeout` (a stock macOS) the gate runs as before and only that one case stays with
+// control. Four, not two (card a62a27ce, measured 2026-10-17 on WSL): a hung gate under `timeout -k 1 8`
+// ended at 8.0 s in two runs of three and at 11.6 s in the third, i.e. past a 10 s hook timeout, where
+// Claude Code kills the hook and the kill does not block (marveen-commands.py header, #1529). Without `timeout` (a stock macOS) the gate runs as before and only that one case stays with
 // Claude Code. The `test -x` / `command -v` interpreter probe before it is unchanged and still blocks
 // with its own message.
 export const GATE_FAIL_CLOSED_TAG = 'governance-kapu (fail-closed)'
 
-/** The gate's deadline inside a hook whose timeout is `hookTimeoutSec`: two seconds earlier, at least one. */
+/** The gate's deadline inside a hook whose timeout is `hookTimeoutSec`: four seconds earlier, at least one. */
 export function gateDeadlineSec(hookTimeoutSec: number): number {
-  return Math.max(1, Math.floor(hookTimeoutSec) - 2)
+  return Math.max(1, Math.floor(hookTimeoutSec) - 4)
+}
+
+// Card a62a27ce (owner GO 2026-10-17): Claude Code 2.1.295 added `onFailure: "block"` for command hooks
+// ("a hook that can't start, times out, or exits with an unexpected code blocks the action instead of
+// letting it through", changelog). The wrapper above already maps every failure it sees to exit 2; this
+// closes what it cannot see: the shell not starting at all, and Claude Code's own timeout firing first.
+// Set ONLY on the security gates below. The memory-frontmatter hygiene gates, the image resizer and every
+// UserPromptSubmit / Stop / PostToolUse hook stay without it: one broken hook there would stop every Bash
+// call or deafen the channel.
+export const GATE_ON_FAILURE = 'block' as const
+
+/** A security gate's hook entry: the fail-closed command, the hook timeout, and onFailure: block. */
+export function securityGateHook(command: string, timeout = 10): { type: 'command'; command: string; timeout: number; onFailure: typeof GATE_ON_FAILURE } {
+  return { type: 'command', command, timeout, onFailure: GATE_ON_FAILURE }
+}
+
+/** Is there a `scriptName` gate entry in `ptu` whose hooks all carry onFailure: block? (migration staleness) */
+export function gateEntriesBlockOnFailure(ptu: unknown[], scriptName: string, matcher?: string): boolean {
+  const mine = ptu.filter((e) => JSON.stringify(e).includes(scriptName)
+    && (matcher === undefined || (e as { matcher?: unknown })?.matcher === matcher))
+  if (!mine.length) return false
+  return mine.every((e) => {
+    const inner = (e as { hooks?: unknown }).hooks
+    return Array.isArray(inner) && inner.length > 0
+      && inner.every((h) => (h as { onFailure?: unknown })?.onFailure === GATE_ON_FAILURE)
+  })
 }
 
 // Extra arguments ride inside the invocation, never after the whole command: appended after the
@@ -985,7 +1013,7 @@ export function injectEmailSendGate(existing: Record<string, unknown>, threadRep
   const command = threadReply ? hookCommand(join(PROJECT_ROOT, 'scripts', 'email-send-gate.mjs'), [EMAIL_THREAD_REPLY_FLAG]) : base
   const entry = {
     matcher: EMAIL_GATE_MATCHER,
-    hooks: [{ type: 'command', command, timeout: 10 }],
+    hooks: [securityGateHook(command)],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   // Drop any prior email-gate entry (respawn re-runs this) before re-adding, so
@@ -1253,7 +1281,7 @@ export function injectSelfPaceGate(existing: Record<string, unknown>): void {
     // native-file route to the self-schedule store (gateDecision blocks a Write
     // to scheduled_tasks.json); a Bash-only matcher would leave that route open.
     matcher: 'ScheduleWakeup|CronCreate|CronDelete|CronList|RemoteTrigger|Bash|Write|Edit|NotebookEdit',
-    hooks: [{ type: 'command', command, timeout: 10 }],
+    hooks: [securityGateHook(command)],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
@@ -1333,7 +1361,7 @@ export function injectEgressGate(existing: Record<string, unknown>): void {
   if (isUnsafeHookCommand(command)) return
   const entry = {
     matcher: 'WebFetch',
-    hooks: [{ type: 'command', command, timeout: 10 }],
+    hooks: [securityGateHook(command)],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
@@ -1368,7 +1396,7 @@ export function injectBashEgressParser(existing: Record<string, unknown>): void 
   if (isUnsafeHookCommand(command)) return
   const entry = {
     matcher: 'Bash',
-    hooks: [{ type: 'command', command, timeout: 10 }],
+    hooks: [securityGateHook(command)],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
@@ -1415,7 +1443,7 @@ export function injectTelegramCopyGate(existing: Record<string, unknown>): void 
   if (isUnsafeHookCommand(command)) return
   const entry = {
     matcher: TELEGRAM_COPY_GATE_MATCHER,
-    hooks: [{ type: 'command', command, timeout: 10 }],
+    hooks: [securityGateHook(command)],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
@@ -1449,7 +1477,7 @@ export function injectMarveenApiCopyGate(existing: Record<string, unknown>): voi
   if (isUnsafeHookCommand(command)) return
   const entry = {
     matcher: MARVEEN_API_COPY_GATE_MATCHER,
-    hooks: [{ type: 'command', command, timeout: 10 }],
+    hooks: [securityGateHook(command)],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
@@ -1560,7 +1588,10 @@ export function ensureTelegramCopyGate(name: string): boolean {
     return j.includes('outgoing-copy-gate.py')
       && (e as { matcher?: unknown })?.matcher === MARVEEN_API_COPY_GATE_MATCHER
   })
-  if (wiredHere && apiWired && hookCommandWired(JSON.stringify(ptu), command)) return false
+  // a62a27ce: an entry without onFailure: block is stale too, and is replaced in place.
+  const blocks = gateEntriesBlockOnFailure(ptu, 'outgoing-copy-gate.py', TELEGRAM_COPY_GATE_MATCHER)
+    && gateEntriesBlockOnFailure(ptu, 'outgoing-copy-gate.py', MARVEEN_API_COPY_GATE_MATCHER)
+  if (wiredHere && apiWired && blocks && hookCommandWired(JSON.stringify(ptu), command)) return false
   injectTelegramCopyGate(settings)
   injectMarveenApiCopyGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -1592,7 +1623,8 @@ export function ensureEgressGate(name: string): boolean {
   // entry (dead on nvm PATHs, exit 127 = silently non-enforcing) must NOT
   // count as wired -- fall through so injectEgressGate replaces it in place.
   const ptuJson = JSON.stringify(ptu)
-  if (ptuJson.includes('egress-gate.mjs') && hookCommandWired(ptuJson, command)) return false
+  if (ptuJson.includes('egress-gate.mjs') && hookCommandWired(ptuJson, command)
+    && gateEntriesBlockOnFailure(ptu, 'egress-gate.mjs', 'WebFetch')) return false
   if (isUnsafeHookCommand(command)) return false
   injectEgressGate(settings)
   if (name !== MAIN_AGENT_ID) mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
@@ -1621,7 +1653,7 @@ export function ensureBashEgressParser(name: string): boolean {
   // non-enforcing, so both fall through to an in-place replace.
   const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === 'Bash'
     && hookCommandWired(JSON.stringify(e), command))
-  if (wired) return false
+  if (wired && gateEntriesBlockOnFailure(ptu, 'bash-egress-parser.mjs', 'Bash')) return false
   if (isUnsafeHookCommand(command)) return false
   injectBashEgressParser(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -2000,8 +2032,10 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
   const needEmail = agentGetsEmailGate(name)
     && (!hookCommandWired(ptuJson, emailCmdExpected)
       || emailGateMatcherStale(ptu)
-      || emailGateCommandStale(ptu, emailCmdExpected))
-  const needPace = agentGetsGovernanceGates(name) && !hookCommandWired(ptuJson, paceCmd)
+      || emailGateCommandStale(ptu, emailCmdExpected)
+      || !gateEntriesBlockOnFailure(ptu, 'email-send-gate.mjs'))
+  const needPace = agentGetsGovernanceGates(name)
+    && (!hookCommandWired(ptuJson, paceCmd) || !gateEntriesBlockOnFailure(ptu, 'self-pace-gate.mjs'))
   // The destructive gate has the same two failure modes, plus a third that is
   // specific to it: it was hand-wired on 2026-09-08, so an install can carry a
   // correct-looking entry this code never wrote. Treat a stale matcher as
