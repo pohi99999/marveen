@@ -145,11 +145,15 @@ describe('the builders', () => {
     expect(py.endsWith(failClosedGateRun('python3 "/some/dir/gate.py"', 'gate.py', 10))).toBe(true)
   })
 
-  it('the deadline is two seconds inside the hook timeout, never below one second', () => {
-    expect(gateDeadlineSec(10)).toBe(8)
-    expect(gateDeadlineSec(15)).toBe(13)
+  // a62a27ce: four seconds, not two -- a hung gate under `timeout -k 1 8` ended at 11.6 s in one run of
+  // three on WSL (2026-10-17), past the 10 s hook timeout, where Claude Code's kill does not block.
+  it('the deadline is four seconds inside the hook timeout, never below one second', () => {
+    expect(gateDeadlineSec(10)).toBe(6)
+    expect(gateDeadlineSec(15)).toBe(11)
+    expect(gateDeadlineSec(5)).toBe(1)
     expect(gateDeadlineSec(2)).toBe(1)
-    expect(hookCommand('/d/g.mjs', [], 15)).toContain('timeout -k 1 13 ')
+    expect(hookCommand('/d/g.mjs', [], 15)).toContain('timeout -k 1 11 ')
+    expect(hookCommand('/d/g.mjs')).toContain('timeout -k 1 6 ')
   })
 
   it('refuses an argument or a label that would need shell quoting', () => {
