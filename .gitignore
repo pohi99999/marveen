@@ -163,3 +163,6 @@ transcripts/
 #   supabase/.temp/  -> ignores a real directory, MISSES the symlink (it shows in
 #                       `git status`, so the next CLI run commits it again)
 supabase/.temp
+
+# vitest JSON report (written by --outputFile runs); committed by accident in da5bb61d
+.vitest.json
