@@ -973,12 +973,18 @@ function provisionIsolatedConfigDir(
     // an otherwise correctly authenticated agent lands on the login picker
     // (measured on korall, 2026-08-19). It needs a REAL file of its own here.
     const perUserAgent = readAgentRunAsUser(name) != null
+    // An own_team agent's credential IS the .credentials.json in this dir: its own /login
+    // writes it here (see the own_team branch of the launcher). Removing it on every spawn
+    // logged the agent out at each restart, the nightly respawn included (tablaor,
+    // 2026-10-18). Only fleet-token agents get the stale-file cleanup below.
+    const ownLogin = readAgentAuthMode(name) === 'own_team'
     for (const entry of readdirSync(realClaude)) {
       if (ISOLATED_CONFIG_SKIP.has(entry) || (perUserAgent && entry === '.claude.json')) {
         // Defensively drop a real .credentials.json that an older build may have
         // symlinked/copied here, so the env-var token is the only auth source.
+        // Never for own_team: there the file is the agent's own login, not a leftover.
         const stale = join(cfg, entry)
-        if (entry === '.credentials.json') {
+        if (entry === '.credentials.json' && !ownLogin) {
           try { rmSync(stale, { force: true }) } catch { /* absent */ }
         }
         continue
