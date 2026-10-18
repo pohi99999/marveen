@@ -15,7 +15,14 @@ vi.mock('node:os', async (orig) => {
 })
 vi.mock('../web/agent-config.js', async (orig) => {
   const actual = await orig<typeof import('../web/agent-config.js')>()
-  return { ...actual, agentDir: (name: string) => join(SANDBOX, 'agents', name) }
+  const agentDir = (name: string) => join(SANDBOX, 'agents', name)
+  // readAgentAuthMode resolves agentDir inside its own module, so the mock above does not
+  // reach it: read the sandbox config here with the same fallback ('shared').
+  const readAgentAuthMode = (name: string) => {
+    try { return JSON.parse(readFileSync(join(agentDir(name), 'agent-config.json'), 'utf8')).authMode ?? 'shared' }
+    catch { return 'shared' }
+  }
+  return { ...actual, agentDir, readAgentAuthMode }
 })
 
 // Imported AFTER the mocks are registered.
@@ -94,6 +101,33 @@ describe('ensureIsolatedChannelConfigDir', () => {
     mkdirSync(cfg, { recursive: true })
     writeFileSync(join(cfg, '.credentials.json'), '{"stale":true}')
     ensureIsolatedChannelConfigDir('testagent', 'telegram')
+    expect(existsSync(join(cfg, '.credentials.json'))).toBe(false)
+  })
+
+  // 2026-10-18, tablaor (Marveen 3824): an own_team agent authenticates from ITS OWN /login
+  // credential, and on Linux that is exactly <config dir>/.credentials.json. The stale-file
+  // removal above ran on every spawn regardless of the auth mode, so each restart (fresh or
+  // --continue, the nightly respawn, the context-guard handoff) deleted the owner's login and
+  // parked the agent on "Not logged in". Measured live: the file existed at 14:33, the 15:06
+  // restart logged "no .credentials.json in the isolated config dir yet".
+  it('KEEPS the own .credentials.json of an own_team agent across provisioning', () => {
+    writeFileSync(join(SANDBOX, 'agents', 'testagent', 'agent-config.json'), JSON.stringify({ authMode: 'own_team' }))
+    const cfg = join(SANDBOX, 'agents', 'testagent', '.claude-config')
+    mkdirSync(cfg, { recursive: true })
+    writeFileSync(join(cfg, '.credentials.json'), '{"own":true}')
+    ensureIsolatedChannelConfigDir('testagent', null)
+    ensureIsolatedChannelConfigDir('testagent', null)
+    expect(readFileSync(join(cfg, '.credentials.json'), 'utf8')).toBe('{"own":true}')
+    // still never linked to the shared root's credential
+    expect(lstatSync(join(cfg, '.credentials.json')).isSymbolicLink()).toBe(false)
+  })
+
+  it('still removes a stale .credentials.json for a fleet-token (shared authMode) agent', () => {
+    writeFileSync(join(SANDBOX, 'agents', 'testagent', 'agent-config.json'), JSON.stringify({ authMode: 'shared' }))
+    const cfg = join(SANDBOX, 'agents', 'testagent', '.claude-config')
+    mkdirSync(cfg, { recursive: true })
+    writeFileSync(join(cfg, '.credentials.json'), '{"stale":true}')
+    ensureIsolatedChannelConfigDir('testagent', null)
     expect(existsSync(join(cfg, '.credentials.json'))).toBe(false)
   })
 
