@@ -64,6 +64,7 @@ vi.mock('../web/agent-config.js', () => ({
   readAgentEngine: () => 'claude',
   readAgentVoiceConfig: () => ({ responseMode: 'text' }),
   readAgentWorksourceChannel: () => false,
+  readAgentPullDelivery: () => false,
 }))
 
 vi.mock('../web/agent-process.js', () => ({

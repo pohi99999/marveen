@@ -4,12 +4,12 @@ import {
   listKanbanCards, kanbanAssigneeExists, createKanbanCard, updateKanbanCard, KANBAN_WRITABLE_FIELDS, KANBAN_CREATE_FIELDS,
   deleteKanbanCard, moveKanbanCard, archiveKanbanCard, unarchiveKanbanCard,
   getKanbanComments, addKanbanComment, getKanbanCardEvents, getKanbanCardFieldEvents, listKanbanProjects,
-  getKanbanCard, getChildCards, getDb,
+  getKanbanCard, getChildCards, getDb, KANBAN_STATUSES,
   createAgentMessage, markKanbanCardDispatched,
   getKanbanSeqByIdPrefix,
   listLabels, getLabel, createLabel, updateLabel, deleteLabel,
   addLabelToCard, removeLabelFromCard, getLabelsForAllCards, getLabelsForCard,
-  addCardBlocker, removeCardBlocker, getBlockersForCard, getBlockedByCard,
+  addCardBlocker, removeCardBlocker, getBlockersForCard, getBlockedByCard, getCardsUnblockedBy, getLatestDoneTransitionAt,
   getBlockersForAllCards, blockerWouldCycle, parentWouldCycle,
   listArchivedKanbanCards,
   revertIdeaFromKanban,
@@ -22,15 +22,26 @@ import {
   type TokenPruneLag,
 } from '../../db.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
-import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS, DB_FILENAME } from '../../config.js'
+import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS, KANBAN_LABEL_COLORS_REJECTED, KANBAN_LABEL_COLORS_OVERFLOW, DB_FILENAME } from '../../config.js'
 import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
 import { isAgentRunning } from '../agent-process.js'
 import { resolveKanbanDispatch } from '../../kanban-dispatch.js'
 import { generateBreakdown } from '../llm-breakdown.js'
+import { getCardTokenUsage } from '../token-usage.js'
 import { logger } from '../../logger.js'
+import { MAX_LABEL_PALETTE_ENTRIES, resolveLabelColor } from '../../css-color.js'
 import { readBody, json, jsonMaybeGzip, methodNotAllowed } from '../http-helpers.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import type { RouteContext } from './types.js'
+
+// KANBAN_LABEL_COLORS entries that are not colours were dropped by config.ts
+// (which cannot log); say so once, when the kanban routes load.
+if (KANBAN_LABEL_COLORS_REJECTED.length > 0) {
+  logger.warn({ rejected: KANBAN_LABEL_COLORS_REJECTED.length }, 'KANBAN_LABEL_COLORS: entries that are not a colour (hex, CSS colour name, numeric rgb()/hsl(), var(--token)) were dropped from the label palette')
+}
+if (KANBAN_LABEL_COLORS_OVERFLOW > 0) {
+  logger.warn({ dropped: KANBAN_LABEL_COLORS_OVERFLOW, kept: KANBAN_LABEL_COLORS.length }, `KANBAN_LABEL_COLORS: the label palette is too large; the entries past the size limit (${MAX_LABEL_PALETTE_ENTRIES} distinct colours) were dropped`)
+}
 
 // #1023: keys a PUT /api/kanban/:id body may carry WITHOUT being a writable
 // column -- the read-only card fields and the GET-embedded arrays the dashboard
@@ -47,7 +58,7 @@ const KANBAN_READONLY_FIELDS = new Set<string>([
 
 // Every key POST /api/kanban/:id/move accepts; anything else is a 400, same
 // rule as the PUT above.
-const KANBAN_MOVE_FIELDS = ['status', 'sort_order', 'actor'] as const
+const KANBAN_MOVE_FIELDS = ['status', 'sort_order', 'actor', 'expected_status'] as const
 
 // A headless agent cannot "drag" a card to done, so the dispatch hands it the
 // exact curl commands to (1) post a short, human-readable result summary as a
@@ -275,6 +286,84 @@ function reportUndeliveredDispatch(id: string, unreachable: string): void {
   }
 }
 
+// Card 08bf8326 (#567): a hand-off between agents is a blocker link ("B waits on A").
+// When A reaches done and B has nothing else open to wait on, B's assignee is
+// told once, so the next agent does not sit idle until somebody looks at the
+// board. Every freed card also gets a system comment, so a human assignee (who
+// gets no prompt) sees it on the board too.
+//
+// Rules, the same resolver as the dispatch: the human owner and unknown names get
+// no message; the agent that closed A is not told about its own card; a sub-agent
+// whose session is down is reported to the main agent instead, like an
+// undelivered dispatch. Card titles stay out of the message (free text written by
+// anyone); the assignee reads them from the board.
+//
+// Best-effort: runs after the move already succeeded, so it never throws.
+//
+// Once per closing (PR2027SCRIPTNOTIFY1018): a freed card that already carries
+// this blocker's system comment from the current done transition on is skipped.
+// The /move and the PUT call this once per transition anyway; the dedupe is for
+// the second entry point, POST /api/kanban/:id/notify-unblocked, which the card
+// script calls after its own DB move and which a caller may repeat.
+function notifyUnblockedCards(blockerId: string, actor?: string | null): { freed: string[]; alreadyNotified: string[] } {
+  const result = { freed: [] as string[], alreadyNotified: [] as string[] }
+  let freed: ReturnType<typeof getCardsUnblockedBy>
+  try {
+    freed = getCardsUnblockedBy(blockerId)
+  } catch (err) {
+    logger.warn({ err, blockerId }, 'Unblock lookup failed (card move still succeeded)')
+    return result
+  }
+  if (freed.length === 0) return result
+  const blocker = getKanbanCard(blockerId)
+  const blockerRef = blocker?.seq ? `#${blocker.seq}` : `(${blockerId})`
+  const commentText = `A(z) ${blockerRef} kártya kész lett, és ez volt az utolsó, amire ez a kártya várt. Folytatható.`
+  const closedAt = getLatestDoneTransitionAt(blockerId) ?? 0
+  for (const card of freed) {
+    const cardRef = card.seq ? `#${card.seq}` : `(${card.id})`
+    if (getKanbanComments(card.id).some((c) => c.author === 'system' && c.content === commentText && c.created_at >= closedAt)) {
+      result.alreadyNotified.push(card.id)
+      continue
+    }
+    result.freed.push(card.id)
+    try {
+      addKanbanComment(card.id, 'system', commentText)
+    } catch (err) {
+      logger.warn({ err, id: card.id }, 'Unblock card comment failed')
+    }
+    try {
+      const decision = resolveKanbanDispatch(card.assignee, {
+        ownerName: OWNER_NAME,
+        botName: BOT_NAME,
+        mainAgentId: MAIN_AGENT_ID,
+        agentNames: listAgentNames(),
+        isRunning: isAgentRunning,
+        actor,
+      })
+      if (!DISPATCH_SAFE_CARD_ID_RE.test(card.id) || !DISPATCH_SAFE_CARD_ID_RE.test(blockerId)) continue
+      if (decision.target) {
+        createAgentMessage(
+          MAIN_AGENT_ID,
+          decision.target,
+          `[Kanban feloldva #${card.id}] A(z) ${cardRef} kártyád már nem vár semmire: a(z) ${blockerRef} (#${blockerId}) kész lett. ` +
+          `Nézd meg a táblán, és ha te jössz, húzd in_progress-re.`,
+        )
+        logger.info({ id: card.id, blockerId, target: decision.target }, 'Kanban unblock notice sent')
+      } else if (decision.reason === 'session-down') {
+        createAgentMessage(
+          'system',
+          MAIN_AGENT_ID,
+          `[kanban-feloldva] A(z) ${cardRef} (#${card.id}) kártya felszabadult (a(z) ${blockerRef} kész), ` +
+          `de a felelőse (${decision.unreachable}) nem fut, ezért nem kapott üzenetet.`,
+        )
+      }
+    } catch (err) {
+      logger.warn({ err, id: card.id, blockerId }, 'Kanban unblock notice failed (card move still succeeded)')
+    }
+  }
+  return result
+}
+
 // HBKANBANDRIFT819: the heartbeat-summary payload, shaped so that TRUNCATED
 // reads still carry the truth. Pure and exported so tests can pin all three
 // properties without HTTP:
@@ -344,7 +433,16 @@ export function buildHeartbeatSummaryResponse(
 // The methods the single-card path actually serves. One source, so the Allow
 // header can never drift from the branches above it -- advertising a method
 // that is not routed would send the caller one step further into the same fog.
-const KANBAN_CARD_METHODS = ['PUT', 'DELETE'] as const
+// 2dd78397: GET is served now (one card, archived ones included).
+const KANBAN_CARD_METHODS = ['GET', 'PUT', 'DELETE'] as const
+
+// 2dd78397: a write that lands on an ARCHIVED card used to answer exactly like one on a live card,
+// so the writer never learned that nobody reads the card any more. The write still happens (a 409
+// would break every existing caller that closes or comments after archiving); the successful
+// response says it, additively. On a live card the response is unchanged: no field at all.
+function archivedNote(card: { archived_at: number | null } | undefined): { archived?: true } {
+  return card && card.archived_at != null ? { archived: true } : {}
+}
 
 /**
  * Parse the `includeArchived` query parameter.
@@ -505,7 +603,9 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // Colour is validated against the configured palette (KANBAN_LABEL_COLORS)
     // rather than accepted as free-text, so every label's colour traces back
     // to the single configurable source instead of an arbitrary per-request value.
-    const resolvedColor = color && KANBAN_LABEL_COLORS.includes(color) ? color : KANBAN_LABEL_COLORS[0]
+    // (compared normalized: a palette written as `red` matches a request for red)
+    const { color: resolvedColor, replaced } = resolveLabelColor(color, KANBAN_LABEL_COLORS)
+    if (replaced && color !== undefined) logger.warn({ path }, 'Kanban label POST: colour not in the palette, the first palette colour was used')
     const id = randomUUID().slice(0, 8)
     const label = createLabel({ id, name: name.trim(), color: resolvedColor })
     json(res, label)
@@ -523,7 +623,12 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       fields.name = name.trim()
     }
     if (color !== undefined) {
-      fields.color = KANBAN_LABEL_COLORS.includes(color) ? color : KANBAN_LABEL_COLORS[0]
+      // a client sending a legacy label's current colour back keeps it
+      const existing = getLabel(id)
+      const resolved = resolveLabelColor(color, KANBAN_LABEL_COLORS, existing?.color)
+      // (an unknown id gets a 404 below, not a log line)
+      if (resolved.replaced && existing) logger.warn({ id }, 'Kanban label PUT: colour not in the palette and not the label\'s own, the first palette colour was used')
+      fields.color = resolved.color
     }
     if (updateLabel(id, fields)) { json(res, { ok: true }); return true }
     json(res, { error: 'Címke nem található' }, 404)
@@ -574,6 +679,15 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const labelId = decodeURIComponent(cardLabelDeleteMatch[2])
     if (removeLabelFromCard(cardId, labelId)) { json(res, { ok: true }); return true }
     json(res, { error: 'A kártyán nincs ilyen címke' }, 404)
+    return true
+  }
+
+  // --- Tokens per card (card 0f21864e, #568): what the assignee spent while it was in_progress ---
+  const cardTokensMatch = path.match(/^\/api\/kanban\/([^/]+)\/tokens$/)
+  if (cardTokensMatch && method === 'GET') {
+    const usage = getCardTokenUsage(decodeURIComponent(cardTokensMatch[1]), { botName: BOT_NAME, mainAgentId: MAIN_AGENT_ID })
+    if (!usage) { json(res, { error: 'Kártya nem található' }, 404); return true }
+    json(res, usage)
     return true
   }
 
@@ -745,7 +859,13 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // PUT to in_progress clears but does not dispatch; /move remains the only
     // dispatch path (KARTYADISPATCH1010). updateKanbanCard applies the shared
     // dispatched_at clear; no fireKanbanDispatch call belongs here.
-    if (updateKanbanCard(id, data, who.actor)) { json(res, { ok: true }); return true }
+    const statusBefore = getKanbanCard(id)?.status
+    if (updateKanbanCard(id, data, who.actor)) {
+      const after = getKanbanCard(id)
+      if (statusBefore !== 'done' && after?.status === 'done') notifyUnblockedCards(id, who.actor)
+      json(res, { ok: true, ...archivedNote(after) })
+      return true
+    }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }
@@ -755,6 +875,45 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     revertIdeaFromKanban(id)
     if (deleteKanbanCard(id)) { json(res, { ok: true }); return true }
     json(res, { error: 'Kártya nem található' }, 404)
+    return true
+  }
+
+  // PR2027SCRIPTNOTIFY1018: the unblock notice for a card closed OUTSIDE this
+  // route. The card script (scripts/kartya-es-ertesites.py) moves cards in the DB
+  // directly, so the /move and PUT hooks above never see its closings -- measured
+  // on the fleet's board: 127 of 127 transitions to done came through it. The
+  // script calls this right after its move, and the rules stay here, in one place.
+  // Only a card that IS done is accepted; a repeated call does not notify twice.
+  const unblockNotifyMatch = path.match(/^\/api\/kanban\/([^/]+)\/notify-unblocked$/)
+  if (unblockNotifyMatch && method === 'POST') {
+    const id = decodeURIComponent(unblockNotifyMatch[1])
+    const raw = (await readBody(req)).toString().trim()
+    let parsed: unknown = {}
+    if (raw !== '') {
+      try { parsed = JSON.parse(raw) } catch { json(res, { error: 'Body must be JSON' }, 400); return true }
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      json(res, { error: 'Body must be a JSON object. Accepted fields: actor' }, 400)
+      return true
+    }
+    const unknownKeys = Object.keys(parsed).filter((k) => k !== 'actor')
+    if (unknownKeys.length > 0) {
+      json(res, { error: `Unknown field(s): ${unknownKeys.join(', ')}. Accepted: actor` }, 400)
+      return true
+    }
+    const who = kanbanWriteActor((parsed as { actor?: unknown }).actor, ctx.auth)
+    if ('error' in who) {
+      json(res, { error: who.error }, 400)
+      return true
+    }
+    const card = getKanbanCard(id)
+    if (!card) { json(res, { error: 'Kártya nem található' }, 404); return true }
+    if (card.status !== 'done') {
+      json(res, { error: 'card_not_done', current_status: card.status }, 409)
+      return true
+    }
+    const result = notifyUnblockedCards(id, who.actor)
+    json(res, { ok: true, freed: result.freed, already_notified: result.alreadyNotified })
     return true
   }
 
@@ -775,7 +934,15 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `Unknown field(s): ${unknownMoveKeys.join(', ')}. Accepted: ${KANBAN_MOVE_FIELDS.join(', ')}` }, 400)
       return true
     }
-    const { status, sort_order, actor } = moveBody as { status: Parameters<typeof moveKanbanCard>[1]; sort_order?: number; actor?: unknown }
+    const { status, sort_order, actor, expected_status } = moveBody as { status: Parameters<typeof moveKanbanCard>[1]; sort_order?: number; actor?: unknown; expected_status?: unknown }
+    // Optional compare-and-set guard. Absent (undefined/null) keeps the old
+    // unconditional move. Present, it must name a real status: an unknown value
+    // could never match, and a 409 would wrongly suggest someone else moved it.
+    const hasExpected = expected_status !== undefined && expected_status !== null
+    if (hasExpected && !(KANBAN_STATUSES as readonly string[]).includes(expected_status as string)) {
+      json(res, { error: `Invalid expected_status. Accepted: ${KANBAN_STATUSES.join(', ')}` }, 400)
+      return true
+    }
     // The same actor rule as the PUT (card f6fba9ec, X16): before X16 a boolean actor moved the card, then the event
     // insert threw (500), and the move stayed with no row.
     const who = kanbanWriteActor(actor, ctx.auth)
@@ -783,11 +950,23 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       json(res, { error: who.error }, 400)
       return true
     }
-    if (moveKanbanCard(id, status, sort_order ?? 0, who.actor)) {
+    const statusBeforeMove = getKanbanCard(id)?.status
+    if (moveKanbanCard(id, status, sort_order ?? 0, who.actor, hasExpected ? { expectedStatus: expected_status as Parameters<typeof moveKanbanCard>[1] } : undefined)) {
       // Wake the assigned agent once when the card enters in_progress -- unless
       // that agent is the one who moved it (self-pickup needs no wake-up).
       if (status === 'in_progress') fireKanbanDispatch(id, who.actor)
-      json(res, { ok: true })
+      // A reorder inside the done column is not a closing: only a real
+      // transition to done frees the cards waiting on this one.
+      const moved = getKanbanCard(id)
+      if (statusBeforeMove !== 'done' && moved?.status === 'done') notifyUnblockedCards(id, who.actor)
+      json(res, { ok: true, ...archivedNote(moved) })
+      return true
+    }
+    // Nothing changed: a missing card stays the old 404; an existing card means
+    // the guard did not hold, so tell the caller what the status actually is.
+    const current = hasExpected ? getKanbanCard(id) : undefined
+    if (current) {
+      json(res, { error: 'status_conflict', current_status: current.status, expected_status }, 409)
       return true
     }
     json(res, { error: 'Kártya nem található' }, 404)
@@ -869,9 +1048,10 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const normalizedContent = normalizeKanbanRefs(content, getKanbanSeqByIdPrefix)
     // `automated: true`: a bulk/machine writer marks its own comment, so the
     // stuck detector never reads it as a work-trace (KANBANSTUCKURES916).
-    json(res, automated === true
+    const comment = automated === true
       ? addKanbanComment(cardId, author, normalizedContent, { automated: true })
-      : addKanbanComment(cardId, author, normalizedContent))
+      : addKanbanComment(cardId, author, normalizedContent)
+    json(res, { ...comment, ...archivedNote(card) })
     return true
   }
 
@@ -951,6 +1131,18 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   if (childrenMatch && method === 'GET') {
     const parentId = decodeURIComponent(childrenMatch[1])
     json(res, getChildCards(parentId))
+    return true
+  }
+
+  // 2dd78397: ONE card by id, archived ones included (the list GET leaves those out), with its
+  // description. Here, after every fixed single-segment path (/api/kanban/archived and the rest),
+  // for the same reason as the 405 below: placed earlier, "archived" would be read as a card id.
+  const singleCardGetMatch = path.match(/^\/api\/kanban\/([^/]+)$/)
+  if (singleCardGetMatch && method === 'GET') {
+    const id = decodeURIComponent(singleCardGetMatch[1])
+    const card = getKanbanCard(id)
+    if (!card) { json(res, { error: `Kártya nem található: ${id}` }, 404); return true }
+    json(res, card)
     return true
   }
 

@@ -2,11 +2,13 @@ import Database from 'better-sqlite3'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, statSync } from 'node:fs'
 import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL, APP_TZ, EMBED_URL, EMBED_MODEL, EMBED_DIMS, MAIN_AGENT_ID } from './config.js'
+import { isSearchStopword } from './memory-search-stopwords.js'
 import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
 import { triggerLikeClause } from './homoglyph.js'
 import type { LiveKanban } from './web/heartbeat-kanban-verify.js'
+import { compareDeliveryOrder, deliveryRankSql } from './delivery-order.js'
 
 let db: Database.Database
 // The path the CURRENT handle was opened on (null for ':memory:'). Kept so
@@ -158,6 +160,7 @@ export function initDatabase(dbPathOverride?: string): void {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       description TEXT,
+      test_steps TEXT,
       status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','testing','waiting','done')),
       assignee TEXT,
       priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
@@ -228,6 +231,35 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch (err) {
     logger.warn({ err }, 'kanban_cards testing-status migration failed -- continuing')
   }
+  // Kanban project summaries: a small, separate table for the one thing that
+  // cannot be derived from kanban_cards -- the human-written project
+  // description. Everything else the project-overview page needs (card
+  // counts, last activity, who is on it) is computed live from kanban_cards
+  // by GROUP BY project (see listKanbanProjectSummaries), so there is exactly
+  // one source of truth for card state and the two tables can never drift out
+  // of sync. `project` is the same free-text string already stored on
+  // kanban_cards.project (no surrogate id, no foreign key -- a project can
+  // exist here before any card is tagged with it, or vice versa).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kanban_projects (
+      project TEXT PRIMARY KEY,
+      description TEXT,
+      description_updated_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+
+  // Migration: add test_steps to kanban_cards (card 8fe51afd -- the testing
+  // instructions get a field of their own instead of living in the comment
+  // thread). Placed AFTER the testing-status rebuild above on purpose: that
+  // rebuild copies an explicit column list, so a column added before it would
+  // be dropped again on the very installs that still need it.
+  try {
+    db.exec('ALTER TABLE kanban_cards ADD COLUMN test_steps TEXT')
+  } catch {
+    // column already exists
+  }
   // Migration: add agent_id, category, auto_generated columns to memories
   try {
     db.exec("ALTER TABLE memories ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'marveen'")
@@ -276,6 +308,10 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_convlog_agent ON conversation_log(agent_id, created_at)`)
+  // Pure-created_at index for the daily retention prune -- idx_convlog_agent is
+  // (agent_id, created_at), so its leading column makes it useless for an
+  // agent-agnostic `WHERE created_at < ?` sweep.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_convlog_created ON conversation_log(created_at)`)
   // Migration for pre-existing DBs: transcript-less voice/video_note inbounds
   // keep their attachment identity so a respawned session can still download
   // and transcribe them; reply_to_message_id lets an inbound quote be
@@ -892,6 +928,10 @@ export function initDatabase(dbPathOverride?: string): void {
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN trace_id TEXT') } catch { /* exists */ }
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN span_id TEXT') } catch { /* exists */ }
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN parent_span_id TEXT') } catch { /* exists */ }
+  // Card ad771121: delivery priority. 0 = normal: the default, and what every caller that sends no
+  // priority gets, i.e. today's FIFO unchanged. 1 = high: delivered ahead of the recipient's normal
+  // rows, FIFO among the high ones. Existing rows read as 0 (normal).
+  try { db.exec('ALTER TABLE agent_messages ADD COLUMN priority INTEGER NOT NULL DEFAULT 0') } catch { /* exists */ }
   // Card 795d1f48 (a): an URGENT row, which the router types into a BUSY pane with the existing writer (the general form
   // of the 71263d15 STOP path). Only an in-process writer (createAgentMessage with urgent) or a POST on a device key the
   // install lists (MESSAGE_URGENT_DEVICE_IDS, routes/messages.ts) can set it; the shared dashboard token cannot, so a 1
@@ -1005,6 +1045,7 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_open ON task_runs(completed_at, ts)`)
   // Migration: delivery integrity (PROMPTCSONK923). What the session's own
   // transcript shows actually ARRIVED, compared with what was typed: 'intact',
+  // 'intact-queued' (whole, but handed over inside a running turn, c8a6c2cc),
   // or how it broke ('head-lost', 'split', ...). NULL = not verified (remote
   // agent, command task, transcript not readable, or a row from before this
   // column). Separate from `status`, which says how the DISPATCH went and is
@@ -1512,6 +1553,9 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_trace ON otel_spans(trace_id, start_ms)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_agent ON otel_spans(agent_id, start_ms)`)
+  // Same reason as idx_convlog_created: the retention sweep filters on start_ms
+  // alone, which neither composite index above can serve.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_start ON otel_spans(start_ms)`)
 
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
@@ -1684,7 +1728,7 @@ export function saveMemory(
 // search terms. We also cap the number and length of tokens to bound query
 // cost (the sanitizer previously allowed an arbitrary-length prefix expansion
 // that could make a single request scan the entire index).
-export function buildFtsMatchExpression(query: string, join: 'AND' | 'OR' = 'AND'): string {
+function ftsQueryTokens(query: string): string[] {
   const MAX_TOKENS = 20
   const MAX_TOKEN_LEN = 64
   const sanitized = query
@@ -1694,15 +1738,45 @@ export function buildFtsMatchExpression(query: string, join: 'AND' | 'OR' = 'AND
     // fusing into a single unfindable token "rankcheck".
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .trim()
-  if (!sanitized) return ''
-  const tokens = sanitized
+  if (!sanitized) return []
+  return sanitized
     .split(/\s+/)
     .filter((t) => t.length > 0)
     .slice(0, MAX_TOKENS)
-    .map((t) => t.slice(0, MAX_TOKEN_LEN) + '*')
+    .map((t) => t.slice(0, MAX_TOKEN_LEN))
+}
+
+export function buildFtsMatchExpression(query: string, join: 'AND' | 'OR' = 'AND'): string {
+  const tokens = ftsQueryTokens(query).map((t) => t + '*')
   // A space between FTS5 terms is an implicit AND, so the default keeps the
-  // strict behaviour. 'OR' is the relaxed pass used by ftsWithOrFallback.
+  // strict behaviour. 'OR' is the plain OR join; the relaxed pass itself uses
+  // buildRelaxedFtsExpression, which also drops the filler words.
   return join === 'OR' ? tokens.join(' OR ') : tokens.join(' ')
+}
+
+/**
+ * The OR expression the relaxed pass runs: the query's
+ * tokens minus filler words and one-character tokens.
+ *
+ * Measured on the live store, 2026-09-23: `zebra a hogy nem` returned ~50 rows,
+ * none about zebras -- `a*`, `hogy*` and `nem*` prefix-match nearly every
+ * Hungarian memory. A one-character token is the same hazard in general form:
+ * `x*` is every word starting with x. What is left is the query's content, and
+ * only content may rescue a query the strict pass could not answer. Empty when
+ * nothing but filler remains, and then no relaxed pass runs at all.
+ *
+ * A token of digits only (of two or more characters) IS content and stays:
+ * searching by an amount or an ID is common (`mennyi 5000` must find the
+ * "napi limit 5000" row). The cost is known: FTS5 splits every date
+ * (`2026-09-23` -> `2026`, `09`, `23`), so a year in an otherwise unmatched
+ * query rescues every memory dated that year. Those rows come back labelled
+ * relaxed, and strict=1 still answers only on a real match.
+ */
+export function buildRelaxedFtsExpression(query: string): string {
+  return ftsQueryTokens(query)
+    .filter((t) => t.length > 1 && !isSearchStopword(t))
+    .map((t) => t + '*')
+    .join(' OR ')
 }
 
 /**
@@ -1753,8 +1827,10 @@ function ftsWithOrFallback<T>(
   const rows = run(strict)
   if (rows.length > 0) return { rows, relaxed: false }
   if (!allowRelaxed) return { rows, relaxed: false }
-  const relaxedTerms = buildFtsMatchExpression(query, 'OR')
-  if (relaxedTerms === strict) return { rows, relaxed: false }
+  // Filler words never reach this pass. With only filler
+  // left there is nothing to relax to, and the honest answer is the strict one.
+  const relaxedTerms = buildRelaxedFtsExpression(query)
+  if (!relaxedTerms || relaxedTerms === strict) return { rows, relaxed: false }
   return { rows: run(relaxedTerms), relaxed: true }
 }
 
@@ -1811,25 +1887,35 @@ function withoutRank<T extends { rank: number }>(rows: T[]): Omit<T, 'rank'>[] {
   return rows.map(({ rank: _rank, ...rest }) => rest)
 }
 
-export function searchMemories(query: string, chatId: string, limit = 3, allowRelaxed = true, category?: string): Memory[] {
+export function searchMemories(
+  query: string,
+  chatId: string,
+  limit = 3,
+  allowRelaxed = true,
+  category?: string,
+  // Same label searchAgentMemories reports. Without it the no-agent branch of
+  // the endpoint said `relaxed=false` whatever this function actually did.
+  trace?: { relaxed: boolean },
+): Memory[] {
   try {
-    const { rows } = ftsWithOrFallback(query, (terms) =>
+    const { rows, relaxed } = ftsWithOrFallback(query, (terms) =>
       (category
         ? db.prepare(
             `SELECT m.*, f.rank AS rank FROM memories m
              JOIN memories_fts f ON m.id = f.rowid
-             WHERE f.content MATCH ? AND m.chat_id = ? AND m.category = ?
+             WHERE f.memories_fts MATCH ? AND m.chat_id = ? AND m.category = ?
              ORDER BY rank
              LIMIT ?`
           ).all(terms, chatId, category, limit * RECENCY_OVERSAMPLE)
         : db.prepare(
             `SELECT m.*, f.rank AS rank FROM memories m
              JOIN memories_fts f ON m.id = f.rowid
-             WHERE f.content MATCH ? AND m.chat_id = ?
+             WHERE f.memories_fts MATCH ? AND m.chat_id = ?
              ORDER BY rank
              LIMIT ?`
           ).all(terms, chatId, limit * RECENCY_OVERSAMPLE)) as (Memory & { rank: number })[]
       , allowRelaxed)
+    if (trace) trace.relaxed = relaxed
     return withoutRank(reRankByRecency(rows, limit)) as Memory[]
   } catch {
     return []
@@ -1869,12 +1955,22 @@ export function decayMemories(): void {
   db.prepare('UPDATE memories SET salience = MAX(salience * 0.995, 0.01) WHERE created_at < ?').run(oneWeekAgo)
 }
 
-export function getMemoriesForChat(chatId: string, limit = 10, offset = 0): Memory[] {
+export function getMemoriesForChat(chatId: string, limit = 10, offset = 0, category?: string): Memory[] {
   // id DESC tie-break (#947): accessed_at has 1-second granularity, so a bulk
   // import leaves hundreds of rows sharing one value; without a stable
   // secondary sort SQLite may order the ties differently between queries, and
   // LIMIT/OFFSET over them can repeat a row on one page and never return
   // another. id is the unique insertion order, so it makes paging total.
+  //
+  // The category goes INTO the query. It used to be a post-filter in the
+  // route, applied after this function had already cut to `limit`: measured
+  // 2026-10-17 on the owner store, the dashboard Hot tab (no agent filter,
+  // limit 50) showed 6 of 115 hot memories.
+  if (category) {
+    return db
+      .prepare('SELECT * FROM memories WHERE chat_id = ? AND category = ? ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?')
+      .all(chatId, category, limit, offset) as Memory[]
+  }
   return db
     .prepare('SELECT * FROM memories WHERE chat_id = ? ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?')
     .all(chatId, limit, offset) as Memory[]
@@ -2433,6 +2529,11 @@ export interface KanbanCard {
   seq?: number
   title: string
   description: string | null
+  // Numbered, short steps the tester has to walk through (card 8fe51afd). Kept
+  // apart from `description` because the two answer different questions: the
+  // description is what the task IS, this is how to check it is done. Written
+  // into comments before, where the current version was unfindable.
+  test_steps: string | null
   status: 'planned' | 'in_progress' | 'waiting' | 'testing' | 'done'
   assignee: string | null
   priority: 'low' | 'normal' | 'high' | 'urgent'
@@ -2705,13 +2806,14 @@ export function parentWouldCycle(cardId: string, parentId: string): boolean {
 // review on #1501: `POST {title, archived_at: 12345, sort_order: 99}`
 // returned 200, stored `archived_at=null` and `sort_order=0`, logged nothing).
 export const KANBAN_CREATE_FIELDS = [
-  'title', 'description', 'status', 'assignee', 'priority', 'project', 'parent_id', 'due_date',
+  'title', 'description', 'test_steps', 'status', 'assignee', 'priority', 'project', 'parent_id', 'due_date',
 ] as const
 
 export function createKanbanCard(card: {
   id: string
   title: string
   description?: string
+  test_steps?: string
   status?: KanbanCard['status']
   assignee?: string
   priority?: KanbanCard['priority']
@@ -2727,10 +2829,10 @@ export function createKanbanCard(card: {
   const sortOrder = (maxRow?.m ?? -1) + 1
 
   db.prepare(
-    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_cards (id, title, description, test_steps, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    card.id, card.title, card.description ?? null, status,
+    card.id, card.title, card.description ?? null, card.test_steps ?? null, status,
     card.assignee ?? null, card.priority ?? 'normal',
     card.project ?? null, card.parent_id ?? null, card.due_date ?? null, sortOrder, now, now
   )
@@ -2761,7 +2863,7 @@ export function createKanbanCard(card: {
 // spread below, which is the #1023 data-loss bug when the caller believed it
 // was writing one (e.g. `description_append`).
 export const KANBAN_WRITABLE_FIELDS = [
-  'title', 'description', 'status', 'assignee', 'priority', 'project',
+  'title', 'description', 'test_steps', 'status', 'assignee', 'priority', 'project',
   'parent_id', 'due_date', 'sort_order', 'archived_at',
 ] as const
 
@@ -2807,9 +2909,9 @@ export function updateKanbanCard(
   // left the card changed with no row saying who changed it.
   return db.transaction((): boolean => {
     const changed = db.prepare(
-      `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?
+      `UPDATE kanban_cards SET title=?, description=?, test_steps=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?
        WHERE id=?`
-    ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, id).changes > 0
+    ).run(f.title, f.description, f.test_steps, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, id).changes > 0
     // Same dispatched_at rule as moveKanbanCard (kanbanWriteClearsDispatch). Before,
     // a card the PUT took out of in_progress kept its stamp, and the next /move to
     // in_progress woke nobody. The PUT only clears: it never dispatches.
@@ -2860,7 +2962,28 @@ export function getChildCards(parentId: string): KanbanCard[] {
   return db.prepare('SELECT * FROM kanban_cards WHERE parent_id = ? AND archived_at IS NULL ORDER BY sort_order ASC').all(parentId) as KanbanCard[]
 }
 
-export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number, actor?: string): boolean {
+// The statuses the kanban_cards CHECK constraint accepts. Exported so the HTTP
+// boundary can validate a caller-supplied status (e.g. the /move route's
+// `expected_status`) against exactly this set.
+export const KANBAN_STATUSES: readonly KanbanCard['status'][] = [
+  'planned', 'in_progress', 'testing', 'waiting', 'done',
+]
+
+export interface MoveKanbanCardOptions {
+  // Compare-and-set guard. When given, the move only happens if the card's
+  // current status equals this value; otherwise nothing is written and the
+  // call returns false. Without it the move is unconditional (last writer
+  // wins), exactly as before.
+  expectedStatus?: KanbanCard['status']
+}
+
+export function moveKanbanCard(
+  id: string,
+  status: KanbanCard['status'],
+  sortOrder: number,
+  actor?: string,
+  opts?: MoveKanbanCardOptions,
+): boolean {
   const now = Math.floor(Date.now() / 1000)
   // Read the previous status first so we only record an audit event on a real
   // status transition (not a pure sort_order reorder within the same column).
@@ -2873,21 +2996,34 @@ export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrd
   // dispatched_at: nothing used to clear it, so a card pulled to in_progress and
   // put BACK burned its dispatch forever: the board showed it alive while the
   // next pull woke nobody. The clear follows kanbanWriteClearsDispatch, the rule
-  // the whole-card PUT and the card script share.
+  // the whole-card PUT and the card script share (it also heals a row already
+  // stuck this way, since the clear does not depend on the previous status).
+  //
+  // With opts.expectedStatus the status check is part of the SAME statement
+  // (WHERE id=? AND status=?), so check and write cannot be split by another
+  // writer. A false return then means "missing card" OR "status mismatch"; the
+  // caller tells them apart with a follow-up read (see the /move route).
+  //
   // ONE TRANSACTION for the move and the row it owes, as in updateKanbanCard (card f6fba9ec, X16): the UPDATE, the
   // ancestor stamps and the status event either all happen or none does, so a row insert that throws cannot leave a
   // card moved with no row saying who moved it.
+  const expected = opts?.expectedStatus
+  const setClause = kanbanWriteClearsDispatch(status)
+    ? 'SET status=?, sort_order=?, updated_at=?, dispatched_at=NULL'
+    : 'SET status=?, sort_order=?, updated_at=?'
   return db.transaction((): boolean => {
-    const changed = db.prepare(
-      kanbanWriteClearsDispatch(status)
-        ? 'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=?, dispatched_at=NULL WHERE id=?'
-        : 'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
-    ).run(status, sortOrder, now, id).changes > 0
+    const changed = (expected === undefined
+      ? db.prepare(`UPDATE kanban_cards ${setClause} WHERE id=?`).run(status, sortOrder, now, id)
+      : db.prepare(`UPDATE kanban_cards ${setClause} WHERE id=? AND status=?`).run(status, sortOrder, now, id, expected)
+    ).changes > 0
     if (changed) touchAncestorChain(row?.parent_id, now, id)
-    if (changed && prev !== undefined && prev !== status) {
+    // With the guard, a successful UPDATE proves the status WAS `expected` at
+    // the write, which is a stronger fact than the read above.
+    const from = expected ?? prev
+    if (changed && from !== undefined && from !== status) {
       db.prepare(
         'INSERT INTO kanban_card_events (card_id, from_status, to_status, actor, created_at) VALUES (?, ?, ?, ?, ?)'
-      ).run(id, prev, status, actor ?? null, now)
+      ).run(id, from, status, actor ?? null, now)
     }
     return changed
   })()
@@ -2961,6 +3097,111 @@ export function listKanbanProjects(): string[] {
     "SELECT DISTINCT project FROM kanban_cards WHERE project IS NOT NULL AND project != '' AND archived_at IS NULL ORDER BY project"
   ).all() as Array<{ project: string }>
   return rows.map(r => r.project)
+}
+
+export interface KanbanProjectSummary {
+  project: string
+  /** Human-written 1-2 sentence description; null when no one has set one yet. */
+  description: string | null
+  descriptionUpdatedAt: number | null
+  cardTotal: number
+  cardDone: number
+  /** MAX(updated_at) across the project's non-archived cards. */
+  lastActivityAt: number | null
+  /** Distinct assignees on cards currently in_progress/testing; falls back to
+   *  every assignee who has ever touched the project when nothing is in
+   *  flight right now, so the summary is never blank between active pushes. */
+  activeAssignees: string[]
+}
+
+/**
+ * One summary row per project that has at least one non-archived card.
+ * Everything except `description`/`descriptionUpdatedAt` is computed live
+ * from kanban_cards -- never stored -- so it can never drift from the board
+ * itself. Fully-archived projects (e.g. a wrapped-up initiative where every
+ * card was archived) intentionally do not appear here: this mirrors
+ * listKanbanProjects()'s own archived_at IS NULL filter, and keeps the
+ * overview to "what has live work", not a permanent project registry.
+ */
+export function listKanbanProjectSummaries(): KanbanProjectSummary[] {
+  const rows = db.prepare(`
+    SELECT
+      kc.project AS project,
+      COUNT(*) AS cardTotal,
+      SUM(CASE WHEN kc.status = 'done' THEN 1 ELSE 0 END) AS cardDone,
+      MAX(kc.updated_at) AS lastActivityAt,
+      kp.description AS description,
+      kp.description_updated_at AS descriptionUpdatedAt
+    FROM kanban_cards kc
+    LEFT JOIN kanban_projects kp ON kp.project = kc.project
+    WHERE kc.archived_at IS NULL AND kc.project IS NOT NULL AND kc.project != ''
+    GROUP BY kc.project
+    ORDER BY kc.project
+  `).all() as Array<{
+    project: string; cardTotal: number; cardDone: number; lastActivityAt: number | null
+    description: string | null; descriptionUpdatedAt: number | null
+  }>
+
+  // Active assignees are a second, per-project query rather than a
+  // GROUP_CONCAT in the query above: the "in-flight, else ever-touched"
+  // fallback needs two different WHERE filters, which GROUP_CONCAT cannot
+  // express in one pass without a much less readable CASE-inside-aggregate.
+  // Both statements are prepared once, outside the loop, and reused per row.
+  const activeStmt = db.prepare(
+    `SELECT DISTINCT assignee FROM kanban_cards
+     WHERE project = ? AND archived_at IS NULL AND assignee IS NOT NULL
+       AND status IN ('in_progress', 'testing')`
+  )
+  const everStmt = db.prepare(
+    `SELECT DISTINCT assignee FROM kanban_cards
+     WHERE project = ? AND archived_at IS NULL AND assignee IS NOT NULL`
+  )
+
+  return rows.map((r) => {
+    let assignees = (activeStmt.all(r.project) as Array<{ assignee: string }>).map((a) => a.assignee)
+    if (assignees.length === 0) {
+      assignees = (everStmt.all(r.project) as Array<{ assignee: string }>).map((a) => a.assignee)
+    }
+    return {
+      project: r.project,
+      description: r.description ?? null,
+      descriptionUpdatedAt: r.descriptionUpdatedAt ?? null,
+      cardTotal: r.cardTotal,
+      cardDone: r.cardDone,
+      lastActivityAt: r.lastActivityAt,
+      activeAssignees: assignees,
+    }
+  })
+}
+
+/**
+ * Upsert a project's human-written description. A no-op write (submitted text
+ * identical to what is already stored) does NOT bump description_updated_at
+ * or updated_at -- so re-saving the same text does not make the project card
+ * look freshly edited. Returns whether the stored value actually changed.
+ */
+export function upsertKanbanProjectDescription(project: string, description: string): { changed: boolean } {
+  const trimmed = description.trim()
+  const existing = db.prepare('SELECT description FROM kanban_projects WHERE project = ?').get(project) as
+    | { description: string | null }
+    | undefined
+  if (!existing && trimmed === '') {
+    // Nothing stored, nothing meaningful to store -- do not create a blank row.
+    return { changed: false }
+  }
+  if (existing && (existing.description ?? '') === trimmed) {
+    return { changed: false }
+  }
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(`
+    INSERT INTO kanban_projects (project, description, description_updated_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(project) DO UPDATE SET
+      description = excluded.description,
+      description_updated_at = excluded.description_updated_at,
+      updated_at = excluded.updated_at
+  `).run(project, trimmed, now, now, now)
+  return { changed: true }
 }
 
 export function deleteKanbanCard(id: string): boolean {
@@ -3217,6 +3458,40 @@ export function getBlockedByCard(cardId: string): KanbanCardRef[] {
     WHERE b.blocker_id = ?
     ORDER BY b.created_at ASC
   `).all(cardId) as KanbanCardRef[]
+}
+
+// When `cardId` last went INTO done (a reorder inside done is not a closing),
+// or null when no such transition is recorded. The unblock notice dedupes on it:
+// a freed card's system comment from this closing on means it was already told.
+export function getLatestDoneTransitionAt(cardId: string): number | null {
+  const row = db.prepare(`
+    SELECT created_at FROM kanban_card_events
+    WHERE card_id = ? AND to_status = 'done' AND (from_status IS NULL OR from_status <> 'done')
+    ORDER BY created_at DESC, id DESC LIMIT 1
+  `).get(cardId) as { created_at: number } | undefined
+  return row ? row.created_at : null
+}
+
+// The cards that the closing of `blockerId` has just freed (card 08bf8326, #567):
+// cards it blocks that are still open (not done, not archived) and have NO other
+// unfinished blocker left. Called after `blockerId` reached done, so it does not
+// count against itself. An archived blocker that never reached done still blocks,
+// the same rule as getBlockersForCard.
+export function getCardsUnblockedBy(blockerId: string): Array<KanbanCardRef & { assignee: string | null }> {
+  return db.prepare(`
+    SELECT c.id, c.rowid AS seq, c.title, c.status, c.archived_at, c.assignee
+    FROM kanban_card_blockers b
+    JOIN kanban_cards c ON c.id = b.card_id
+    WHERE b.blocker_id = ?
+      AND c.status <> 'done'
+      AND c.archived_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM kanban_card_blockers b2
+        JOIN kanban_cards c2 ON c2.id = b2.blocker_id
+        WHERE b2.card_id = c.id AND c2.status <> 'done'
+      )
+    ORDER BY b.created_at ASC
+  `).all(blockerId) as Array<KanbanCardRef & { assignee: string | null }>
 }
 
 // Bulk variant for the board list view -- one JOIN query instead of an N+1
@@ -3540,6 +3815,9 @@ export interface AgentMessage {
   trace_id: string | null
   span_id: string | null
   parent_span_id: string | null
+  // Card ad771121: delivery priority, 0 = normal (the column default), 1 = high. Optional in the type
+  // because a few RETURNING projections and test doubles predate it; read it as `priority ?? 0`.
+  priority?: number
   // Card 795d1f48 (a): 1 = an authenticated urgent row (see the migration). Optional in the type only because rows built
   // in code before the column (tests, fixtures) do not carry it; every row read from the table has it.
   urgent?: number
@@ -3554,7 +3832,7 @@ export function createAgentMessage(
   content: string,
   originNote?: string | null,
   traceCtx?: { trace_id: string; span_id: string; parent_span_id: string | null } | null,
-  opts?: { urgent?: boolean; stopAuthorized?: boolean },
+  opts?: { urgent?: boolean; stopAuthorized?: boolean; priority?: 0 | 1 },
 ): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   // Card 795d1f48 (a): urgent only when a caller asks for it; the callers that may are the in-process writers and the
@@ -3563,9 +3841,12 @@ export function createAgentMessage(
   // Card 71263d15 (C): STOP authority only when an in-process caller asks for it; POST /api/messages never does
   // (a listed device key's STOP rides on its urgent flag instead: message-router-window.ts isStopMessage).
   const stopAuthorized = opts?.stopAuthorized === true ? 1 : 0
+  // Card ad771121: the stored delivery priority (0 normal, 1 high), as the caller decided it (the route's
+  // per-pair budget, decidePriority). An urgent row is above high by its own column; the route stores it 0.
+  const priority: 0 | 1 = opts?.priority === 1 ? 1 : 0
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note, trace_id, span_id, parent_span_id, urgent, stop_authorized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now, originNote ?? null, traceCtx?.trace_id ?? null, traceCtx?.span_id ?? null, traceCtx?.parent_span_id ?? null, urgent, stopAuthorized)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note, trace_id, span_id, parent_span_id, urgent, stop_authorized, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, originNote ?? null, traceCtx?.trace_id ?? null, traceCtx?.span_id ?? null, traceCtx?.parent_span_id ?? null, urgent, stopAuthorized, priority)
   return {
     id: Number(info.lastInsertRowid),
     from_agent: from, to_agent: to, content, status: 'pending',
@@ -3576,6 +3857,7 @@ export function createAgentMessage(
     parent_span_id: traceCtx?.parent_span_id ?? null,
     urgent,
     stop_authorized: stopAuthorized,
+    priority,
   }
 }
 
@@ -3592,13 +3874,44 @@ export function getMessageStatus(id: number): string | null {
   return row ? row.status : null
 }
 
+// Card ad771121: the delivery order (compareDeliveryOrder): by class, then FIFO. A recipient whose
+// rows are all normal gets exactly today's order (created_at; id breaks a same-second tie). The
+// classes (delivery-order.ts): an authenticated STOP, an urgent row, a system or owner row (whatever
+// it stored: review point 1, a priority only reorders peer traffic), a granted peer high, the rest.
 export function getPendingMessages(toAgent?: string): AgentMessage[] {
+  const rank = deliveryRankSql()
   if (toAgent) {
-    return db.prepare("SELECT * FROM agent_messages WHERE status = 'pending' AND to_agent = ? ORDER BY created_at ASC")
-      .all(toAgent) as AgentMessage[]
+    return db.prepare(`SELECT * FROM agent_messages WHERE status = 'pending' AND to_agent = ? ORDER BY ${rank.sql} DESC, created_at ASC, id ASC`)
+      .all(toAgent, ...rank.params) as AgentMessage[]
   }
-  return db.prepare("SELECT * FROM agent_messages WHERE status = 'pending' ORDER BY created_at ASC")
-    .all() as AgentMessage[]
+  return db.prepare(`SELECT * FROM agent_messages WHERE status = 'pending' ORDER BY ${rank.sql} DESC, created_at ASC, id ASC`)
+    .all(...rank.params) as AgentMessage[]
+}
+
+// Card ad771121 (K3): the high rows one sender got accepted for one recipient since `sinceSec`. Keyed
+// by the PAIR because a priority reorders the recipient's own queue: a per-sender count would cut a
+// legitimate urgent fan-out to many recipients after the first few. (When more recipients wait than the
+// router's tick window holds, a high row also decides who is in it; see HIGH_PRIORITY_PER_HOUR_DEFAULT
+// in web/message-priority.ts.) A downgraded row is stored as normal, so it does not count against the
+// budget. Served by idx_agent_messages_thread.
+export function countHighForPairSince(from: string, to: string, sinceSec: number): number {
+  // urgent = 0: an urgent row never spends the pair's high budget (it is above high by its own column).
+  return (db.prepare('SELECT count(*) AS n FROM agent_messages WHERE from_agent = ? AND to_agent = ? AND created_at >= ? AND priority > 0 AND urgent = 0')
+    .get(from, to, sinceSec) as { n: number }).n
+}
+
+// Last moment a PULL-delivery agent proved it is alive on the API, in epoch
+// seconds (null = never). A pull agent has no session this install can watch,
+// so "is anyone serving this queue?" has to be answered from its own API
+// traffic instead of from a pane. The weakest honest evidence is a row it
+// WROTE: sending a message requires its scoped token, so a from_agent row is
+// proof of a live, authenticated client. It is deliberately not proof that it
+// READ anything -- that is why the router only warns on staleness and never
+// closes the row.
+export function lastMessageFromAgentAt(agent: string): number | null {
+  const row = db.prepare('SELECT MAX(created_at) AS ts FROM agent_messages WHERE from_agent = ?')
+    .get(agent) as { ts: number | null } | undefined
+  return row?.ts ?? null
 }
 
 // Status-guarded (pending only): the federation removal path bulk-fails
@@ -3856,19 +4169,20 @@ export function failPendingFederatedMessages(peerId: string | undefined, reason:
 // the router tmux-injecting into its perpetually-busy channel session.
 export function claimPendingForAgent(toAgent: string, limit: number): AgentMessage[] {
   const now = Math.floor(Date.now() / 1000)
+  const rank = deliveryRankSql()
   const rows = db.prepare(
     `UPDATE agent_messages SET status = 'delivered', delivered_at = ?
        WHERE id IN (
          SELECT id FROM agent_messages
          WHERE to_agent = ? AND status = 'pending'
-         ORDER BY created_at ASC, id ASC
+         ORDER BY ${rank.sql} DESC, created_at ASC, id ASC
          LIMIT ?
        )
-     RETURNING id, from_agent, to_agent, content, status, result, created_at, delivered_at, completed_at`,
-  ).all(now, toAgent, limit) as AgentMessage[]
-  // RETURNING row order is unspecified; restore FIFO (created_at, then id as the
-  // tiebreaker for same-second inserts) for delivery.
-  return rows.sort((a, b) => (a.created_at - b.created_at) || (a.id - b.id))
+     RETURNING id, from_agent, to_agent, content, status, result, created_at, delivered_at, completed_at, priority, urgent, stop_authorized`,
+  ).all(now, toAgent, ...rank.params, limit) as AgentMessage[]
+  // RETURNING row order is unspecified; restore the delivery order (card ad771121: high first, then
+  // FIFO with id as the tiebreaker for same-second inserts).
+  return rows.sort(compareDeliveryOrder)
 }
 
 export function markMessageDone(id: number, result?: string): boolean {
@@ -3882,6 +4196,21 @@ export function markMessageDone(id: number, result?: string): boolean {
 export function markMessageFailed(id: number, error?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
   return db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ?").run(error ?? null, now, id).changes > 0
+}
+
+// Close a message that is still OPEN (pending or delivered), atomically: the
+// status check and the write are one UPDATE, so of two concurrent closes only
+// one changes the row. Used by the PUT /api/messages/:id route, where a second
+// close of an already-closed row used to overwrite its result and send a
+// second completion report in the recipient's name. The router keeps the
+// unguarded markMessageDone/markMessageFailed above for its own transitions.
+export function closeOpenMessage(id: number, status: 'done' | 'failed', result?: string): boolean {
+  const now = Math.floor(Date.now() / 1000)
+  const sql = status === 'done'
+    ? "UPDATE agent_messages SET status = 'done', result = ?, completed_at = ?, delivered_at = COALESCE(delivered_at, ?) WHERE id = ? AND status NOT IN ('done', 'failed')"
+    : "UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ? AND status NOT IN ('done', 'failed')"
+  const args = status === 'done' ? [result ?? null, now, now, id] : [result ?? null, now, id]
+  return db.prepare(sql).run(...args).changes > 0
 }
 
 // Status-guarded fail for the federation bridge's terminal branches: it must
@@ -4538,7 +4867,97 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB))
 }
 
-function vectorSearch(agentId: string, queryEmbedding: number[], limit: number = 10, category?: string): Memory[] {
+/**
+ * The vector branch's floor.
+ *
+ * Without one the branch always answers with its top-N, however unrelated:
+ * measured on the live store, 2026-09-23, hybrid `q=zebra` returned 5 rows, all
+ * vector-only. An ABSOLUTE cosine floor cannot fix that on nomic-embed-text,
+ * because the model's scores sit on a query-dependent plateau. Calibrated on the
+ * live store (135 embedded rows, read-only) with 26 real queries and 29 nonsense
+ * ones:
+ *
+ *   nonsense top-1 cosine   0.382 .. 0.704   ("zebra" 0.443,
+ *                                              "XYZZY-NINCS-ILYEN-KIFEJEZES-2026" 0.704)
+ *   real target cosine      0.451 .. 0.788   ("who signs outgoing email" 0.509)
+ *
+ * The ranges overlap, so no absolute value separates them. What does is the
+ * height ABOVE the plateau, measured against the query's median similarity to
+ * the corpus:
+ *
+ *   nonsense top-1 minus median   0.042 .. 0.096
+ *   real target minus median      -0.024 .. 0.296  (15 of 26 at >= 0.104)
+ *
+ * A margin of 0.10 leaves 0 of 29 nonsense queries with any vector hit and keeps
+ * 15 of 26 real targets. Of the 11 it loses, 10 were ranked 2nd to 70th by the
+ * vector branch already; the one rank-1 loss sat at 0.077, inside the nonsense
+ * band, where no margin can keep it without letting the nonsense back in.
+ *
+ * Below VECTOR_BASELINE_MIN_ROWS scored rows a median describes nothing, so a
+ * small corpus falls back to an absolute floor just above the highest nonsense
+ * top-1 measured (0.704). That is conservative: on a small store a vector-only
+ * hit has to be a near-duplicate. Lexical hits are never subject to either.
+ * The row count is the number of rows scored for THIS query, i.e. after the
+ * agent and category filter, so a small tier (e.g. hot) on a large store also
+ * takes the absolute floor. That is intended: the median is computed over the
+ * same filtered rows, and on a handful of rows it describes nothing either.
+ *
+ * The three values below are the DEFAULTS. They were calibrated on one store
+ * and one embedding model (nomic-embed-text), and EMBED_MODEL is a setting, so
+ * each one can be overridden (config-overrides.json > .env > default):
+ * MEMORY_VECTOR_MIN_MARGIN, MEMORY_VECTOR_BASELINE_MIN_ROWS and
+ * MEMORY_VECTOR_SMALL_CORPUS_MIN_SIMILARITY. An unset, unparsable or
+ * out-of-range value falls back to the default.
+ */
+export const VECTOR_MIN_MARGIN = 0.10
+export const VECTOR_BASELINE_MIN_ROWS = 10
+export const VECTOR_SMALL_CORPUS_MIN_SIMILARITY = 0.72
+
+export interface VectorFloorParams {
+  minMargin: number
+  baselineMinRows: number
+  smallCorpusMinSimilarity: number
+}
+
+function numericSetting(key: string, fallback: number, valid: (n: number) => boolean): number {
+  try {
+    const raw = String(getEffectiveSettingValue(key) ?? '').trim()
+    if (raw === '') return fallback
+    const n = Number(raw)
+    return Number.isFinite(n) && valid(n) ? n : fallback
+  } catch {
+    return fallback
+  }
+}
+
+/** The floor's thresholds as configured right now (read per search, no restart needed). */
+export function vectorFloorParams(): VectorFloorParams {
+  return {
+    minMargin: numericSetting('MEMORY_VECTOR_MIN_MARGIN', VECTOR_MIN_MARGIN, (n) => n >= 0 && n <= 1),
+    baselineMinRows: numericSetting('MEMORY_VECTOR_BASELINE_MIN_ROWS', VECTOR_BASELINE_MIN_ROWS, (n) => Number.isInteger(n) && n >= 1),
+    smallCorpusMinSimilarity: numericSetting('MEMORY_VECTOR_SMALL_CORPUS_MIN_SIMILARITY', VECTOR_SMALL_CORPUS_MIN_SIMILARITY, (n) => n >= 0 && n <= 1),
+  }
+}
+
+export function vectorSimilarityFloor(scores: number[], params: VectorFloorParams = vectorFloorParams()): number {
+  if (scores.length < params.baselineMinRows) return params.smallCorpusMinSimilarity
+  const sorted = [...scores].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+  return median + params.minMargin
+}
+
+interface VectorHit {
+  memory: Memory
+  similarity: number
+}
+
+function vectorSearch(
+  agentId: string,
+  queryEmbedding: number[],
+  limit: number = 10,
+  category?: string,
+): { hits: VectorHit[]; floor: number } {
   // Same push-down as searchAgentMemories: this branch scores EVERY embedded
   // row in JS, so filtering in SQL is both correct and strictly less work.
   const rows = (category
@@ -4555,18 +4974,21 @@ function vectorSearch(agentId: string, queryEmbedding: number[], limit: number =
   // neither sorts to the top nor raises -- the search quietly returns junk.
   // Drop the mismatches instead, so a half-migrated table degrades to "fewer
   // results" rather than "wrong results".
-  const scored = rows.flatMap(m => {
+  const scored = rows.flatMap((m): VectorHit[] => {
     try {
       const emb = JSON.parse(m.embedding!) as number[]
       if (emb.length !== queryEmbedding.length) return []
-      return [{ memory: m, score: cosineSimilarity(queryEmbedding, emb) }]
+      return [{ memory: m, similarity: cosineSimilarity(queryEmbedding, emb) }]
     } catch {
-      return [{ memory: m, score: 0 }]
+      return [{ memory: m, similarity: 0 }]
     }
   })
 
-  scored.sort((a, b) => b.score - a.score)
-  return scored.slice(0, limit).map(s => s.memory)
+  // The floor comes from EVERY scored row, before the cut to `limit`: the
+  // plateau is a property of the corpus, not of the top of the list.
+  const floor = vectorSimilarityFloor(scored.map(s => s.similarity))
+  scored.sort((a, b) => b.similarity - a.similarity)
+  return { hits: scored.slice(0, limit), floor }
 }
 
 /**
@@ -4578,11 +5000,26 @@ function vectorSearch(agentId: string, queryEmbedding: number[], limit: number =
  */
 export interface HybridSearchTrace {
   ftsHits: number
+  /** Vector rows that entered the fusion: above the floor, or vouched for lexically. */
   vectorHits: number
   /** The FTS branch found nothing with AND and was retried with OR. */
   ftsRelaxed: boolean
   /** Every returned row came from the vector branch alone. */
   vectorOnly: boolean
+  /** Vector-only rows dropped for scoring below the similarity floor. */
+  vectorDropped?: number
+}
+
+/**
+ * Per-row provenance on a hybrid answer, additive to Memory. The header labels
+ * the answer as a whole; this labels each row, so a caller holding one row can still tell what vouched for it.
+ */
+export type HybridSearchHit = Memory & {
+  match_kind: 'lexical' | 'vector' | 'lexical+vector'
+  /** The fused RRF score the ranking used. */
+  score: number
+  /** Cosine similarity to the query, when the vector branch scored this row. */
+  similarity?: number
 }
 
 export async function hybridSearch(
@@ -4591,7 +5028,7 @@ export async function hybridSearch(
   limit: number = 10,
   trace?: HybridSearchTrace,
   category?: string,
-): Promise<Memory[]> {
+): Promise<HybridSearchHit[]> {
   const k = 60 // RRF constant
 
   // FTS5 results
@@ -4600,16 +5037,26 @@ export async function hybridSearch(
   // endpoint: the hybrid answer fuses two rankings and already reports which
   // branch produced it, so a loose lexical hit here is labelled, not silent.
   const ftsResults = searchAgentMemories(agentId, query, limit * 2, ftsTrace, true, category)
+  const ftsIds = new Set(ftsResults.map(m => m.id))
 
-  // Vector results
+  // Vector results. A row below the floor survives only when the keyword
+  // branch found it too: lexical support is evidence of its own. Its fusion
+  // score is NOT the one it had before the floor existed: the vector rank below
+  // is computed on the already filtered list, so a kept row moves up past the
+  // dropped ones and its RRF term grows accordingly.
   const queryEmbedding = await generateEmbedding(query)
-  const vecResults = queryEmbedding ? vectorSearch(agentId, queryEmbedding, limit * 2, category) : []
+  const vec = queryEmbedding
+    ? vectorSearch(agentId, queryEmbedding, limit * 2, category)
+    : { hits: [] as VectorHit[], floor: 0 }
+  const vecResults = vec.hits.filter(h => h.similarity >= vec.floor || ftsIds.has(h.memory.id))
+  const vectorDropped = vec.hits.length - vecResults.length
 
   if (trace) {
     trace.ftsHits = ftsResults.length
     trace.vectorHits = vecResults.length
     trace.ftsRelaxed = ftsTrace.relaxed
     trace.vectorOnly = ftsResults.length === 0 && vecResults.length > 0
+    trace.vectorDropped = vectorDropped
   }
   if (ftsResults.length === 0 && vecResults.length > 0) {
     logger.warn(
@@ -4621,22 +5068,45 @@ export async function hybridSearch(
   // Reciprocal Rank Fusion
   const scores: Map<number, number> = new Map()
   const byId: Map<number, Memory> = new Map()
+  const similarityById: Map<number, number> = new Map()
 
   ftsResults.forEach((m, rank) => {
     scores.set(m.id, (scores.get(m.id) || 0) + 1 / (k + rank + 1))
     byId.set(m.id, m)
   })
 
-  vecResults.forEach((m, rank) => {
+  vecResults.forEach((h, rank) => {
+    const m = h.memory
     scores.set(m.id, (scores.get(m.id) || 0) + 1 / (k + rank + 1))
+    similarityById.set(m.id, h.similarity)
     byId.set(m.id, m)
   })
 
   const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1])
-  return ranked.slice(0, limit).map(([id]) => byId.get(id)!)
+  return ranked.slice(0, limit).map(([id, score]): HybridSearchHit => {
+    const lexical = ftsIds.has(id)
+    const similarity = similarityById.get(id)
+    const vector = similarity !== undefined
+    return {
+      ...byId.get(id)!,
+      match_kind: lexical && vector ? 'lexical+vector' : lexical ? 'lexical' : 'vector',
+      score,
+      ...(vector ? { similarity } : {}),
+    }
+  })
 }
 
-export async function backfillEmbeddings(): Promise<number> {
+// What one backfill run did. BACKFILLZERO (card 370f34c0): the old bare
+// number only counted successes, so "every call failed" and "nothing to do"
+// both came back as 0 and the endpoint answered {ok:true,count:0} for both.
+// `attempted` separates the two: attempted>0 && embedded===0 is the outage.
+export interface BackfillResult {
+  attempted: number
+  embedded: number
+  failed: number
+}
+
+export async function backfillEmbeddings(): Promise<BackfillResult> {
   const rows = db.prepare('SELECT id, content, keywords FROM memories WHERE embedding IS NULL').all() as { id: number; content: string; keywords: string | null }[]
   let count = 0
   for (const row of rows) {
@@ -4657,7 +5127,7 @@ export async function backfillEmbeddings(): Promise<number> {
       'Embedding backfill embedded 0 of the pending memories -- the embedding backend answered none of them (Ollama not installed/running, or EMBED_MODEL missing); the backlog stays until it does',
     )
   }
-  return count
+  return { attempted: rows.length, embedded: count, failed: rows.length - count }
 }
 
 // --- Pending Channel Requests ---
@@ -5422,6 +5892,124 @@ export function getTokenPruneLag(): TokenPruneLag {
     Math.floor(Date.now() / 1000),
     (TOKEN_PRUNE_TOLERANCE_CYCLES * DECAY_SWEEP_INTERVAL_MS) / 3_600_000,
   )
+}
+
+// Retention window for one of the opt-in prunes below, or null when the owner
+// has not switched it on. These four tables (conversation_log, otel_spans,
+// agent_messages, tool_call_log) keep everything by default: 0 means "keep
+// forever", and so does a value that does not parse to a positive integer
+// (an empty .env entry, a hand-edited override). Deleting history on an
+// install whose owner never asked for it is the one failure mode here that
+// cannot be undone, so anything other than a positive day count is a no-op.
+function optInRetentionDays(key: string): number | null {
+  const days = Number(getEffectiveSettingValue(key))
+  return Number.isFinite(days) && days > 0 ? days : null
+}
+
+// Prune conversation_log rows older than CONVERSATION_LOG_RETENTION_DAYS.
+// Opt-in: 0 / unset keeps everything (see optInRetentionDays).
+// `created_at` is unix SECONDS. Served by idx_convlog_created.
+export function pruneConversationLog(): number {
+  const retentionDays = optInRetentionDays('CONVERSATION_LOG_RETENTION_DAYS')
+  if (retentionDays === null) return 0
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400
+  return db.prepare('DELETE FROM conversation_log WHERE created_at < ?').run(cutoff).changes
+}
+
+// Prune otel_spans older than OTEL_SPAN_RETENTION_DAYS (opt-in, 0 = keep
+// forever). `start_ms` is unix
+// MILLISECONDS (unlike every other table here, which uses seconds). Spans still
+// marked 'running' are pruned too: a span that never got an end_ms within the
+// retention window is not in flight, it is a leaked row from a crashed process.
+export function pruneOtelSpans(): number {
+  const retentionDays = optInRetentionDays('OTEL_SPAN_RETENTION_DAYS')
+  if (retentionDays === null) return 0
+  const cutoffMs = Date.now() - retentionDays * 86400 * 1000
+  return db.prepare('DELETE FROM otel_spans WHERE start_ms < ?').run(cutoffMs).changes
+}
+
+// Prune settled agent_messages older than AGENT_MESSAGE_RETENTION_DAYS
+// (opt-in, 0 = keep forever).
+// Deliberately limited to 'done' and 'failed': a 'pending' or 'delivered' row
+// that is still around after weeks means delivery or processing got stuck, and
+// silently deleting it would erase the only evidence of that. Stuck rows are a
+// signal, not garbage -- they stay until someone looks at them.
+export function pruneAgentMessages(): number {
+  const retentionDays = optInRetentionDays('AGENT_MESSAGE_RETENTION_DAYS')
+  if (retentionDays === null) return 0
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400
+  return db
+    .prepare("DELETE FROM agent_messages WHERE created_at < ? AND status IN ('done','failed')")
+    .run(cutoff)
+    .changes
+}
+
+// Prune tool_call_log to TOOL_CALL_LOG_RETENTION_DAYS (opt-in, 0 = keep
+// forever). Thin wrapper over
+// pruneToolCallLog() so the daily sweep reads the configured retention instead
+// of that function's 24-hour call-site default (which the dashboard endpoint
+// still uses for an explicit manual purge).
+export function pruneToolCallLogRetention(): number {
+  const retentionDays = optInRetentionDays('TOOL_CALL_LOG_RETENTION_DAYS')
+  if (retentionDays === null) return 0
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400
+  return db.prepare('DELETE FROM tool_call_log WHERE created_at < ?').run(cutoff).changes
+}
+
+/** Fraction of the DB that must be free pages before a VACUUM is worth it. */
+const VACUUM_FREE_RATIO = 0.2
+/** Below this many free pages a VACUUM cannot reclaim anything meaningful. */
+const VACUUM_MIN_FREE_PAGES = 1000
+
+export interface CompactResult {
+  /** WAL frames still in the log after the checkpoint (0 means fully drained). */
+  walFramesLeft: number
+  /** True when the checkpoint could not run because a reader/writer held the DB. */
+  checkpointBusy: boolean
+  vacuumed: boolean
+  freePagesBefore: number
+}
+
+// Drain the WAL and, when the file has enough dead space to be worth it, VACUUM.
+//
+// Without an explicit checkpoint the WAL only auto-truncates on the last
+// connection closing, which for a long-running daemon is "never" -- the sidecar
+// then grows past the DB itself. TRUNCATE both applies the frames and shrinks
+// the file back to zero.
+//
+// VACUUM is gated on free-page ratio because it rewrites the whole DB under an
+// exclusive lock; running it daily on a healthy file is pure I/O for no gain.
+// Both steps tolerate SQLITE_BUSY: another connection is mid-write, and the
+// next daily sweep will get it.
+export function checkpointAndCompact(): CompactResult {
+  const result: CompactResult = { walFramesLeft: -1, checkpointBusy: false, vacuumed: false, freePagesBefore: 0 }
+
+  try {
+    // better-sqlite3 returns [{ busy, log, checkpointed }] for wal_checkpoint.
+    const rows = db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number; log: number; checkpointed: number }>
+    const row = rows?.[0]
+    if (row) {
+      result.checkpointBusy = row.busy === 1
+      result.walFramesLeft = row.log
+    }
+  } catch (err) {
+    result.checkpointBusy = true
+    logger.warn({ err }, 'WAL checkpoint sikertelen, a kovetkezo sweep ujraprobalja')
+  }
+
+  try {
+    const freePages = Number((db.pragma('freelist_count', { simple: true }) as number) ?? 0)
+    const totalPages = Number((db.pragma('page_count', { simple: true }) as number) ?? 0)
+    result.freePagesBefore = freePages
+    if (freePages >= VACUUM_MIN_FREE_PAGES && totalPages > 0 && freePages / totalPages >= VACUUM_FREE_RATIO) {
+      db.exec('VACUUM')
+      result.vacuumed = true
+    }
+  } catch (err) {
+    logger.warn({ err }, 'VACUUM sikertelen, a kovetkezo sweep ujraprobalja')
+  }
+
+  return result
 }
 
 // --- Vault SSH Keys (shared key pool) ---

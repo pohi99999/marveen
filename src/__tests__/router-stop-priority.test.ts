@@ -66,6 +66,7 @@ vi.mock('../web/agent-config.js', () => ({
   // Fork: the router reads the recipient's engine (Claude TUI gate); the mock must offer it.
   readAgentEngine: () => 'claude',
   readAgentRemoteHost: () => null,
+  readAgentPullDelivery: () => false,
   readAgentVoiceConfig: () => ({ responseMode: 'text' }),
   readAgentWorksourceChannel: () => false,
 }))

@@ -86,6 +86,14 @@ export interface SettingDefinition {
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/
 
+// A '' (use the default) or a number in [0, 1], e.g. a cosine-similarity threshold.
+function validUnitFraction(v: string): string | null {
+  const t = v.trim()
+  if (t === '') return null
+  const n = Number(t)
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? null : '0 és 1 közötti szám szükséges (pl. 0.1).'
+}
+
 export const SETTINGS_REGISTRY: SettingDefinition[] = [
   {
     key: 'KANBAN_WIP_PLANNED',
@@ -322,6 +330,15 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     requiresRestart: true,
   },
   {
+    key: 'MEMORY_CONTENT_FILTER_STRICT_COMMANDS',
+    type: 'boolean',
+    default: '0',
+    description: 'A memória-tartalomszűrő szigorú parancs-szintaxis csoportja (curl http(s), bash -c, eval(, exec(, import subprocess, rm -rf). Alapértelmezés: kikapcsolva, a szűrő csak injekciós fordulatokat utasít el. Bekapcsolva ezek a minták is 400-at adnak a memória POST/PUT/PATCH-en. Ára: a parancsot csak IDÉZŐ szöveget (pl. biztonsági dokumentációt) is elutasítja. Akkor érdemes, ha a tárolt emlékeket olyan ügynök olvassa vissza, amelyen nincs bekötve a destructive-gate hook. A módosítás a dashboard újraindításakor lép életbe.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
     key: 'OLLAMA_URL',
     type: 'string',
     default: 'http://localhost:11434',
@@ -367,6 +384,37 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     module: 'system',
     secret: false,
     requiresRestart: true,
+  },
+  {
+    key: 'MEMORY_VECTOR_MIN_MARGIN',
+    type: 'string',
+    default: '0.1',
+    description: 'Memória-keresés (hybrid), a vektor-ág küszöbe: egy csak vektor alapján talált emlék akkor marad a válaszban, ha a hasonlósága legalább ennyivel a lekérdezés medián-hasonlósága fölött van. 0 és 1 közötti szám, üres = 0.1. A 0.1 a nomic-embed-text modellen kalibrált érték; más EMBED_MODEL-nél újra kell mérni.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+    validate: (v) => validUnitFraction(v),
+  },
+  {
+    key: 'MEMORY_VECTOR_BASELINE_MIN_ROWS',
+    type: 'int',
+    default: 10,
+    min: 1,
+    max: 100000,
+    description: 'Memória-keresés (hybrid): ennyi pontozott emlék alatt (az ágens- és tier-szűrés UTÁN számolva) a medián helyett az abszolút küszöb (MEMORY_VECTOR_SMALL_CORPUS_MIN_SIMILARITY) érvényes.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'MEMORY_VECTOR_SMALL_CORPUS_MIN_SIMILARITY',
+    type: 'string',
+    default: '0.72',
+    description: 'Memória-keresés (hybrid), kis korpusz: a csak vektor alapján talált emlék minimális koszinusz-hasonlósága, ha kevesebb emlék van, mint a MEMORY_VECTOR_BASELINE_MIN_ROWS. 0 és 1 közötti szám, üres = 0.72. A nomic-embed-text modellen kalibrált érték; más EMBED_MODEL-nél újra kell mérni.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+    validate: (v) => validUnitFraction(v),
   },
   {
     key: 'MEMORY_IMPORT_CATEGORIZE_MODEL',
@@ -518,7 +566,51 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     default: 90,
     min: 7,
     max: 3650,
-    description: 'A token-használati napló (token_usage tábla) megőrzési ideje napokban. A napi sweep ennél régebbi sorokat törli, így a tábla nem nő korlátlanul. A modell-javaslat csak az utolsó 30 napot nézi, így a 90 nap minden fogyasztónak bőven elég.',
+    description: 'A token-használati napló (token_usage tábla) megőrzési ideje napokban. A napi sweep ennél régebbi sorokat törli, így a tábla nem nő korlátlanul. A modell-javaslat csak az utolsó 30 napot nézi, de a token-dashboard (from nélkül a teljes táblát olvassa) és a havi költség-ledger (bármely korábbi hónap) annyira nyúl vissza, amennyit a megőrzés enged: a csökkentése ezek előzményét is rövidíti.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'CONVERSATION_LOG_RETENTION_DAYS',
+    type: 'int',
+    default: 0,
+    min: 0,
+    max: 3650,
+    description: 'A csatorna-beszélgetés napló (conversation_log tábla) megőrzési ideje napokban. 0 = örökre megőrzi (ez az alapértelmezés, a napi sweep ilyenkor semmit nem töröl). Ha bekapcsolod, a javasolt érték 90 nap: a napi digest és a heartbeat csak az utolsó napokat nézi. Figyelem: ha a naplót audit-forrásnak használod, a bekapcsolás az ennél régebbi sorokat véglegesen törli.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'OTEL_SPAN_RETENTION_DAYS',
+    type: 'int',
+    default: 0,
+    min: 0,
+    max: 365,
+    description: 'A trace-telemetria (otel_spans tábla) megőrzési ideje napokban. 0 = örökre megőrzi (ez az alapértelmezés, a napi sweep ilyenkor semmit nem töröl). Ha bekapcsolod, a javasolt érték 14 nap: tisztán diagnosztikai adat, ezért rövidebb a többinél.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'AGENT_MESSAGE_RETENTION_DAYS',
+    type: 'int',
+    default: 0,
+    min: 0,
+    max: 3650,
+    description: 'A lezárt (done/failed) ágensközi üzenetek (agent_messages tábla) megőrzési ideje napokban. 0 = örökre megőrzi (ez az alapértelmezés, a napi sweep ilyenkor semmit nem töröl). Ha bekapcsolod, a javasolt érték 30 nap. A pending és delivered sorok SOHA nem törlődnek koruk miatt, mert azok még kézbesítés/feldolgozás alatt állnak.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'TOOL_CALL_LOG_RETENTION_DAYS',
+    type: 'int',
+    default: 0,
+    min: 0,
+    max: 365,
+    description: 'A tool-hívás napló (tool_call_log tábla) megőrzési ideje napokban. 0 = örökre megőrzi (ez az alapértelmezés, a napi sweep ilyenkor semmit nem töröl). Ha bekapcsolod, a javasolt érték 30 nap: a workflow-jelölt elemzés az utolsó napokból dolgozik.',
     module: 'system',
     secret: false,
     requiresRestart: false,
@@ -602,7 +694,7 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     secret: false,
     requiresRestart: true,
   },
-  // The three opt-in switches below are boot-time consts in src/config.ts
+  // The opt-in switches below are boot-time consts in src/config.ts
   // (cfg(): config-overrides.json > .env), so a value saved here takes effect
   // only after the dashboard restarts. Default '0' matches config.ts, where an
   // unset key resolves to false.
@@ -625,10 +717,28 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     requiresRestart: true,
   },
   {
+    key: 'WORKER_AUTOUPDATE',
+    type: 'boolean',
+    default: '0',
+    description: 'Egyetlen kijelölt Claude Code frissítő. Alapból minden indított claude DISABLE_AUTOUPDATER=1-gyel fut, hogy két session ne írja egyszerre a közös telepítést. Bekapcsolva PONTOSAN egy session, a lassú worker indul nélküle, és natív telepítésen naprakészen tartja a Claude Code-ot; a gyors worker, a channels session és a sub-agentek továbbra is rögzítve maradnak. npm-es telepítésen hatástalan (ott a channels.sh claude_ensure frissít). A futó sessionök a régi verzión maradnak, az újat a következő indításukkor veszik fel. A módosítás a dashboard újraindítása után, a lassú worker következő indításakor lép életbe.',
+    module: 'agents',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
     key: 'VOICE_TRANSCRIBE_INBOUND',
     type: 'boolean',
     default: '0',
     description: 'Telepítés-szintű alapértelmezés a bejövő hangüzenetek átiratához a text módú ügynököknél. Bekapcsolva minden olyan text módú ügynöknél helyi faster-whisper átirat készül, amelynek az agent-config.json-jában nincs voice.transcribeInbound beállítás (az ügynökönkénti érték felülírja ezt). A voice/auto módú ügynököknél az átirat ettől függetlenül mindig elkészül. Hangüzenetenként CPU-időbe kerül. Alapértelmezés: kikapcsolva. A módosítás a dashboard újraindításakor lép életbe.',
+    module: 'channels',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
+    key: 'TELEGRAM_TOPICS_ENABLED',
+    type: 'boolean',
+    default: '0',
+    description: 'Telegram-témák: ha a bot privát chatjében témák vannak, a válasz abba a témába megy, ahonnan az üzenet jött, és a gépelés-jelzés is ott látszik. Bekapcsolva a csatorna-indítás egy kiegészítést tesz a Telegram plugin forrására (scripts/patch-telegram-plugin.py), ami a bejövő üzenet téma-azonosítóját átadja az ügynöknek, és a reply toolt témába küldésre is képessé teszi; kikapcsolva a kiegészítést leveszi, és a plugin pontosan a mai. A privát chatben a témákat a BotFather-ben kell bekapcsolni. A riasztások, a jóváhagyás-kérések és a többi rendszerüzenet ettől függetlenül téma nélkül megy ki. Alapértelmezés: kikapcsolva. A módosítás a csatorna következő indításakor lép életbe.',
     module: 'channels',
     secret: false,
     requiresRestart: true,

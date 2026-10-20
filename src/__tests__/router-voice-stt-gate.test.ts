@@ -65,6 +65,7 @@ vi.mock('../web/agent-config.js', () => ({
   readAgentRemoteHost: () => null,
   // FORK: the router asks every recipient's engine (copilot/antigravity delivery)
   readAgentEngine: () => 'claude',
+  readAgentPullDelivery: () => false,
   readAgentVoiceConfig: () => voiceCfg.current,
   readAgentWorksourceChannel: () => false,
 }))
