@@ -51,7 +51,8 @@ const EXPECTED: Record<string, string[]> = {
   PostToolUse: [
     'ledger-outbound.py @ mcp__plugin_[^_]+_[^_]+__reply', 'tool-log-capture.py',
     'telegram_progress_reply_clear.py @ telegram.*reply', 'slack_progress_reply_clear.py @ slack.*reply',
-    'skill-usage-capture.py @ Skill|Read', 'memory-frontmatter-bash-gate.py @ Bash',
+    // FORK SKILLBASH1010: skill-usage-capture also on Bash
+    'skill-usage-capture.py @ Skill|Read|Bash', 'memory-frontmatter-bash-gate.py @ Bash',
     // The persona guard watches the main agent's own CLAUDE.md/SOUL.md and
     // every agents/*/ pair, and it must fire on EVERY tool call: the first
     // version filtered on the Write/Edit file_path and a python3 heredoc
@@ -71,6 +72,8 @@ const EXPECTED: Record<string, string[]> = {
     'outgoing-copy-gate.py @ .*draft_email.*',
     'outgoing-copy-gate.py @ mcp__plugin_telegram_telegram__reply|mcp__plugin_telegram_telegram__edit_message',
     'outgoing-copy-gate.py @ mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message',
+    // FORK: the marveen-api MCP tools go through the outgoing-copy gate too
+    'outgoing-copy-gate.py @ mcp__marveen-api__.*',
     'email-approval-gate.py @ Bash',
     'email-approval-gate.py @ .*send_email.*',
     'email-approval-gate.py @ .*manage_email.*',
@@ -109,7 +112,8 @@ function groupDescriptors(event: string): string[] {
 // The keys this file uses today. A new key (a stray `id` or `description`, a
 // handler option nobody reviewed) has to be added here on purpose.
 const GROUP_KEYS = new Set(['matcher', 'hooks'])
-const HANDLER_KEYS = new Set(['type', 'command', 'timeout'])
+// FORK PR #19 (a62a27ce): the security gates carry onFailure: block
+const HANDLER_KEYS = new Set(['type', 'command', 'timeout', 'onFailure'])
 
 describe('tracked .claude/settings.json hook anchor (#1305)', () => {
   it('registers exactly the expected script set per event', () => {

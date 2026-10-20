@@ -80,6 +80,8 @@ vi.mock('../web/agent-config.js', () => ({
   readAgentRemoteHost: () => null,
   readAgentVoiceConfig: () => ({ responseMode: 'text' }),
   readAgentEngine: (name: string) => mockReadAgentEngine(name),
+  // v1.44.0 upstream sync: the router reads the pull-delivery flag (PULLDELIV920); off keeps tmux delivery
+  readAgentPullDelivery: () => false,
   // v1.38.0 upstream sync: this suite predates the worksource-queue delivery
   // path and is not exercising it -- false keeps every case on the tmux/
   // engine-branch delivery these tests actually assert on.

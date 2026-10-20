@@ -7,6 +7,7 @@
 // command dispatcher already verifies) plus the per-approval nonce only the owner's message carries.
 import { randomBytes } from 'node:crypto'
 import type { Approval } from '../db.js'
+import { APP_TZ } from '../config.js'
 
 export const OWNER_RESOLVER = 'telegram-owner'
 export const CALLBACK_PREFIX = 'apr'
@@ -86,6 +87,6 @@ export function emailSummaryLines(a: Approval): string[] {
 }
 
 export function decisionText(a: Approval, decision: OwnerDecision, when: Date): string {
-  const stamp = when.toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
+  const stamp = when.toLocaleString('hu-HU', { timeZone: APP_TZ })
   return `${decision === 'approved' ? 'JÓVÁHAGYVA' : 'ELUTASÍTVA'} Telegramon, ${stamp} (id: ${a.id})`
 }

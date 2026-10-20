@@ -48,6 +48,8 @@ vi.mock('../web/voice-directive.js', () => ({ resolveAgentChannelStateDir: () =>
 vi.mock('../web/agent-config.js', () => ({
   readAgentRemoteHost: () => null,
   readAgentPullDelivery: () => false,
+  // FORK: the router asks every recipient's engine (copilot/antigravity delivery)
+  readAgentEngine: () => 'claude',
   readAgentVoiceConfig: () => ({ responseMode: 'text' }),
   readAgentWorksourceChannel: () => false,
 }))

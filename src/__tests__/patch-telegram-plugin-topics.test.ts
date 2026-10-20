@@ -52,14 +52,15 @@ describe('patch-telegram-plugin.py --topics', () => {
     expect(readFileSync(server, 'utf-8')).not.toContain('tgtopics')
     const s = JSON.parse(readFileSync(state, 'utf-8'))
     expect(s.topics).toBe('off')
-    expect(s.files[0].patches).toEqual({ d4: 'patched', fwd: 'patched', evid: 'patched', kbd: 'patched' })
+    // apr: the fork's Telegram approval buttons patch
+    expect(s.files[0].patches).toEqual({ d4: 'patched', fwd: 'patched', evid: 'patched', kbd: 'patched', apr: 'patched' })
   })
 
   it('on: every step applied once, the file still parses, a second run is a byte-identical no-op', () => {
     const state = join(cache, 'state.json')
     const r = run(['--state', state, '--topics', 'on'])
     expect(r.status).toBe(0)
-    expect(r.stderr).toMatch(/patched .*\(d4, fwd, evid, kbd, topics\)/)
+    expect(r.stderr).toMatch(/patched .*\(d4, fwd, evid, kbd, apr, topics\)/)
     const once = readFileSync(server, 'utf-8')
     expect(syntaxErrors(once)).toEqual([])
     expect(JSON.parse(readFileSync(state, 'utf-8'))).toMatchObject({ topics: 'on', files: [{ patches: { topics: 'patched' } }] })
@@ -78,7 +79,7 @@ describe('patch-telegram-plugin.py --topics', () => {
     const r = run(['--state', state, '--topics', 'off'])
     expect(r.stderr).toMatch(/patched .*\(topics removed\)/)
     expect(readFileSync(server, 'utf-8')).toBe(neverSwitched)
-    expect(JSON.parse(readFileSync(state, 'utf-8')).files[0].patches).toEqual({ d4: 'already', fwd: 'already', evid: 'already', kbd: 'already', topics: 'removed' })
+    expect(JSON.parse(readFileSync(state, 'utf-8')).files[0].patches).toEqual({ d4: 'already', fwd: 'already', evid: 'already', kbd: 'already', apr: 'already', topics: 'removed' })
   })
 
   it.each(['yes', 'true', '1', 'On', ''])('--topics %j: refused with exit 2, the plugin file and the state left alone', (value) => {
@@ -168,6 +169,8 @@ function load(source: string): Plugin {
   const record = (name: string) => async (...a: unknown[]) => { calls.push([name, ...a]); return { message_id: nextId++ } }
   const bot = {
     command: () => {},
+    // FORK card 3558: the fixture carries the callback_query handler (the apr anchor); registration only
+    on: () => {},
     start: async () => {},
     api: {
       sendChatAction: record('sendChatAction'),
