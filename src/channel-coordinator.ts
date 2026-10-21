@@ -33,7 +33,8 @@ import { pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
 import { logger } from './logger.js'
 import { isSettingOn } from './setting-flag.js'
-import { STORE_DIR, WEB_PORT, PROJECT_ROOT, MAIN_AGENT_ID, CHANNEL_PROVIDER, BOT_NAME } from './config.js'
+import { STORE_DIR, WEB_PORT, PROJECT_ROOT, MAIN_AGENT_ID, CHANNEL_PROVIDER, BOT_NAME, ALLOWED_CHAT_ID } from './config.js'
+import { channelStateDir } from './channel-provider.js'
 import { getUpdates, probeHighWater, mapUpdate, TelegramApiError } from './channel-coordinator/telegram-client.js'
 import { probeNativeChannelDown } from './channel-coordinator/liveness.js'
 import {
@@ -41,6 +42,7 @@ import {
   insertIncomingEvent,
   createHandoffMessage,
   markEventDelivered,
+  markEventFailed,
   getEventsNeedingHandoff,
   getOffset,
   setOffset,
@@ -229,6 +231,39 @@ export function buildHandoffContent(ev: {
   return `<channel ${attrs}>\n${body}\n</channel>`
 }
 
+// ---- sender allowlist ------------------------------------------------------
+
+// The native Telegram plugin drops every update whose sender is not on its
+// access.json allowlist before the agent sees it. The backfill reads the same
+// bot's getUpdates directly, so it must apply the same rule: otherwise, while
+// the native poller is down, any stranger who messages the bot reaches the
+// main agent inside a trusted-looking <channel> envelope. Fail-closed: an
+// unreadable allowlist admits only the configured ALLOWED_CHAT_ID.
+export function isAllowedInboundSender(
+  ev: { chat_id: number | null; user_id: number | null },
+  readAccessFile: () => string = () => readFileSync(join(channelStateDir('telegram'), 'access.json'), 'utf-8'),
+  allowedChatId: string = ALLOWED_CHAT_ID,
+): boolean {
+  const chat = ev.chat_id != null ? String(ev.chat_id) : ''
+  const user = ev.user_id != null ? String(ev.user_id) : ''
+  const owner = allowedChatId.trim()
+  if (owner && (chat === owner || user === owner)) return true
+  let access: { allowFrom?: unknown; groups?: unknown }
+  try { access = JSON.parse(readAccessFile()) as typeof access } catch { return false }
+  const ids = (v: unknown): string[] => Array.isArray(v) ? v.map((x) => String(x)) : []
+  // DM: the chat is the sender's own, and the sender must be allowlisted.
+  if (user && chat === user && ids(access.allowFrom).includes(user)) return true
+  // Group: the chat must be an allowed group; a non-empty per-group allowFrom
+  // further limits which members may speak.
+  const groups = access.groups && typeof access.groups === 'object' ? access.groups as Record<string, { allowFrom?: unknown }> : {}
+  const g = chat ? groups[chat] : undefined
+  if (g) {
+    const members = ids(g.allowFrom)
+    return members.length === 0 || (user !== '' && members.includes(user))
+  }
+  return false
+}
+
 // ---- backoff -------------------------------------------------------------
 
 // Exponential backoff with full jitter, capped. Math.random is fine here --
@@ -285,6 +320,12 @@ function processBatch(updates: { update_id: number }[]): number | null {
       continue
     }
 
+    if (!isAllowedInboundSender(ev)) {
+      markEventFailed(ins.eventId, 'sender not on the channel allowlist')
+      logger.warn({ update_id: ev.update_id, chat_id: ev.chat_id, user_id: ev.user_id }, 'channel-coordinator: dropped update from a sender not on the channel allowlist')
+      continue
+    }
+
     try {
       const agentMessageId = createHandoffMessage(buildHandoffContent(ev))
       markEventDelivered(ins.eventId, agentMessageId)
@@ -316,6 +357,11 @@ function reconcilePending(): void {
   }
   for (const ev of events) {
     try {
+      if (!isAllowedInboundSender(ev)) {
+        markEventFailed(ev.id, 'sender not on the channel allowlist')
+        logger.warn({ update_id: ev.update_id, eventId: ev.id }, 'channel-coordinator: dropped stored update from a sender not on the channel allowlist')
+        continue
+      }
       let parsedMeta: Record<string, unknown> = {}
       try { if (ev.meta) parsedMeta = JSON.parse(ev.meta) as Record<string, unknown> } catch {}
       const agentMessageId = createHandoffMessage(buildHandoffContent({

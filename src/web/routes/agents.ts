@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync, copyFileSync, renameSync } from 'node:fs'
 import { join, extname, dirname } from 'node:path'
 import { homedir, platform, tmpdir } from 'node:os'
-import { execSync } from 'node:child_process'
+import { execSync, execFileSync } from 'node:child_process'
 import { logger } from '../../logger.js'
 import { beginRestart, endRestart } from '../restart-lock.js'
 import { restartOptsFromBody } from '../restart-wake.js'
@@ -1356,7 +1356,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       return true
     }
     try {
-      const output = execSync(`bash "${scriptPath}" "${name}"`, {
+      // Argument array, no shell: the name comes from the URL.
+      const output = execFileSync('bash', [scriptPath, name], {
         timeout: 60000,
         encoding: 'utf-8',
         env: { ...process.env, SLACK_SMOKE_TEST_ALLOWED: 'true' },
