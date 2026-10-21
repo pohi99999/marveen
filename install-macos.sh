@@ -747,7 +747,7 @@ BRAND_NAME="$BOT_NAME"
 SERVICE_ID="$MAIN_AGENT_ID"
 
 # Resolve the Node the launchd SERVICES will run, and pin the whole install to
-# it. Idempotent: sets NODE_PATH / NODE_BIN_DIR once, both the npm step below and
+# it. Idempotent: sets SERVICE_NODE_PATH / NODE_BIN_DIR once, both the npm step below and
 # the launchagent step later call it.
 #
 # This used to live only in the launchagent step, ~600 lines further down -- long
@@ -763,7 +763,12 @@ SERVICE_ID="$MAIN_AGENT_ID"
 # require, so store/.dashboard-token -- written on first successful boot -- was
 # never created, and the installer still printed "sikeresen telepitve".
 resolve_service_node() {
-  [ -n "${NODE_PATH:-}" ] && [ -x "${NODE_PATH:-}" ] && return 0
+  # The "already resolved" guard reads a PRIVATE name. NODE_PATH is Node's own
+  # standard variable (a list of module directories): an operator who exports
+  # it made this return early, since -x is true for a directory, so NODE_BIN_DIR
+  # was never set, npm built better-sqlite3 under the generic node on PATH, and
+  # the launchd plist got a directory as its program. -f: a file, never a dir.
+  [ -n "${SERVICE_NODE_PATH:-}" ] && [ -f "${SERVICE_NODE_PATH:-}" ] && [ -x "${SERVICE_NODE_PATH:-}" ] && return 0
 
   # Homebrew's generic `node` symlink auto-upgrades to new majors whose ABI
   # breaks the prebuilt better-sqlite3. node@22 is keg-only, so a generic `node`
@@ -778,15 +783,15 @@ resolve_service_node() {
   fi
 
   if [ -n "$prefix" ] && [ -x "$prefix/bin/node" ]; then
-    NODE_PATH="$prefix/bin/node"
+    SERVICE_NODE_PATH="$prefix/bin/node"
   else
     # Last-resort fallback: node@22 could not be installed (e.g. no brew). The
     # services may still break on an ABI-incompatible node -- warn loudly.
-    NODE_PATH="$(which node)"
-    echo -e "  ${RED}Figyelem:${NC} node@22 nem elerheto, a szolgaltatasok ${NODE_PATH}-ra allnak. ABI-hiba eseten telepitsd: brew install node@22"
+    SERVICE_NODE_PATH="$(which node)"
+    echo -e "  ${RED}Figyelem:${NC} node@22 nem elerheto, a szolgaltatasok ${SERVICE_NODE_PATH}-ra allnak. ABI-hiba eseten telepitsd: brew install node@22"
   fi
 
-  NODE_BIN_DIR="$(dirname "$NODE_PATH")"
+  NODE_BIN_DIR="$(dirname "$SERVICE_NODE_PATH")"
 }
 
 # Step 5: Install dependencies
@@ -1482,7 +1487,7 @@ cat > "$PLIST_DIR/${DASHBOARD_PLIST}.plist" << PLISTEOF
   <string>${DASHBOARD_PLIST}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${NODE_PATH}</string>
+    <string>${SERVICE_NODE_PATH}</string>
     <string>${INSTALL_DIR}/dist/index.js</string>
   </array>
   <key>WorkingDirectory</key>

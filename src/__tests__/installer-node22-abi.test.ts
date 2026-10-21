@@ -67,7 +67,7 @@ function stepBlock(src: string, step: string, nextStep: string): string {
  * Run the REAL npm-install step with `npm` stubbed by a script that records the
  * `node` it would resolve. Returns whichever node each npm invocation saw.
  */
-function runNpmInstallStep(): { code: number; out: string; nodes: string[] } {
+function runNpmInstallStep(extraEnv: Record<string, string> = {}): { code: number; out: string; nodes: string[] } {
   const dir = mkdtempSync(join(tmpdir(), 'marveen-nodeabi-'))
   const log = join(dir, 'resolved-node.log')
 
@@ -118,7 +118,7 @@ function runNpmInstallStep(): { code: number; out: string; nodes: string[] } {
   let out = ''
 
   try {
-    out = execFileSync('/bin/bash', [file], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+    out = execFileSync('/bin/bash', [file], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...extraEnv } })
   } catch (e: unknown) {
     const err = e as { status?: number; stdout?: string; stderr?: string }
     code = err.status ?? -1
@@ -160,6 +160,31 @@ describe('install-macos.sh: the native module must be built for the SERVICE node
     expect(out).not.toContain('TRAP_FIRED')
     expect(out).toContain('REACHED_THE_END')
     expect(code).toBe(0)
+  })
+
+  // NODE_PATH is Node's own standard variable (a list of module directories), so
+  // an operator may well have it exported. The helper used it as its private
+  // "already resolved" marker, and `-x` is true for a directory: the helper
+  // returned at once, NODE_BIN_DIR stayed unset, and npm built better-sqlite3
+  // under the generic node on PATH -- the 2026-08-03 ABI mismatch again.
+  it('an exported NODE_PATH (a module directory) does not short-circuit the resolution', () => {
+    const modules = mkdtempSync(join(tmpdir(), 'marveen-node-path-'))
+    const { nodes } = runNpmInstallStep({ NODE_PATH: modules })
+
+    const install = nodes.find((l) => l.startsWith('install'))
+    const rebuild = nodes.find((l) => l.includes('rebuild') && l.includes('better-sqlite3'))
+
+    expect(install, `npm install never ran; saw: ${JSON.stringify(nodes)}`).toContain('node22')
+    expect(rebuild, `npm rebuild never ran; saw: ${JSON.stringify(nodes)}`).toContain('node22')
+  })
+
+  it('the launchd plist runs the node the helper resolved, under a private name', () => {
+    const fn = sliceShellFn(MACOS, 'resolve_service_node')
+    const assigned = fn.match(/^\s*([A-Z_]+)="\$prefix\/bin\/node"/m)?.[1]
+
+    expect(assigned, 'resolve_service_node assigns no node path').toBeDefined()
+    expect(assigned).not.toBe('NODE_PATH')
+    expect(MACOS).toMatch(new RegExp(`<key>ProgramArguments</key>\\s*<array>\\s*<string>\\$\\{${assigned}\\}</string>`))
   })
 
   it('resolves the service node BEFORE it compiles the native module', () => {
