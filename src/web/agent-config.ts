@@ -49,6 +49,15 @@ export function agentDir(name: string): string {
   // safeJoin turns every non-whitelisted `name` (e.g. a buggy internal caller
   // that forgot to sanitize) into an explicit throw instead of silently
   // writing outside AGENTS_BASE_DIR.
+  //
+  // safeJoin alone accepts a name that resolves to the base itself or to a
+  // sibling ("x/.." -> AGENTS_BASE_DIR, "x/../bob" -> bob), and route handlers
+  // decode %2F into '/', so DELETE /api/agents/x%2F.. used to rmSync every
+  // agent. An agent name is a single path segment: refuse separators, dot
+  // segments and NUL outright.
+  if (!name || name === '.' || name === '..' || /[/\\\0]/.test(name)) {
+    throw new Error(`Invalid agent name: ${JSON.stringify(name)}`)
+  }
   return safeJoin(AGENTS_BASE_DIR, name)
 }
 
