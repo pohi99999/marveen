@@ -74,7 +74,10 @@ export const DENIED_PATH_PATTERNS: { pattern: RegExp; reason: string }[] = [
  * bypassed, and a bypassed gate protects nothing.
  */
 export const SECRET_PATTERNS: { name: string; pattern: RegExp }[] = [
-  { name: 'private key block', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+  // A CLOSED block is matched whole (armor, body and END line), so a fixture
+  // exception hashes that one block, not the armor line every key of that type
+  // shares. A bare BEGIN line still matches on its own: nothing is loosened.
+  { name: 'private key block', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]{0,16384}?-----END [A-Z ]*PRIVATE KEY-----)?/ },
   { name: 'Stripe secret/restricted key', pattern: /\b(sk|rk)_(live|test)_[A-Za-z0-9]{16,}/ },
   { name: 'ElevenLabs key header', pattern: /xi-api-key["'\s:=]+[A-Za-z0-9_-]{16,}/i },
   { name: 'ElevenLabs key literal', pattern: /\bsk_[a-f0-9]{32,}/ },
@@ -287,6 +290,43 @@ function lineOf(text: string, index: number): number {
   return text.slice(0, index).split('\n').length;
 }
 
+/** Every occurrence of a pattern, not only the first. */
+function allMatches(pattern: RegExp, text: string): RegExpExecArray[] {
+  const re = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+  const out: RegExpExecArray[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    out.push(m);
+    if (m[0] === '') re.lastIndex++;
+  }
+  return out;
+}
+
+/**
+ * One pattern family over the whole text. EVERY occurrence is checked: an
+ * exception clears only the occurrence whose matched text it hashes, and the
+ * first occurrence that is not cleared is the finding (one per pattern, as
+ * before). This used to look at the first occurrence only, so once that one was
+ * excused, every later key of the same shape in the file went unscanned.
+ */
+function scanPatterns(
+  path: string, text: string, patterns: { name: string; pattern: RegExp }[],
+  detector: Finding['detector'], label: string, list: readonly FixtureException[],
+  findings: Finding[], exceptions: ScanOutcome['exceptions'],
+): void {
+  for (const { name, pattern } of patterns) {
+    for (const m of allMatches(pattern, text)) {
+      const excused = fixtureExceptionReason(path, m[0], list);
+      if (excused) {
+        exceptions.push({ file: path, line: lineOf(text, m.index), detector: `${label}: ${name}`, reason: excused });
+        continue;
+      }
+      findings.push({ file: path, detector, severity: 'blocked', line: lineOf(text, m.index), reason: `${label}: ${name}` });
+      break;
+    }
+  }
+}
+
 export interface ScanOutcome {
   findings: Finding[];
   exceptions: { file: string; line?: number; detector: string; reason: string }[];
@@ -329,24 +369,9 @@ export function scanFileDetailed(
   }
 
   const text = input.content ?? '';
-  for (const { name, pattern } of SECRET_PATTERNS) {
-    const m = pattern.exec(text);
-    if (!m) continue;
-    // Keyed on THIS matched text in THIS file. Every other pattern, and every
-    // other match in the same file, is still scanned.
-    const excused = fixtureExceptionReason(path, m[0], list);
-    if (excused) {
-      exceptions.push({ file: path, line: lineOf(text, m.index), detector: `secret shape: ${name}`, reason: excused });
-      continue;
-    }
-    findings.push({
-      file: path,
-      detector: 'content',
-      severity: 'blocked',
-      line: lineOf(text, m.index),
-      reason: `secret shape: ${name}`,
-    });
-  }
+  // Keyed on THIS matched text in THIS file: every other pattern, and every
+  // other occurrence of the same pattern in the same file, is still scanned.
+  scanPatterns(path, text, SECRET_PATTERNS, 'content', 'secret shape', list, findings, exceptions);
   const tag = WRAPPER_TAG.exec(text);
   if (tag && WRAPPED_PAYLOAD.test(text)) {
     findings.push({
@@ -357,22 +382,7 @@ export function scanFileDetailed(
       reason: 'channel material: wrapper tag carrying a real payload marker',
     });
   }
-  for (const { name, pattern } of TRANSCRIPT_PATTERNS) {
-    const m = pattern.exec(text);
-    if (!m) continue;
-    const excused = fixtureExceptionReason(path, m[0], list);
-    if (excused) {
-      exceptions.push({ file: path, line: lineOf(text, m.index), detector: `channel material: ${name}`, reason: excused });
-      continue;
-    }
-    findings.push({
-      file: path,
-      detector: 'transcript',
-      severity: 'blocked',
-      line: lineOf(text, m.index),
-      reason: `channel material: ${name}`,
-    });
-  }
+  scanPatterns(path, text, TRANSCRIPT_PATTERNS, 'transcript', 'channel material', list, findings, exceptions);
   return { findings, exceptions };
 }
 

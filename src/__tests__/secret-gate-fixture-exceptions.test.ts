@@ -89,3 +89,63 @@ describe('fixture exceptions are narrow', () => {
     for (const e of FIXTURE_EXCEPTIONS) expect(e.path).toMatch(/(^|\/)(__tests__|tests)\//)
   })
 })
+
+// The gate used to look at the FIRST occurrence of each pattern only. Once that
+// one was excused, every later key of the same shape in the file went unscanned,
+// and for the private-key pattern the excused text was the bare armor line, which
+// every key of that type shares. These pin both halves of the fix.
+const ARMOR = (kind: string, edge: 'BEGIN' | 'END') => `-----${edge} ${kind} PRIVATE KEY-----`
+const BLOCK = (kind: string, body: string) => `${ARMOR(kind, 'BEGIN')}\n${body}\n${ARMOR(kind, 'END')}`
+const FIXTURE_BLOCK = BLOCK('OPENSSH', '${lines}')
+const KEYFILE = 'src/__tests__/fake-key-fixture.test.ts'
+const KEY_EXC: FixtureException[] = [{ path: KEYFILE, sha256: hash(FIXTURE_BLOCK), reason: REASON }]
+const scanKey = (content: string) => scanFileDetailed({ path: KEYFILE, content }, KEY_EXC)
+
+describe('every occurrence is scanned, and an exception clears only its own', () => {
+  it('a second literal of the SAME shape after an excused one is still found', () => {
+    const r = scanFileDetailed({ path: 'src/__tests__/fake-fixture.test.ts', content: `const ok = '${KEY_A}'\nconst notOk = '${KEY_B}'\n` }, EXC)
+    expect(r.exceptions).toHaveLength(1)
+    expect(r.findings).toHaveLength(1)
+    expect(r.findings[0].line).toBe(2)
+  })
+
+  it('a closed private-key block is matched whole, so the exception names that one block', () => {
+    const r = scanKey(`const pem = \`${FIXTURE_BLOCK}\`\n`)
+    expect(r.findings).toHaveLength(0)
+    expect(r.exceptions).toHaveLength(1)
+  })
+
+  it('another key block AFTER the excused one is found (2b)', () => {
+    const r = scanKey(`const pem = \`${FIXTURE_BLOCK}\`\n// ${ARMOR('RSA', 'BEGIN')}\n`)
+    expect(r.exceptions).toHaveLength(1)
+    expect(r.findings).toHaveLength(1)
+    expect(r.findings[0].line).toBe(4)
+  })
+
+  it('a second armor line of the SAME type before the excused block is found (2c)', () => {
+    const r = scanKey(`// ${ARMOR('OPENSSH', 'BEGIN')}\nconst pem = \`${FIXTURE_BLOCK}\`\n`)
+    expect(r.findings).toHaveLength(1)
+    expect(r.findings[0].line).toBe(1)
+  })
+
+  it('an exception keyed on the bare armor line clears no closed block of that type (the root of 2c)', () => {
+    // What the old gate needed for the vault-ssh fixture: the armor line was the whole match, so its
+    // hash cleared every key of that type in the file.
+    const headerOnly: FixtureException[] = [{ path: KEYFILE, sha256: hash(ARMOR('OPENSSH', 'BEGIN')), reason: REASON }]
+    const r = scanFileDetailed({ path: KEYFILE, content: `const pem = \`${BLOCK('OPENSSH', 'b3BlbnNzaC1rZXktdjEAAAAA')}\`\n` }, headerOnly)
+    expect(r.exceptions).toHaveLength(0)
+    expect(r.findings).toHaveLength(1)
+  })
+
+  it('the same armor with a different body is a different block: not covered', () => {
+    const r = scanKey(`const pem = \`${BLOCK('OPENSSH', 'b3BlbnNzaC1rZXktdjEAAAAA')}\`\n`)
+    expect(r.exceptions).toHaveLength(0)
+    expect(r.findings).toHaveLength(1)
+  })
+
+  it('a bare BEGIN line with no END is still a finding: the pattern did not loosen', () => {
+    const r = scanFileDetailed({ path: 'src/__tests__/other.test.ts', content: `${ARMOR('EC', 'BEGIN')}\nMHcCAQEE\n` }, [])
+    expect(r.findings).toHaveLength(1)
+  })
+
+})
