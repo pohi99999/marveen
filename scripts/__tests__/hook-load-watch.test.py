@@ -118,6 +118,33 @@ def lines_of(out, klass):
     return [l for l in out.splitlines() if "] %s " % klass in l or "] %-7s" % klass in l]
 
 
+
+def wait_dead(pid, deadline_s):
+    """True once pid is gone or a zombie, False if it is still running at the deadline.
+
+    The killed child is an orphan, so PID 1 reaps it; until then it is a zombie
+    and os.kill(pid, 0) still succeeds. Measured 2026-10-21 in a gVisor container:
+    PID 1 reaped ~1.2s after the kill, so a fixed 0.3s sleep read a dead process
+    as alive. A zombie runs no code, so it counts as dead; a live `sleep 30`
+    (state S) is still a failure. The deadline stays far below the 30s sleep."""
+    end = time.monotonic() + deadline_s
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if os.path.isdir("/proc/self"):  # no /proc (macOS): only the kill(0) answer counts
+            try:
+                with open("/proc/%d/stat" % pid) as f:
+                    stat = f.read()
+                if stat[stat.rindex(")") + 2] == "Z":
+                    return True
+            except FileNotFoundError:
+                return True  # reaped between the two reads
+        if time.monotonic() > end:
+            return False
+        time.sleep(0.05)
+
 class Stub:
     """A local /api/messages stand-in: records every request and answers with the configured status and body."""
 
@@ -247,9 +274,7 @@ class Findings(Base):
         self.assertEqual(rc, 1, out)
         self.assertRegex(out, r"TIMEOUT rc=None +scripts/hooks/good-gate\.py")
         pid = int(read(pidfile))
-        time.sleep(0.3)
-        with self.assertRaises(ProcessLookupError, msg="the hook's child outlived the timeout"):
-            os.kill(pid, 0)
+        self.assertTrue(wait_dead(pid, 5), "the hook's child outlived the timeout")
 
     def test_unreadable_agent_settings_is_a_finding(self):
         write(self.p("agents/a2/.claude/settings.json"), "{ broken", 0o644)
@@ -490,9 +515,7 @@ class Imports(DependencyRoot):
         self.assertEqual(rc, 1, out)
         self.assertRegex(out, r"TIMEOUT rc=None +scripts/hooks/signal_helper\.py")
         pid = int(read(pidfile))
-        time.sleep(0.3)
-        with self.assertRaises(ProcessLookupError, msg="the dependency's child outlived the timeout"):
-            os.kill(pid, 0)
+        self.assertTrue(wait_dead(pid, 5), "the dependency's child outlived the timeout")
 
 
 OPT_GATE_PY = ("import json, sys\np = json.load(sys.stdin)\n"

@@ -4,6 +4,7 @@ import { createServer, type Server } from 'node:http'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { lookup } from 'node:dns/promises'
 
 // NAPZAROFRISS918: the nap-zaro SKILL.md's step-2 Python block (heredoc `<<'PY'`)
 // now reports updated memories separately from new ones (spec 17-18. döntés). This
@@ -68,10 +69,16 @@ describe('nap-zaro SKILL.md step-2: uj + frissitett emlekek (NAPZAROFRISS918)', 
         res.end('{}')
       }
     })
-    // the shipped script connects to "localhost", which this environment resolves to
-    // ::1 first (IPv6) -- bind there explicitly instead of 127.0.0.1, or the python
-    // process tries the wrong address family first.
-    await new Promise<void>((resolve) => server.listen(0, '::1', resolve))
+    // the shipped script connects to "localhost". Bind to the address this host
+    // resolves localhost to FIRST -- that is the one python's urllib tries first.
+    // Hardcoding either family is machine-dependent: some hosts resolve ::1 first,
+    // others (measured 2026-10-21: a container without IPv6, where listening on ::1
+    // fails with EAFNOSUPPORT) only 127.0.0.1.
+    const { address } = await lookup('localhost')
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, address, resolve)
+    })
     port = (server.address() as { port: number }).port
   })
 

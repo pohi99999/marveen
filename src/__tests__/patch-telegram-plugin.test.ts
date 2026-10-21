@@ -25,8 +25,17 @@ beforeEach(() => {
 })
 afterEach(() => rmSync(cache, { recursive: true, force: true }))
 
-function run(extra: string[] = []): { status: number | null; stderr: string } {
-  const r = spawnSync('python3', [SCRIPT, ...extra, cache], { encoding: 'utf-8', timeout: 30_000 })
+// Root bypasses file-mode checks (DAC): `chmod a-w` on the plugin dir does not stop
+// uid 0 from writing there, so on a root runner the "unwritable" fixture denied
+// nothing. With `unprivileged`, a root run hands the scratch cache to nobody and runs
+// the script as nobody, so the kernel really refuses the write; non-root runs as is.
+const AS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0
+const NOBODY = 65534
+
+function run(extra: string[] = [], opts: { unprivileged?: boolean } = {}): { status: number | null; stderr: string } {
+  const drop = opts.unprivileged === true && AS_ROOT
+  if (drop) spawnSync('chown', ['-R', `${NOBODY}:${NOBODY}`, cache])
+  const r = spawnSync('python3', [SCRIPT, ...extra, cache], { encoding: 'utf-8', timeout: 30_000, ...(drop ? { uid: NOBODY, gid: NOBODY } : {}) })
   return { status: r.status, stderr: r.stderr }
 }
 
@@ -163,7 +172,7 @@ describe('patch-telegram-plugin.py', () => {
     const dir = join(cache, 'claude-plugins-official', 'telegram', '0.0.7')
     spawnSync('chmod', ['a-w', dir])
     try {
-      const r = run()
+      const r = run([], { unprivileged: true })
       expect(r.status).toBe(0)
       expect(r.stderr).toMatch(/cannot write .*left unpatched/)
       expect(readFileSync(server, 'utf-8')).toBe(readFileSync(FIXTURE, 'utf-8'))

@@ -189,8 +189,17 @@ echo "(h) An unreadable memory directory is a failed scan, not a clean one"
 UNMEM="$TMP/unreadable"; mkdir -p "$UNMEM"
 echo "- [x](x.md)" > "$UNMEM/MEMORY.md"
 chmod 300 "$UNMEM"
+# Root bypasses file-mode checks (DAC): uid 0 lists a mode-300 directory anyway,
+# so on a root runner the scan succeeded and this case measured nothing. As root,
+# the checker runs as nobody over a fixture it owns (and a TMP it can traverse),
+# so the kernel really refuses the listing. A non-root run is unchanged.
+AS_USER=()
+if [ "$(id -u)" = 0 ]; then
+  chown -R 65534:65534 "$UNMEM"; chmod o+x "$TMP"
+  AS_USER=(setpriv --reuid=65534 --regid=65534 --clear-groups)
+fi
 RC=0
-RES="$(python3 "$CHECK" "$UNMEM/MEMORY.md" 2>/dev/null)" || RC=$?
+RES="$(${AS_USER[@]+"${AS_USER[@]}"} python3 "$CHECK" "$UNMEM/MEMORY.md" 2>/dev/null)" || RC=$?
 chmod 700 "$UNMEM"
 if [ "$RC" = 2 ]; then pass "the checker exits 2 (could not run)"; else fail "the checker exits 2" "rc=$RC res=$RES"; fi
 if [ "$(printf '%s' "$RES" | jq -r '.orphans // "nincs"')" = "nincs" ]; then pass "and it reports NO orphan number rather than 0"; else fail "no orphan number on a failed scan" "$RES"; fi

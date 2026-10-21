@@ -33,6 +33,28 @@ vi.mock('../web/vault.js', () => ({
   getSecretsForEnv: vi.fn(() => ({})),
 }))
 
+// Root bypasses file-mode checks (DAC): a chmod-555 directory does not stop uid 0
+// from renaming a file out of it, so on a root runner the "cannot be moved" fixture
+// denied nothing. withRepoNpmrcSetAside runs in-process, so the privilege cannot be
+// dropped for it alone; instead, ONLY when the suite runs as root, renameSync out of
+// the directory the test marks read-only fails with the EACCES the kernel gives a
+// regular user. Every other rename (and every non-root run) is the real one.
+const AS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0
+const readOnlyDir: { value: string | null } = { value: null }
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const { dirname: dirOf } = await import('node:path')
+  const renameSync: typeof actual.renameSync = (from, to) => {
+    if (readOnlyDir.value !== null && dirOf(String(from)) === readOnlyDir.value) {
+      const e = new Error(`EACCES: permission denied, rename '${String(from)}' -> '${String(to)}'`) as NodeJS.ErrnoException
+      e.code = 'EACCES'
+      throw e
+    }
+    return actual.renameSync(from, to)
+  }
+  return { ...actual, default: { ...actual, renameSync }, renameSync }
+})
+
 // git clone creates the target dir with the configured files; npm goes through execFileSync.
 const DEFAULT_PKG = '{"name":"x"}'
 const cloneFiles: { value: Record<string, string> } = { value: {} }
@@ -284,10 +306,11 @@ describe('withRepoNpmrcSetAside', () => {
     const d = dir()
     writeFileSync(join(d, '.npmrc'), 'a=b\n')
     chmodSync(d, 0o555)
+    if (AS_ROOT) readOnlyDir.value = d // root ignores the 0555 above; see readOnlyDir
     const fn = vi.fn()
     try {
       expect(() => withRepoNpmrcSetAside(d, fn)).toThrow(/could not set the repository .npmrc aside/)
-    } finally { chmodSync(d, 0o755) }
+    } finally { readOnlyDir.value = null; chmodSync(d, 0o755) }
     expect(fn).not.toHaveBeenCalled()
   })
 })

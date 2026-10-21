@@ -25,8 +25,22 @@ vi.mock('../logger.js', () => ({
 const mod = await import('../web/command-task.js')
 const { logger } = await import('../logger.js')
 
+// A killed process whose parent is gone is re-parented to PID 1 and stays a
+// zombie until PID 1 reaps it. kill(pid, 0) still succeeds on a zombie, so on a
+// host whose init reaps late (measured 2026-10-21 in a gVisor container: PID 1
+// reaped ~1.2s after the kill, longer under a loaded full-suite run) a process
+// that is already dead reads as alive. A zombie runs no code and holds nothing
+// but its pid, so it counts as dead here; a sleeping process (state S) is alive.
 const alive = (pid: number): boolean => {
-  try { process.kill(pid, 0); return true } catch { return false }
+  try { process.kill(pid, 0) } catch { return false }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8')
+    // the state is the first field after the ")" that closes the comm field
+    return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) !== 'Z'
+  } catch {
+    // no /proc (macOS) or the pid vanished between the two reads: kill(0) is the answer
+    return existsSync(`/proc/${pid}`) || process.platform !== 'linux'
+  }
 }
 
 const leftovers: number[] = []
