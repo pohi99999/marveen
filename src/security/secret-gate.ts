@@ -239,6 +239,16 @@ export const FIXTURE_EXCEPTIONS: readonly FixtureException[] = Object.freeze([
     sha256: 'db8f43c042cf5bdf36abda27c6fb50a1eac827489a10916a552531b93cb548cd',
     reason: 'collectors config validation: this literal IS the input to "rejects a raw secret in secret_ref (must be vault:)". Its raw-secret shape is the subject under test.',
   },
+  {
+    path: 'src/__tests__/vault-ssh-keys-import.test.ts',
+    sha256: '4da59cff862c66aec1cc45339f7f65dd39239d088667201e873d95be11da8446',
+    reason: 'ssh key import test, the TS template that armors a key the test GENERATES at run time (node:crypto ed25519): the body is the ${lines} placeholder, no key is committed. The route under test only accepts a PEM, so the armor is the input.',
+  },
+  {
+    path: 'src/__tests__/vault-ssh-keys-import.test.ts',
+    sha256: '126b2d950d46f517e07cc04e1c86ba60a8f83a1ffe770773e73d5835ebc13322',
+    reason: 'ssh key import test, the embedded python ssh-keygen stand-in: its head/tail armor constants, used to REJECT a malformed PEM. No key body at all.',
+  },
 ]);
 
 export type ExceptionProblem = { path: string; reason: string };
