@@ -185,7 +185,14 @@ function decisionChain(): string {
   return CHANNELS.slice(start, end)
 }
 
-function runChain(dir: string, opts: { ageSeconds: number; pluginAlive: boolean }): { out: string; code: number } {
+// Root bypasses file-mode checks (DAC), so a chmod-500 store/ is still writable
+// for uid 0 and the "unwritable" fixture would deny nothing. When the suite runs
+// as root, the chain runs as an unprivileged uid (nobody) over a fixture tree it
+// owns, so the kernel really refuses the write.
+const AS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0
+const NOBODY = 65534
+
+function runChain(dir: string, opts: { ageSeconds: number; pluginAlive: boolean; unprivileged?: boolean }): { out: string; code: number } {
   const body = [
     'set -u',
     // the shipped warnings go to stderr; merge the streams so the assertions
@@ -212,7 +219,9 @@ function runChain(dir: string, opts: { ageSeconds: number; pluginAlive: boolean 
   const p = join(dir, 'chain.sh')
   writeFileSync(p, body + '\n')
   try {
-    return { out: execFileSync('bash', [p], { encoding: 'utf-8' }).trim(), code: 0 }
+    const drop = opts.unprivileged && AS_ROOT
+    if (drop) execFileSync('chown', ['-R', `${NOBODY}:${NOBODY}`, dir])
+    return { out: execFileSync('bash', [p], { encoding: 'utf-8', ...(drop ? { uid: NOBODY, gid: NOBODY } : {}) }).trim(), code: 0 }
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string; status?: number }
     return { out: `${String(err.stdout ?? '')}${String(err.stderr ?? '')}`.trim(), code: err.status ?? -1 }
@@ -264,7 +273,7 @@ describe('the streak file, executed for real and read back', () => {
       const storeDir = join(dir, 'store')
       execFileSync('mkdir', ['-p', storeDir])
       execFileSync('chmod', ['500', storeDir])
-      const r = runChain(dir, { ageSeconds: 700, pluginAlive: false })
+      const r = runChain(dir, { ageSeconds: 700, pluginAlive: false, unprivileged: true })
       // the watchdog still asks for the restart -- the signal survives a
       // failed write, which is the behaviour we want on a broken host
       expect(r.out).toContain('restart_requested=1')

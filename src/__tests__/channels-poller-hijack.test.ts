@@ -88,7 +88,20 @@ describe('bot_pid_descends_from: whose plugin owns bot.pid (real process trees)'
   it('a pid that no longer exists is unknown -- never own, never a hijack', async () => {
     const t = await tree()
     process.kill(-t.root, 'SIGKILL')
-    await new Promise((r) => setTimeout(r, 200))
+    // Wait until the leaf pid really no longer exists, not a fixed 200ms: the
+    // killed leaf is an orphan, and until PID 1 reaps it, it is a zombie that
+    // kill(0) and ps still see (its parent is then 1, so the check rightly says
+    // "foreign"). Measured 2026-10-21 in a gVisor container: PID 1 reaped ~1.2s
+    // after the kill. The precondition of this case is "the pid is gone".
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      try { process.kill(t.leaf, 0) } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ESRCH') break
+        throw e
+      }
+      if (Date.now() > deadline) throw new Error(`leaf ${t.leaf} still exists 10s after the group kill`)
+      await new Promise((r) => setTimeout(r, 50))
+    }
     expect(ownerCheck(t.leaf, 424242)).toBe('unknown')
   })
 

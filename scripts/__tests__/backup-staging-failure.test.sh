@@ -21,7 +21,18 @@ mkrepo() {
   git -C "$t" init -q && git -C "$t" add -A && git -C "$t" -c user.name=t -c user.email=t@t commit -qm init
   echo "$t"
 }
-run() { ( cd "$1" && HOME="$1/home" BACKUP_DIR="$1/bk" KEEP=1 bash scripts/backup.sh >"$1/out.log" 2>&1 ); echo $?; }
+# Root bypasses file-mode checks (DAC): `chmod 000` does not stop uid 0 from
+# reading the file, so on a root runner the "unreadable" fixtures were readable and
+# the failure path was never reached. As root, every run hands the throwaway repo to
+# nobody and runs backup.sh as nobody, so the kernel really refuses the read. A
+# non-root run is unchanged.
+AS_USER=()
+if [ "$(id -u)" = 0 ]; then AS_USER=(setpriv --reuid=65534 --regid=65534 --clear-groups); fi
+run() {
+  if [ "${#AS_USER[@]}" -gt 0 ]; then chown -R 65534:65534 "$1"; fi
+  # ${a[@]+...}: an empty array under `set -u` is an error on bash 3.2 (macOS).
+  ( cd "$1" && HOME="$1/home" BACKUP_DIR="$1/bk" KEEP=1 ${AS_USER[@]+"${AS_USER[@]}"} bash scripts/backup.sh >"$1/out.log" 2>&1 ); echo $?
+}
 
 T="$(mkrepo)"; check "clean run exits 0" "$(run "$T")" "0"; rm -rf "$T"
 

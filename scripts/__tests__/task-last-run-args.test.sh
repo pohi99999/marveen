@@ -12,6 +12,48 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/scripts" "$TMP/store"
 cp "$REPO/scripts/task-last-run.sh" "$TMP/scripts/"
+# The sqlite3 CLI is not on every machine (measured 2026-10-21: a cloud container
+# with python3 but no sqlite3 binary -- every case failed with rc 127 before any
+# SQL ran). The real binary is preferred; only when it is missing does a fixture
+# shim stand in: the same SQLite engine through python3's stdlib module, covering
+# exactly the invocations used here and in task-last-run.sh (`sqlite3 DB SQL`,
+# `sqlite3 -header -column DB SQL`, several statements per call). An SQL error is
+# exit 1 with "Error:" on stderr, like the real CLI, so a broken query still fails.
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/sqlite3" <<'SHIM'
+#!/usr/bin/env python3
+import sqlite3, sys
+args = sys.argv[1:]
+header = False
+while args and args[0].startswith("-"):
+    opt = args.pop(0)
+    if opt == "-header": header = True
+    elif opt == "-column": pass
+    else: sys.exit("sqlite3 shim: unsupported option %s" % opt)
+db, sql = args
+con = sqlite3.connect(db)
+buf, stmts = "", []
+for piece in sql.split(";"):
+    buf += piece + ";"
+    if sqlite3.complete_statement(buf):
+        stmts.append(buf); buf = ""
+buf = buf[:-1]  # the ";" added after the last piece
+if buf.strip(): stmts.append(buf)
+try:
+    for st in stmts:
+        cur = con.execute(st)
+        rows = cur.fetchall()
+        if cur.description and (rows or header):
+            if header: print("  ".join(d[0] for d in cur.description))
+            for r in rows: print("  ".join("" if v is None else str(v) for v in r))
+    con.commit()
+except sqlite3.Error as e:
+    sys.stderr.write("Error: %s\n" % e); sys.exit(1)
+SHIM
+  chmod +x "$TMP/bin/sqlite3"
+  PATH="$TMP/bin:$PATH"
+fi
 NOW_MS=$(( $(date +%s) * 1000 ))
 sqlite3 "$TMP/store/claudeclaw.db" "CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, agent TEXT NOT NULL, ts INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'fired');
   INSERT INTO task_runs(name, agent, ts) VALUES ('it''s a task', 'geri', $NOW_MS), ('plain-task', 'geri', $NOW_MS);"
