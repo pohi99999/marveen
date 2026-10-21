@@ -1,6 +1,21 @@
-import { describe, it, expect, afterAll } from 'vitest'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { describe, it, expect, afterAll, vi } from 'vitest'
+import { rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+
+// The token test needs a .dashboard-token, and it must NOT be the checkout's own
+// store/.dashboard-token: assert-not-live-install refuses to run any suite while
+// that file exists, so writing it there knocked out suites starting in parallel.
+// A private temp STORE_DIR keeps the checkout untouched.
+const tmpStore = vi.hoisted(() => {
+  const { mkdtempSync } = require('node:fs') as typeof import('node:fs')
+  const { tmpdir } = require('node:os') as typeof import('node:os')
+  const { join: j } = require('node:path') as typeof import('node:path')
+  return mkdtempSync(j(tmpdir(), 'security-audit-store-'))
+})
+vi.mock('../config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../config.js')>()
+  return { ...actual, STORE_DIR: tmpStore }
+})
 import { agentDir, AGENTS_BASE_DIR } from '../web/agent-config.js'
 import { isAllowedInboundSender } from '../channel-coordinator.js'
 import { buildTtsDirective } from '../web/voice-directive.js'
@@ -41,15 +56,15 @@ describe('channel-coordinator backfill applies the Telegram allowlist', () => {
 
 describe('voice TTS directive never carries the dashboard token value', () => {
   const tokenPath = join(STORE_DIR, '.dashboard-token')
-  const created = !existsSync(tokenPath)
-  if (created) {
-    mkdirSync(STORE_DIR, { recursive: true })
-    writeFileSync(tokenPath, 'f'.repeat(64) + '\n', { mode: 0o600 })
-  }
-  afterAll(() => { if (created) unlinkSync(tokenPath) })
+  const token = 'f'.repeat(64)
+  writeFileSync(tokenPath, token + '\n', { mode: 0o600 })
+  afterAll(() => { rmSync(tmpStore, { recursive: true, force: true }) })
+
+  it('uses a private temp store, never the checkout store', () => {
+    expect(STORE_DIR).toBe(tmpStore)
+  })
 
   it('references the token file instead of embedding its contents', () => {
-    const token = readFileSync(tokenPath, 'utf-8').trim()
     const d = buildTtsDirective({ chatId: '1', stateDir: '/tmp/x', voiceModel: 'v' })
     expect(d).not.toBeNull()
     expect(d!).not.toContain(token)
