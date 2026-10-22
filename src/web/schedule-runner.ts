@@ -2160,6 +2160,16 @@ export async function runScheduledTaskNow(
   }
 
   const now = Date.now()
+
+  // type='command' runs its shell command directly, as the cron tick does --
+  // no session, so no busy wait and no pending retry. Through attemptFireTask
+  // a busy target queued a retry that later typed the raw command into the
+  // agent's session as a prompt (measured 2026-10-22 18:38-18:40).
+  if (task.type === 'command') {
+    runCommandTask(task, now)
+    return { ok: true, result: `${task.agent || 'system'}: command-started` }
+  }
+
   const targets = task.agent === 'all'
     ? [MAIN_AGENT_ID, ...listAgentNames().filter(a => isAgentRunning(a))]
     : [task.agent || MAIN_AGENT_ID]
