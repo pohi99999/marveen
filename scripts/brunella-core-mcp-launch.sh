@@ -42,14 +42,20 @@ if [ ! -f "$KEYFILE" ]; then
   echo "brunella-core-mcp-launch: a szerver /sse vegpontja operator-hozzaferest ker (BRUNELLA_API_KEY)." >&2
   exit 1
 fi
-KEY="$(tr -d '[:space:]' < "$KEYFILE")"
+# A kulcs env-ben megy at, nem az argv-ben: az argv-t (ps) a gep minden
+# felhasznaloja latja, a folyamat kornyezetet csak a tulajdonos. Az mcp-remote
+# a header-ertekben a ${VAR}-t a SAJAT kornyezetebol oldja fel, ezert a
+# parancssorban csak a literal ${BRUNELLA_CORE_API_KEY} latszik.
+BRUNELLA_CORE_API_KEY="$(tr -d '[:space:]' < "$KEYFILE")"
+export BRUNELLA_CORE_API_KEY
 
 # X-API-Key es nem "Authorization: Bearer ..." -- a kulcs-ertekben nincs szokoz,
 # igy nem futunk bele az mcp-remote --header szokoz-kezelesi hibajaba.
 # --allow-http: a celpont a SAJAT gep (WSL gateway / localhost), nem tavoli
 # szolgaltatas, ezert a plaintext HTTP itt nem hoz uj kockazatot. Nelkule az
 # mcp-remote elutasitja a nem-HTTPS URL-t.
+# shellcheck disable=SC2016 # the literal ${...} is expanded by mcp-remote, not by the shell
 exec npx -y mcp-remote@0.8.3 "http://${HOST}:${PORT}/sse" \
   --transport sse-only \
   --allow-http \
-  --header "X-API-Key:${KEY}"
+  --header 'X-API-Key:${BRUNELLA_CORE_API_KEY}'
