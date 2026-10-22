@@ -472,6 +472,12 @@ def handle_dir(progress_dir):
 
 
 def main():
+    # Cold standby (card 3301e6cf): with store/.standby this is the switched-off copy, and the progress state
+    # it scans was synced from the live machine -- editing or sending from here would act on the live chat.
+    # The installer does not start this job in standby; this is the guard for when it runs anyway.
+    if os.path.exists(os.path.join(FLEET_ROOT, "store", ".standby")):
+        print(f"[standby] {FLEET_ROOT}/store/.standby is present: the watchdog does nothing (cold standby).")
+        return
     dirs = []
     for g in SCAN_GLOBS:
         dirs.extend(glob.glob(g))

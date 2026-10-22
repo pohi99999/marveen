@@ -153,6 +153,17 @@ fi
 RETIRE_RC=0
 retire_provider telegram || RETIRE_RC=$?
 
+# --- Cold standby (card 3301e6cf) -------------------------------------------
+# store/.standby marks the switched-off copy of the fleet: nothing may run there. The daemon is not even
+# written: launchd loads every plist in ~/Library/LaunchAgents at the next login whether or not it was
+# ever `launchctl load`ed, and the watchdog's StartInterval would then fire it every minute against the
+# synced progress state of the LIVE machine (and with its bot token). The switch-over script runs this
+# installer again once it has removed the marker.
+if [ -f "$INSTALL_DIR/store/.standby" ]; then
+  echo "[standby] $INSTALL_DIR/store/.standby is present: the Slack progress watchdog is NOT installed or started (cold standby)."
+  exit "$RETIRE_RC"
+fi
+
 # --- Install the watchdog daemon -------------------------------------------
 OS="$(uname -s)"
 if [ "$OS" = "Darwin" ]; then
