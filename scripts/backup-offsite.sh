@@ -73,7 +73,10 @@ fi
 NEWEST="$(ls -1t "${BACKUP_DIR}"/claudeclaw-*.tar.gz 2>/dev/null | head -1 || true)"
 [[ -n "${NEWEST}" ]] || fail 3 "no archive in ${BACKUP_DIR} (is the nightly backup running?)"
 NAME="$(basename "${NEWEST}")"
-MTIME="$(stat -f %m "${NEWEST}" 2>/dev/null || stat -c %Y "${NEWEST}")"
+# GNU first: GNU `stat -f` means --file-system and prints a filesystem report
+# to stdout before it fails, so a BSD-first fallback captured that report on
+# Linux. BSD `stat -c` fails with nothing on stdout.
+MTIME="$(stat -c %Y "${NEWEST}" 2>/dev/null || stat -f %m "${NEWEST}")"
 AGE_H=$(( ( $(date +%s) - MTIME ) / 3600 ))
 [[ "${AGE_H}" -lt "${MAX_AGE_HOURS}" ]] || fail 4 "the newest archive ${NAME} is ${AGE_H} h old (limit ${MAX_AGE_HOURS} h): the nightly backup is not producing"
 
