@@ -13,6 +13,10 @@
 #     agents/*/CLAUDE.md, SOUL.md, .mcp.json
 #     agents/*/.claude/channels/{telegram,slack,discord}/.env, access.json
 #
+#   extra/  -> databases from outside the repo, listed one directory per line
+#              in store/backup-extra-db-dirs; MANIFEST.txt names each file's
+#              source path, restore copies it back there by hand
+#
 #   home/   -> extract under $HOME
 #     .claude/skills/**            (the self-built skill library)
 #     .claude/scheduled-tasks/**   (file-based scheduled tasks: SKILL.md + config)
@@ -47,14 +51,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_DIR="${BACKUP_DIR:-${REPO_ROOT}/backups}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 ARCHIVE="${BACKUP_DIR}/claudeclaw-${STAMP}.tar.gz"
-KEEP=14
+KEEP="${BACKUP_KEEP:-14}"
 
 mkdir -p "${BACKUP_DIR}"
 cd "${REPO_ROOT}"
 
 # Checkpoint WAL into the main DB file so the snapshot is self-contained.
 # Tolerate a missing sqlite3 CLI -- just fall back to copying the files as-is.
-if [[ -f store/claudeclaw.db ]] && command -v sqlite3 >/dev/null 2>&1; then
+HAVE_SQLITE=0; command -v sqlite3 >/dev/null 2>&1 && HAVE_SQLITE=1
+if [[ -f store/claudeclaw.db ]] && [[ "${HAVE_SQLITE}" = 1 ]]; then
   sqlite3 store/claudeclaw.db 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || true
 fi
 
@@ -64,6 +69,7 @@ fi
 REPOLIST="$(mktemp -t claudeclaw-repo.XXXXXX)"
 HOMELIST="$(mktemp -t claudeclaw-home.XXXXXX)"
 MANIFEST="$(mktemp -t claudeclaw-manifest.XXXXXX)"
+EXTRALIST="$(mktemp -t claudeclaw-extra.XXXXXX)"
 # The staging tree lives next to the archives, NOT in $TMPDIR. macOS runs
 # com.apple.bsd.dirhelper daily at 03:35 (StartCalendarInterval) with
 # CLEAN_FILES_OLDER_THAN_DAYS=3: it deletes $TMPDIR files whose atime is older
@@ -75,7 +81,7 @@ MANIFEST="$(mktemp -t claudeclaw-manifest.XXXXXX)"
 # BACKUP_DIR is not a sweep target, and the EXIT trap still removes the stage.
 STAGE="$(mktemp -d "${BACKUP_DIR}/.stage.XXXXXX")"
 BUNDLE=""
-trap 'rm -f "${REPOLIST}" "${HOMELIST}" "${MANIFEST}"; [[ -n "${BUNDLE}" ]] && rm -f "${BUNDLE}"; rm -rf "${STAGE}"' EXIT
+trap 'rm -f "${REPOLIST}" "${HOMELIST}" "${MANIFEST}" "${EXTRALIST}"; [[ -n "${BUNDLE}" ]] && rm -f "${BUNDLE}"; rm -rf "${STAGE}"' EXIT
 
 # add_if <listfile> <base> <relpath>  -- append relpath when <base>/<relpath> exists.
 add_if() {
@@ -113,6 +119,12 @@ if [[ -d store ]]; then
     _name="$(basename "${_entry}")"
     case "${STORE_SKIP}" in *" ${_name} "*) continue ;; esac
     case "${_name}" in *.log|*.out|*.pid) continue ;; esac
+    # With the sqlite3 CLI the databases go in as .backup snapshots (below), so
+    # their side files stay out: a stale -wal next to a restored DB is replayed
+    # onto it.
+    if [[ "${HAVE_SQLITE}" = 1 ]]; then
+      case "${_name}" in *.db-wal|*.db-shm|*.db-journal) continue ;; esac
+    fi
     echo "store/${_name}" >> "${REPOLIST}"
   done < <(find store -mindepth 1 -maxdepth 1)
 fi
@@ -174,6 +186,30 @@ if [[ -d "${HOME}/Library/LaunchAgents" ]]; then
   ( cd "${HOME}" && find Library/LaunchAgents -maxdepth 1 -name "com.${MAIN_AGENT_ID}.*.plist" -print ) >> "${HOMELIST}"
 fi
 
+# extra/ group: SQLite databases of services that live OUTSIDE the repo, one
+# absolute directory per line in store/backup-extra-db-dirs (# comments and
+# blank lines allowed). Every *.db directly inside goes in as a snapshot. The
+# list is install-specific, so it is a store/ file, not a path in this script
+# (2026-10-22: the brunella-core data/*.db on the Mac, ~280 MB, was the only
+# copy of its CRM and task history, and no backup carried it). A configured
+# directory that does not exist fails the run: a typo must not pass silently.
+EXTRA_FAILS=0
+EXTRA_CONF="${REPO_ROOT}/store/backup-extra-db-dirs"
+if [[ -f "${EXTRA_CONF}" ]]; then
+  while IFS= read -r _dir || [[ -n "${_dir}" ]]; do
+    _dir="${_dir%%#*}"; _dir="$(printf '%s' "${_dir}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    [[ -z "${_dir}" ]] && continue
+    if [[ "${_dir}" != /* || ! -d "${_dir}" ]]; then
+      echo "backup: WARN extra DB dir is not an existing absolute directory: ${_dir} -- the run will fail (exit 6)" >&2
+      EXTRA_FAILS=$((EXTRA_FAILS + 1)); continue
+    fi
+    _label="$(printf '%s' "${_dir#/}" | sed -E 's#[^A-Za-z0-9._-]+#_#g')"
+    while IFS= read -r _db; do
+      echo "extra/${_label}/$(basename "${_db}")  (from ${_db})" >> "${EXTRALIST}"
+    done < <(find "${_dir}" -mindepth 1 -maxdepth 1 -type f -name '*.db' | sort)
+  done < "${EXTRA_CONF}"
+fi
+
 # --- Local commits that live on no remote. ---------------------------------
 # This archive deliberately carries unversioned state, not the source: the
 # source is supposed to live on a git remote. On 2026-09-04 that assumption
@@ -214,6 +250,7 @@ fi
     echo "repo/local-commits.bundle   (git bundle: local branches absent from origin)"
   fi
   echo "--- home/ ---"; sed 's,^,home/,' "${HOMELIST}" 2>/dev/null || true
+  if [[ -s "${EXTRALIST}" ]]; then echo "--- extra/ ---"; cat "${EXTRALIST}"; fi
 } > "${MANIFEST}"
 
 # --- Assemble the archive via a staging dir, then one plain tar. -----------
@@ -251,6 +288,44 @@ stage_group() {  # stage_group <listfile> <base> <group>
 stage_group "${REPOLIST}" "${REPO_ROOT}" repo
 stage_group "${HOMELIST}" "${HOME}" home
 
+# snapshot_db <src> <dest>: a consistent copy of a live database through the
+# SQLite backup API (the -wal content included), made standalone (journal_mode
+# delete) and checked with integrity_check. A plain cp of a DB the dashboard is
+# writing is not a snapshot.
+snapshot_db() {
+  local src="$1" dest="$2"
+  rm -f "${dest}" "${dest}-wal" "${dest}-shm"
+  sqlite3 "file:${src}?mode=ro" ".backup \"${dest}\"" >/dev/null 2>&1 \
+    && sqlite3 "${dest}" 'PRAGMA journal_mode=DELETE;' >/dev/null 2>&1 \
+    && rm -f "${dest}-wal" "${dest}-shm" \
+    && [[ "$(sqlite3 "file:${dest}?mode=ro" 'PRAGMA integrity_check;' 2>/dev/null)" = ok ]]
+}
+if [[ "${HAVE_SQLITE}" = 1 ]]; then
+  # store/*.db were staged by cp above; replace each with a snapshot.
+  while IFS= read -r rel; do
+    case "${rel}" in store/*.db) ;; *) continue ;; esac
+    [[ "${rel}" = */*/* ]] && continue
+    if ! snapshot_db "${REPO_ROOT}/${rel}" "${STAGE}/repo/${rel}"; then
+      STAGE_FAILS=$((STAGE_FAILS + 1))
+      echo "backup: WARN could not snapshot repo/${rel} (sqlite .backup or integrity_check failed) -- the run will fail (exit 6)" >&2
+    fi
+  done < "${REPOLIST}"
+fi
+if [[ -s "${EXTRALIST}" ]]; then
+  while IFS= read -r line; do
+    _rel="${line%%  (from *}"; _src="${line#*  (from }"; _src="${_src%)}"
+    mkdir -p "${STAGE}/$(dirname "${_rel}")"
+    if [[ "${HAVE_SQLITE}" != 1 ]]; then
+      STAGE_FAILS=$((STAGE_FAILS + 1)); echo "backup: WARN no sqlite3 CLI, cannot snapshot ${_src} -- the run will fail (exit 6)" >&2
+    elif ! snapshot_db "${_src}" "${STAGE}/${_rel}"; then
+      STAGE_FAILS=$((STAGE_FAILS + 1)); rm -f "${STAGE}/${_rel}"
+      echo "backup: WARN could not snapshot ${_src} (not a readable SQLite database?) -- the run will fail (exit 6)" >&2
+    else
+      chmod 600 "${STAGE}/${_rel}"
+    fi
+  done < "${EXTRALIST}"
+fi
+
 if [[ -n "${BUNDLE}" ]]; then
   mkdir -p "${STAGE}/repo"
   cp -p "${BUNDLE}" "${STAGE}/repo/local-commits.bundle"
@@ -261,7 +336,7 @@ fi
 # its list was empty), so tar never errors on a missing entry and the names
 # stay clean (no leading "./").
 ( cd "${STAGE}" && tar -czf "${ARCHIVE}" MANIFEST.txt \
-    $( [[ -d repo ]] && echo repo ) $( [[ -d home ]] && echo home ) )
+    $( [[ -d repo ]] && echo repo ) $( [[ -d home ]] && echo home ) $( [[ -d extra ]] && echo extra ) )
 echo "backup: wrote ${ARCHIVE} ($(wc -c < "${ARCHIVE}" | awk '{print $1}') bytes)"
 
 # --- Verify the archive against the manifest. ------------------------------
@@ -278,14 +353,14 @@ echo "backup: wrote ${ARCHIVE} ($(wc -c < "${ARCHIVE}" | awk '{print $1}') bytes
 #     small and useless -- the 09-04 shape -- shows up here even if the
 #     manifest itself was built wrong).
 ARCHIVE_LIST="$(mktemp -t claudeclaw-verify.XXXXXX)"
-trap 'rm -f "${REPOLIST}" "${HOMELIST}" "${MANIFEST}" "${ARCHIVE_LIST}"; [[ -n "${BUNDLE}" ]] && rm -f "${BUNDLE}"; rm -rf "${STAGE}"' EXIT
+trap 'rm -f "${REPOLIST}" "${HOMELIST}" "${MANIFEST}" "${EXTRALIST}" "${ARCHIVE_LIST}"; [[ -n "${BUNDLE}" ]] && rm -f "${BUNDLE}"; rm -rf "${STAGE}"' EXIT
 tar -tzf "${ARCHIVE}" > "${ARCHIVE_LIST}"
 
 missing=0
 while IFS= read -r want; do
   # Manifest body lines only: the header block and the group separators are
   # prose, not paths.
-  case "${want}" in repo/*|home/*) ;; *) continue ;; esac
+  case "${want}" in repo/*|home/*|extra/*) ;; *) continue ;; esac
   # A directory entry is listed once in the manifest and expands to many paths
   # in the archive, so match on the prefix, and anchor it so "store/x" cannot
   # be satisfied by "store/xyz". LITERALLY (card a8a92d55): as a regex, a route
@@ -314,6 +389,10 @@ if ( cd "${HOME}" && find .claude/projects -maxdepth 2 -type d -name memory -pri
   }
 fi
 
+if [[ "${EXTRA_FAILS}" -gt 0 ]]; then
+  echo "backup: FAILED config -- ${EXTRA_FAILS} line(s) of store/backup-extra-db-dirs name no existing directory." >&2
+  missing=$((missing + EXTRA_FAILS))
+fi
 if [[ "${STAGE_FAILS}" -gt 0 ]]; then
   echo "backup: FAILED staging -- ${STAGE_FAILS} entr(y/ies) could not be copied completely (see WARN lines above)." >&2
   missing=$((missing + STAGE_FAILS))
@@ -345,7 +424,7 @@ if [[ "${missing}" -gt 0 ]]; then
   fi
   exit 6
 fi
-echo "backup: verified $(grep -cE '^(repo|home)/' "${MANIFEST}") manifest entries against the archive"
+echo "backup: verified $(grep -cE '^(repo|home|extra)/' "${MANIFEST}") manifest entries against the archive"
 
 # The archive contains sensitive tokens (dashboard bearer, channel bot tokens,
 # project .env secrets). Do not auto-sync ${BACKUP_DIR} to iCloud, Dropbox,

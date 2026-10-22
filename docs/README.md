@@ -36,7 +36,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 
 - Route-modulok (`src/web/routes/*.ts`): **56**, egyedi `/api/...` útvonal-literál bennük: **163**
 - Claude Code hookok (`.claude/settings.json`): **8** esemény, **47** bejegyzés, **31** szkript a `scripts/hooks/` alatt
-- Seed ütemezett feladatok (`scheduled-tasks/`): **5** -- dream-engine, ledger-live-drain, memoria-heartbeat, reggeli-napindito, usage-collect
+- Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **9** -- channel-image, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
 - Dokumentációs lapok a `docs/` alatt: **51**, ebből a fenti táblázat linkel **16**
 

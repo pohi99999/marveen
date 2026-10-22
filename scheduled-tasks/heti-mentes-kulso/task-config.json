@@ -1,0 +1,10 @@
+{
+  "schedule": "0 5 * * 0",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "bash {{PROJECT_ROOT}}/scripts/backup-offsite.sh",
+  "timeoutMs": 900000,
+  "failThreshold": 1,
+  "description": "Heti kulso masolat (scripts/backup-offsite.sh): a legfrissebb napi archivum egy masik gepre (store/backup-offsite.conf: TARGET, SSH, KEEP_REMOTE), sha256-tal visszaellenorizve a tuloldalon. Config nelkul no-op. Felhos szinkron-mappa NEM cel: az archivumban titkok vannak."
+}

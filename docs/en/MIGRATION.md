@@ -16,6 +16,8 @@ never overlap.
 Three independent stores. The tarball (`scripts/backup.sh`) covers (1) and (2);
 the Docker volumes (3) are **separate** and must be moved on their own.
 
+Since 2026-10-22 the tarball can also carry SQLite databases from outside the repo: list their directories, one absolute path per line, in `store/backup-extra-db-dirs`. They land under `extra/<path-as-label>/` and `MANIFEST.txt` names each file's source path; restore copies them back there by hand, with the owning service stopped. Every database (store/ and extra/) is a sqlite `.backup` snapshot in DELETE journal mode, so no `-wal`/`-shm` comes with it.
+
 **(1) Repo-relative — under the project root (`repo/` group in the archive)**
 - `store/claudeclaw.db` (+ `-shm`/`-wal`) — kanban, memory, messages, schedules DB
 - `store/.dashboard-token` — dashboard bearer token
