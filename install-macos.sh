@@ -23,14 +23,21 @@ while [[ $# -gt 0 ]]; do
         echo "Error: --port requires a numeric argument (e.g. --port 3421)" >&2; exit 1
       fi
       WEB_PORT="$2"; shift 2 ;;
+    --standby)
+      STANDBY=1; shift ;;
     --help|-h)
-      echo "Usage: $0 [--port <N>]"
+      echo "Usage: $0 [--port <N>] [--standby]"
       echo "  --port <N>   Dashboard port (default: 3420). Also settable via WEB_PORT env var."
+      echo "  --standby    Cold standby (card 3301e6cf): install everything, start NOTHING. The LaunchAgents are"
+      echo "               written with RunAtLoad/KeepAlive false, store/.standby is created (every entry point"
+      echo "               then refuses to start the scheduler and the channel pollers), and the run ends before"
+      echo "               the services, the helper jobs and the channel pairing. The switch-over script activates it."
       exit 0 ;;
     *) echo "Unknown option: $1 (use --help for usage)" >&2; exit 1 ;;
   esac
 done
 WEB_PORT="${WEB_PORT:-3420}"
+STANDBY="${STANDBY:-0}"
 
 INSTALL_STEP="init"
 
@@ -1474,6 +1481,8 @@ resolve_service_node
 # Launchd labels key off SERVICE_ID. SERVICE_ID == MAIN_AGENT_ID for a
 # brand-unaware (default) install, so these labels are unchanged unless the
 # operator picked a distinct brand above.
+# Cold standby: the units are written but must never start on their own (load or login).
+if [ "$STANDBY" = "1" ]; then PLIST_AUTOSTART="<false/>"; else PLIST_AUTOSTART="<true/>"; fi
 DASHBOARD_PLIST="com.${SERVICE_ID}.dashboard"
 CHANNELS_PLIST="com.${SERVICE_ID}.channels"
 
@@ -1493,9 +1502,9 @@ cat > "$PLIST_DIR/${DASHBOARD_PLIST}.plist" << PLISTEOF
   <key>WorkingDirectory</key>
   <string>${INSTALL_DIR}</string>
   <key>RunAtLoad</key>
-  <true/>
+  ${PLIST_AUTOSTART}
   <key>KeepAlive</key>
-  <true/>
+  ${PLIST_AUTOSTART}
   <key>StandardOutPath</key>
   <string>${INSTALL_DIR}/store/dashboard.log</string>
   <key>StandardErrorPath</key>
@@ -1536,9 +1545,9 @@ cat > "$PLIST_DIR/${CHANNELS_PLIST}.plist" << PLISTEOF
   <key>WorkingDirectory</key>
   <string>${INSTALL_DIR}</string>
   <key>RunAtLoad</key>
-  <true/>
+  ${PLIST_AUTOSTART}
   <key>KeepAlive</key>
-  <true/>
+  ${PLIST_AUTOSTART}
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>StandardOutPath</key>
@@ -1567,6 +1576,16 @@ echo -e "  ${GREEN}✓${NC} $(_t macos.launchagents_created)"
 # Load AND START the LaunchAgents -- loading is not starting. The rationale and
 # the measurements live in the shared helper, which scripts/start.sh uses too so
 # both entry points behave identically.
+# Cold standby ends the run here: nothing below may start (the services, the
+# helper jobs that load and run once, the channel pairing that needs a live
+# poller). The marker makes every entry point refuse to start them later too.
+if [ "$STANDBY" = "1" ]; then
+  mkdir -p "$INSTALL_DIR/store"
+  : > "$INSTALL_DIR/store/.standby"
+  echo -e "  ${GREEN}✓${NC} STANDBY: a LaunchAgent-ek megirva (RunAtLoad/KeepAlive false), ${INSTALL_DIR}/store/.standby letrehozva"
+  echo -e "    ${DIM}Nem indult el semmi: dashboard, channels, segedjobok es parositas kimaradt. Aktivalas: az atkapcsolo szkript.${NC}"
+  exit 0
+fi
 . "$INSTALL_DIR/scripts/launchd-unit.sh"
 
 # REMEDYCMD807: the remedy for a unit that is not running. A function because

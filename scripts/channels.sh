@@ -19,6 +19,16 @@
 
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Cold standby (card 3301e6cf, src/standby.ts): with store/.standby present this machine
+# is the fleet's cold mirror, so no channels session and no second Telegram poller. Inline
+# on purpose: no helper file that could be missing. Exit 0 after a pause, so a supervisor
+# that restarts on any exit does not spin.
+if [ -f "$INSTALL_DIR/store/.standby" ]; then
+  echo "[standby] $INSTALL_DIR/store/.standby is present: this machine is the COLD STANDBY, the channels session is NOT started. Only the switch-over script removes the file." >&2
+  sleep "${MARVEEN_STANDBY_EXIT_DELAY:-60}"
+  exit 0
+fi
+
 # WHO THE GUARD ALERTS IN THIS SCRIPT ARE SENT AS.
 #
 # The two alerts below report that the main agent came up on the SHARED

@@ -7,6 +7,12 @@ WEB_PORT="${WEB_PORT:-3420}"
 
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Cold standby (card 3301e6cf, src/standby.ts): refuse to start the services.
+if [ -f "$INSTALL_DIR/store/.standby" ]; then
+  echo "[standby] $INSTALL_DIR/store/.standby is present: this machine is the COLD STANDBY, the dashboard and channels services are NOT started. Only the switch-over script removes the file." >&2
+  exit 1
+fi
+
 # Read only what this script actually needs; avoid `set -a && source .env`,
 # which would leak TELEGRAM_BOT_TOKEN into the environment and then into
 # every tmux session the dashboard launches (see channels.sh for details).

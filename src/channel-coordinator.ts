@@ -32,6 +32,7 @@ import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
 import { logger } from './logger.js'
+import { isStandby, STANDBY_NOTICE } from './standby.js'
 import { isSettingOn } from './setting-flag.js'
 import { STORE_DIR, WEB_PORT, PROJECT_ROOT, MAIN_AGENT_ID, CHANNEL_PROVIDER, BOT_NAME, ALLOWED_CHAT_ID } from './config.js'
 import { channelStateDir } from './channel-provider.js'
@@ -525,6 +526,11 @@ function installSignalHandlers(): void {
 }
 
 async function main(): Promise<void> {
+  // Cold standby: no backfill poller, not even the lock (src/standby.ts).
+  if (isStandby()) {
+    logger.warn(`${STANDBY_NOTICE} (channel-coordinator)`)
+    return
+  }
   const token = readToken()
   acquireSingleInstanceLock()
   initIngestDb()
