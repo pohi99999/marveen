@@ -26,6 +26,7 @@ import { renameSharedCredentialsIfSafe, fleetTokenBootPass } from './web/claude-
 import { startWebServer } from './web.js'
 import { endAllDetachedGroups } from './web/detached-groups.js'
 import { logger } from './logger.js'
+import { isStandby, STANDBY_NOTICE } from './standby.js'
 import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
 import { startChannelRequestWatcher, stopChannelRequestWatcher } from './web/channel-request-watcher.js'
@@ -541,7 +542,11 @@ async function main(): Promise<void> {
     }, msUntil)
     logger.info({ nextRun: target.toLocaleString('hu-HU') }, 'Napi naplo utemezve')
   }
-  scheduleDailyDigest()
+  // Cold standby (src/standby.ts): nothing below that sends, probes or starts a process.
+  const standby = isStandby()
+  if (standby) logger.warn(STANDBY_NOTICE)
+
+  if (!standby) scheduleDailyDigest()
 
   // Heartbeat -- 2026-06-02 architecture switch: the dedicated channel-less
   // `heartbeat` sub-agent now handles the hourly summary via the scheduled-
@@ -565,7 +570,7 @@ async function main(): Promise<void> {
   // any install with the heartbeat sub-agent disabled (the common case) this
   // never ran at boot at all (found 2026-07-13 while diagnosing recurring
   // dead-token incidents).
-  renameSharedCredentialsIfSafe()
+  if (!standby) renameSharedCredentialsIfSafe()
 
   // Fleet-token boot pass, DEFERRED and fire-and-forget: it live-probes a
   // credential (one real `claude -p` call, up to 60s) so it must never block
@@ -574,13 +579,13 @@ async function main(): Promise<void> {
   // silently disables per-agent isolation AND the rename guard -- 2026-07-15
   // bootcamp root gap), validates a never-verified existing fleet token, and
   // quarantines one the probe proves dead.
-  setTimeout(() => {
+  if (!standby) setTimeout(() => {
     fleetTokenBootPass()
       .then((result) => logger.info({ result }, 'credentials-guard: fleet-token boot pass'))
       .catch((err) => logger.warn({ err }, 'credentials-guard: fleet-token boot pass failed'))
   }, 15_000)
 
-  if (shouldBootHeartbeatAgent({ respawnEnabled: RESPAWN_ENABLED, agentEnabled: HEARTBEAT_AGENT_ENABLED })) {
+  if (!standby && shouldBootHeartbeatAgent({ respawnEnabled: RESPAWN_ENABLED, agentEnabled: HEARTBEAT_AGENT_ENABLED })) {
     ensureHeartbeatAgent()
     logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent scaffold ensured (channel-less, dashboard-hidden)')
     const heartbeatStart = await startAgentProcess(HEARTBEAT_AGENT_NAME)
@@ -596,7 +601,7 @@ async function main(): Promise<void> {
     // list: agents/heartbeat-worker is a cwd, not an agent, and without the
     // sentinel the dashboard offers it as a startable agent (2026-08-25).
     ensureHeartbeatWorkerHidden()
-    logger.info('Heartbeat agent boot-start skipped (set HEARTBEAT_AGENT_ENABLED=1 on the respawn host to enable)')
+    logger.info(standby ? 'Heartbeat agent boot-start skipped (cold standby)' : 'Heartbeat agent boot-start skipped (set HEARTBEAT_AGENT_ENABLED=1 on the respawn host to enable)')
   }
 
   // Discord-only: ensure the operator-configured DISCORD_CHANNEL_ID is
@@ -606,10 +611,10 @@ async function main(): Promise<void> {
   ensureDiscordChannelGroup()
 
   // Telegram invite auto-approve monitor (one-click pairing).
-  startInviteMonitor(MAIN_AGENT_ID, AGENTS_BASE_DIR)
+  if (!standby) startInviteMonitor(MAIN_AGENT_ID, AGENTS_BASE_DIR)
 
   // Slack channel request watcher (audit.jsonl -> pending_channel_requests).
-  startChannelRequestWatcher()
+  if (!standby) startChannelRequestWatcher()
 
   // Store file audit watcher
   startStoreWatcher()

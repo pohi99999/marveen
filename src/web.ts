@@ -39,6 +39,7 @@ import { startInboxNudgeWatcher } from './web/inbox-nudge-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
+import { backgroundServicesOff, STANDBY_NOTICE } from './standby.js'
 import { startModelFallbackRunner } from './web/model-fallback-runner.js'
 import { startKanbanArchiveRunner } from './web/kanban-archive-runner.js'
 import { startContextGuardRunner } from './web/context-guard-runner.js'
@@ -411,8 +412,12 @@ export function startWebServer(port = 3420): http.Server {
   // WEB_ONLY=true disables all background services (scheduler, pollers, monitors).
   // Used for staging preview instances that must not conflict with the live fleet
   // (duplicate schedule execution, Telegram 409, tmux manipulation, etc.).
-  const webOnly = process.env['WEB_ONLY'] === 'true'
-  if (webOnly) {
+  // ... and so does the cold-standby marker store/.standby (src/standby.ts).
+  const background = backgroundServicesOff()
+  const webOnly = background.off
+  if (background.reason === 'standby') {
+    logger.warn(STANDBY_NOTICE)
+  } else if (webOnly) {
     logger.info('[staging] WEB_ONLY mode: background services disabled')
   }
 
