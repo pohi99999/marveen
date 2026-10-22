@@ -1,0 +1,10 @@
+{
+  "schedule": "30 4 * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "bash {{PROJECT_ROOT}}/scripts/backup.sh",
+  "timeoutMs": 900000,
+  "failThreshold": 1,
+  "description": "Napi mentes (scripts/backup.sh): store/, a titkok, az ugynok-konfigok, a skillek, az utemezett feladatok es a fajl-memoria egy ellenorzott tar.gz-be a backups/ ala; a DB-k sqlite .backup pillanatkepkent, plusz a store/backup-extra-db-dirs-ben felsorolt kulso DB-mappak. 14 archivum marad. LLM nincs; hibanal Telegram-riasztas az elso bukasra."
+}
