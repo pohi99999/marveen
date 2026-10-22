@@ -52,4 +52,13 @@ export SERVICE_ACCOUNT_KEY_PATH="$KEY_FILE"
 # Storage, ott allitsd be kulon.
 [ -n "${FIREBASE_STORAGE_BUCKET:-}" ] && export FIREBASE_STORAGE_BUCKET
 
+# A csomag stdio-modban is HEAD-kerest kuld a localhost:$MCP_HTTP_PORT-ra
+# (alapbol 3000), es ha ott BARMI valaszol, "HTTP server already running"
+# hibaval kilep (@gannonh/firebase-mcp 1.4.9, dist/config.js
+# isHttpServerRunning). A Mac-en a 3000-en a brunella-core figyel, ezert ott a
+# firebase-mcp sosem indult el (mert, 2026-10-22). HTTP-transportot nem
+# hasznalunk, igy a port csak ennek a probanak a celpontja: egy szabad portra
+# allitjuk, hacsak a hivo kulon meg nem adja.
+export MCP_HTTP_PORT="${MCP_HTTP_PORT:-39999}"
+
 exec npx -y @gannonh/firebase-mcp
