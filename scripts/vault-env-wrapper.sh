@@ -47,12 +47,19 @@ if [ -n "$REFS" ]; then
   # value (e.g. base64 keys with '=' padding). `IFS='=' read -r key value`
   # drops a single trailing '=' (PAD1=abc= became abc), so use parameter
   # expansion instead.
+  SKIPPED=0
   while IFS= read -r line; do
     [ -z "$line" ] && continue
+    # Only KEY=value lines are exported. Anything else on vault-resolve's stdout (a log line, Mac mini
+    # 2026-10-22) is skipped and counted, never echoed (it is not ours to print); an export of it would
+    # fail under set -e and the MCP server would not start at all.
+    if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then SKIPPED=$((SKIPPED + 1)); continue; fi
     key="${line%%=*}"
     value="${line#*=}"
-    [ -n "$key" ] && export "$key"="$value"
+    export "$key"="$value"
   done <<< "$RESOLVED"
+  [ "$SKIPPED" -gt 0 ] && echo "vault-env-wrapper: $SKIPPED non KEY=value line(s) on vault-resolve's stdout ignored" >&2
+  true
 fi
 
 exec "$@"

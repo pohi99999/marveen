@@ -26,6 +26,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
 
 // Dynamic import from compiled dist
+// stdout is DATA here (KEY=value lines that vault-env-wrapper.sh exports): every log line the vault module
+// writes must go to stderr. Set before the import, the logger reads it when it is created.
+process.env.MARVEEN_LOG_STDERR = '1'
 const { getSecret } = await import(join(projectRoot, 'dist', 'web', 'vault.js'))
 
 const input = await new Promise(resolve => {

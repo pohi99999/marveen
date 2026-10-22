@@ -332,6 +332,17 @@ export function createLogger(destination?: pino.DestinationStream): pino.Logger 
     },
   }
   if (destination) return withMaskedBindings(pino(options, destination))
+  // MARVEEN_LOG_STDERR=1: every log line goes to stderr (fd 2). For processes whose stdout is DATA:
+  // vault-resolve.mjs prints KEY=value lines that vault-env-wrapper.sh exports, and one log line on stdout
+  // (the macOS Keychain-migration warning in src/web/vault.ts, Mac mini 2026-10-22) made the wrapper exit
+  // before the MCP server started. Unset, nothing changes.
+  if (process.env.MARVEEN_LOG_STDERR === '1') {
+    return withMaskedBindings(
+      process.env.NODE_ENV !== 'production'
+        ? pino({ ...options, transport: { target: 'pino-pretty', options: { ...PRETTY_OPTIONS, destination: 2 } } })
+        : pino(options, pino.destination(2)),
+    )
+  }
   return withMaskedBindings(
     pino({
       ...options,
