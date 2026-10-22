@@ -351,9 +351,10 @@ if [ -d "$SKILLS_DIR/.git" ]; then
   else
     warn "skills: fetch sikertelen (offline?), a szinkron nem merheto"
   fi
-  S_CRLF="$(grep -rlI $'\r' "$SKILLS_DIR" --exclude-dir=.git 2>/dev/null | wc -l)"
+  # BSD wc (macOS) pads the count ("       0"), and the checks below compare it as a string: tr -d ' '.
+  S_CRLF="$(grep -rlI $'\r' "$SKILLS_DIR" --exclude-dir=.git 2>/dev/null | wc -l | tr -d ' ')"
   if [ "$S_CRLF" = "0" ]; then ok "skills: CRLF-es fajl 0"; else fail "skills: $S_CRLF CRLF-es fajl a faban (eol=lf a .gitattributes-ban, a checkout serult?)"; fi
-  S_DIRS="$(ls -d "$SKILLS_DIR"/*/ 2>/dev/null | wc -l)"
+  S_DIRS="$(ls -d "$SKILLS_DIR"/*/ 2>/dev/null | wc -l | tr -d ' ')"
   if [ -f "$SKILLS_DIR/.skill-index.md" ]; then
     S_IDX="$(grep -oE '^_[0-9]+ skill indexelve' "$SKILLS_DIR/.skill-index.md" | grep -oE '[0-9]+' | head -1)"
     if [ "${S_IDX:-x}" = "$S_DIRS" ]; then ok "skills: index friss ($S_DIRS skill)"; else warn "skills: index elavult (index ${S_IDX:-?} vs $S_DIRS mappa) -- scripts/skill-index.sh"; fi
@@ -365,16 +366,16 @@ else
 fi
 # ~/.claude/skills/synced/ is Claude Code's own folder (claude.ai-synced skills), not a fleet copy:
 # counting it made this check fail on every install that has it (measured 2026-10-04, v1.40.0 cutover).
-S_GLOBAL="$(ls -d "$HOME"/.claude/skills/*/ 2>/dev/null | grep -v '/synced/$' | wc -l)"
+S_GLOBAL="$(ls -d "$HOME"/.claude/skills/*/ 2>/dev/null | grep -v '/synced/$' | wc -l | tr -d ' ')"
 if [ "$S_GLOBAL" = "0" ]; then ok "nincs globalis ~/.claude/skills masolat"; else fail "$S_GLOBAL globalis skill-masolat a ~/.claude/skills alatt (dupla listazas; a fa a forras, a masolat torlendo)"; fi
-S_AGENT="$(ls -d "$INSTALL_DIR"/agents/*/.claude/skills/*/ 2>/dev/null | wc -l)"
+S_AGENT="$(ls -d "$INSTALL_DIR"/agents/*/.claude/skills/*/ 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$S_AGENT" = "0" ]; then ok "nincs agens-szintu skill-masolat"; else fail "$S_AGENT agens-szintu skill-masolat az agents/*/.claude/skills alatt (megszunt reteg, torlendo)"; fi
 
 echo -e "\n${BOLD}Failures (last 24h)${RESET}"
 if [ -f "store/channels-failures.log" ]; then
   RECENT=$(find store/channels-failures.log -mmin -1440 2>/dev/null)
   if [ -n "$RECENT" ]; then
-    COUNT=$(wc -l < store/channels-failures.log)
+    COUNT=$(wc -l < store/channels-failures.log | tr -d ' ')
     warn "channels-failures.log: $COUNT entries"
     tail -3 store/channels-failures.log | while read line; do echo "    $line"; done
   else
