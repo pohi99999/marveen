@@ -17,7 +17,7 @@
  */
 import { describe, it, expect, afterAll } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { symlinkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { chmodSync, symlinkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { exactTmuxTarget, sessionOfTmuxTarget } from '../tmux-target.js'
@@ -83,10 +83,14 @@ afterAll(() => {
 
 describe.skipIf(!tmuxBin)('a real caller against an isolated tmux server', () => {
   it('getClaudePidForSession(agent-foo) is null while only agent-foo2 runs a claude', async () => {
-    // A process NAMED claude: a symlink to sleep, so `ps -o comm=` ends in /claude.
-    // (A COPY of /bin/sleep is SIGKILLed by macOS code signing, measured rc 137.)
+    // A process NAMED claude, so `ps -o comm=` ends in /claude.
+    // macOS: a symlink to sleep (a COPY of /bin/sleep is SIGKILLed by code signing, measured rc 137).
+    // Linux: a shell script named claude, whose comm is the script's name. A symlink no longer works
+    // there: on ubuntu-26.04 the sleep reached through it exits at once (CI 2026-10-22: the session
+    // was gone before the first poll), while the script runs the real sleep under its own name.
     const fakeClaude = join(SOCKDIR, 'claude')
-    symlinkSync('/bin/sleep', fakeClaude)
+    if (process.platform === 'darwin') symlinkSync('/bin/sleep', fakeClaude)
+    else { writeFileSync(fakeClaude, '#!/bin/sh\nsleep "$1"\n'); chmodSync(fakeClaude, 0o755) }
     isolatedTmux(['new-session', '-d', '-s', 'agent-foo2', `${fakeClaude} 300`])
     startedSessions.push('agent-foo2')
     const sock = isolatedTmux(['display-message', '-p', '-t', '=agent-foo2:', '#{socket_path}']).trim()
