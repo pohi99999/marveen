@@ -1158,6 +1158,10 @@ export function buildMainSessionRespawnCmd(opts: {
     ...(opts.continueSession ? ['--continue'] : []),
     '--dangerously-skip-permissions',
     ...(opts.extraSettingsPath ? ['--settings', shSingleQuote(opts.extraSettingsPath)] : []),
+    // claude-in-chrome, as channels.sh launches the main session: without it a
+    // respawn silently dropped the browser (measured 2026-10-22 20:28, the main
+    // session ran with no claude-in-chrome after a recovery respawn).
+    '--chrome',
     // Escape the model id so a value like `claude-opus-4-8[1m]` is not
     // glob-expanded -- and so a hostile value cannot break out of the quote and
     // inject a command into the string the tmux respawn-pane shell runs. This is
