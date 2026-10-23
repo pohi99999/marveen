@@ -34,11 +34,11 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **56**, egyedi `/api/...` útvonal-literál bennük: **163**
+- Route-modulok (`src/web/routes/*.ts`): **57**, egyedi `/api/...` útvonal-literál bennük: **164**
 - Claude Code hookok (`.claude/settings.json`): **8** esemény, **47** bejegyzés, **31** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **9** -- channel-image, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **52**, ebből a fenti táblázat linkel **16**
+- Dokumentációs lapok a `docs/` alatt: **53**, ebből a fenti táblázat linkel **16**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
@@ -58,6 +58,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [flotta-migracio](flotta-migracio.md)
 - [google-calendar-drive-service-account](google-calendar-drive-service-account.md)
 - [google-docs](google-docs.md)
+- [http-probe](http-probe.md)
 - [ideabox](ideabox.md)
 - [inter-agent-send-reliability](inter-agent-send-reliability.md)
 - [kutatas](kutatas.md)
