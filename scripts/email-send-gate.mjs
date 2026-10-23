@@ -358,7 +358,12 @@ function commandHeads(toksIn, d = 0) {
 //     operand position, interpreter spelling and flag spelling);
 //   - a script operand that cannot be resolved statically (glob or brace
 //     characters, or a `$` expansion) + a recipient flag or another `$` token:
-//     a send, because what runs is undecidable here;
+//     a send, because what runs is undecidable here; when only the directory
+//     is undecidable and the script NAME is literal (`"$D/classify.py"`), the
+//     name is known and is not send.py, so only a recipient flag makes it a
+//     send (SENDGATELITERAL1023: `python3 "$D/x.py" "$D/in.json"` was denied).
+//     An unquoted `$D` that word-splits into a send.py path is the runtime-
+//     assembled form the shared contract already lists as the known limit;
 //   - a program read from stdin (`-`, or no script operand and a `<` redirect)
 //     + a recipient flag: a send (a heredoc-fed program is judged by its body,
 //     heredocProgramSends, as before).
@@ -432,6 +437,8 @@ function pythonHeadSends(rest) {
   const { script, stdin, stdinRedirect } = pythonScriptOperand(rest)
   if (script !== null && SENDPY.test(basename(script))) return recipient
   if (script !== null && UNDECIDABLE_PATH.test(script)) {
+    const name = basename(script)
+    if (name && !UNDECIDABLE_PATH.test(name)) return recipient
     return recipient || rest.some((t) => t !== script && t.includes('$'))
   }
   if (stdin || (script === null && stdinRedirect)) return recipient

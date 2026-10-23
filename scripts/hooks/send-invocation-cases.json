@@ -1072,6 +1072,41 @@
       "expected": false
     },
     {
+      "name": "SENDGATELITERAL1023 control: a variable directory with a literal non-sender script name and a variable argument (Tablaor 4519)",
+      "cmd": "D=/tmp/w; python3 -I \"$D/classify20.py\" \"$D/board20.json\"",
+      "expected": false
+    },
+    {
+      "name": "SENDGATELITERAL1023 control: the same with an unquoted variable directory",
+      "cmd": "python3 $D/report.py $D/in.json --out $D/out.json",
+      "expected": false
+    },
+    {
+      "name": "SENDGATELITERAL1023: a variable directory with send.py and a recipient flag",
+      "cmd": "python3 \"$D/send.py\" --to x@y.hu --subject T --body B",
+      "expected": true
+    },
+    {
+      "name": "SENDGATELITERAL1023: a variable directory with a literal non-sender script name and a recipient flag",
+      "cmd": "python3 \"$D/report.py\" --to x@y.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDGATELITERAL1023: a variable script NAME in a variable directory with a variable argument",
+      "cmd": "python3 \"$D/$F\" \"$ARGS\"",
+      "expected": true
+    },
+    {
+      "name": "SENDGATELITERAL1023: a glob script name with a variable argument",
+      "cmd": "python3 \"$D\"/*.py \"$ARGS\"",
+      "expected": true
+    },
+    {
+      "name": "SENDGATELITERAL1023: a variable directory ending in a slash (no script name) with a variable argument",
+      "cmd": "python3 \"$D/\" \"$ARGS\"",
+      "expected": true
+    },
+    {
       "name": "SUBAGENTMAILGATE1016 control: a variable command without a recipient flag",
       "cmd": "$EDITOR notes.md",
       "expected": false
