@@ -1173,6 +1173,107 @@ export function detectsModelConsentDialog(pane: string): boolean {
     && MODEL_CONSENT_CONFIRM_RX.test(footerRegion)
 }
 
+// Card (Péter GO 10142): the computer-use `request_access` dialog. In a
+// Telegram-only session nobody is at the terminal, so the dialog sat there and
+// the generic menu recovery answered it with Escape (2026-10-22 22:02:58).
+// The shape below is read from the Claude Code 2.1.306 bundle (the dialog is an
+// overlay, so no scrollback ever held a capture):
+//   Computer Use wants to control these apps
+//     ◉ Finder                      <- granted on Allow (the button's N counts these)
+//     ✔ Safari (already granted)    <- dim, not part of this grant
+//     ◯ Foo (not installed)
+//     … +2 more apps not shown, and not included in this grant.
+//   Also requested:                 <- clipboard / system key flags, granted with Allow
+//   1 other app will be hidden while Claude works.
+//   ❯ Deny, and tell Claude what to do differently (esc)
+//     Allow for this session (1 app)
+// The options carry no numbers (hideIndexes), the DEFAULT focus is Deny, and
+// both Enter-on-default and Escape answer deny. The set of apps cannot be
+// edited in the dialog. Everything the owner is asked to decide is parsed out
+// here; anything that does not parse into exactly this shape is `unknown`, so
+// the caller sends no keystroke (a new CLI version must fail loudly, not be
+// answered blind).
+const CU_ACCESS_TITLE_RX = /Computer Use wants to control these apps/
+const CU_ACCESS_DENY_RX = /^\s*([❯>])?\s*Deny, and tell Claude what to do differently \(esc\)\s*$/
+const CU_ACCESS_ALLOW_RX = /^\s*([❯>])?\s*Allow for this session \((\d+) apps?\)\s*$/
+const CU_ACCESS_GRANT_RX = /^\s*◉\s+(\S.*?)\s*$/
+const CU_ACCESS_OTHER_APP_RX = /^\s*[◯✔]\s+\S/
+const CU_ACCESS_MORE_RX = /… \+(\d+) more apps? not shown, and not included in this grant\./
+const CU_ACCESS_ALSO_RX = /^\s*Also requested:\s*$/
+const CU_ACCESS_HIDE_RX = /^\s*(\d+) other apps? will be hidden while Claude works\.\s*$/
+
+export interface ComputerUseAccessDialog {
+  /** The apps an Allow grants, in the order shown (the ◉ lines). */
+  apps: string[]
+  /** The "Also requested:" lines (clipboard / key-combo flags), as shown. */
+  alsoRequested: string[]
+  /** Apps beyond the visible list ("… +N more"), never part of the grant. */
+  notShown: number
+  /** Other apps hidden while Claude works. */
+  willHide: number
+  /** Which option the focus pointer is on. */
+  focus: 'deny' | 'allow'
+}
+
+export type ComputerUseAccessParse =
+  | { kind: 'none' }
+  | { kind: 'dialog'; dialog: ComputerUseAccessDialog }
+  | { kind: 'unknown'; why: string }
+
+export function parseComputerUseAccessDialog(pane: string): ComputerUseAccessParse {
+  if (!pane || !pane.trim()) return { kind: 'none' }
+  const lines = pane.split('\n')
+  const busyRegion = lines.slice(-BUSY_LIVE_REGION_LINES).join('\n')
+  for (const rx of BUSY_INDICATORS) {
+    if (rx.test(busyRegion)) return { kind: 'none' }
+  }
+  if (BUSY_ESC_TO_INTERRUPT_RX.test(liveTailRegion(lines, LIVE_FOOTER_REGION_LINES))) return { kind: 'none' }
+  // A live idle prompt means the dialog is not up; a reply that merely QUOTES
+  // the title (this comment, a diff) can never arm a keystroke.
+  if (hasIdleFooter(lines)) return { kind: 'none' }
+  const titleAt = lines.map((l, i) => (CU_ACCESS_TITLE_RX.test(l) ? i : -1)).filter((i) => i >= 0)
+  if (titleAt.length === 0) return { kind: 'none' }
+  if (titleAt.length > 1) return { kind: 'unknown', why: 'the title appears more than once' }
+  // A bordered rendering ("│ ◉ Finder   │") parses like the bare one.
+  const body = lines.slice(titleAt[0] + 1).map((l) => l.replace(/^\s*[\u2502\u2503]/, '').replace(/[\u2502\u2503]\s*$/, ''))
+  const denyAt = body.map((l, i) => (CU_ACCESS_DENY_RX.test(l) ? i : -1)).filter((i) => i >= 0)
+  const allowAt = body.map((l, i) => (CU_ACCESS_ALLOW_RX.test(l) ? i : -1)).filter((i) => i >= 0)
+  if (denyAt.length !== 1 || allowAt.length !== 1) return { kind: 'unknown', why: 'the Deny / Allow option lines are not exactly one each' }
+  if (allowAt[0] !== denyAt[0] + 1) return { kind: 'unknown', why: 'the Allow option does not follow Deny directly' }
+  const denyPtr = CU_ACCESS_DENY_RX.exec(body[denyAt[0]])![1]
+  const allowM = CU_ACCESS_ALLOW_RX.exec(body[allowAt[0]])!
+  if (Boolean(denyPtr) === Boolean(allowM[1])) return { kind: 'unknown', why: 'the focus pointer is not on exactly one option' }
+  const apps: string[] = []
+  const alsoRequested: string[] = []
+  let notShown = 0
+  let willHide = 0
+  let inAlso = false
+  for (const l of body.slice(0, denyAt[0])) {
+    if (!l.trim()) { inAlso = false; continue }
+    const g = CU_ACCESS_GRANT_RX.exec(l)
+    const more = CU_ACCESS_MORE_RX.exec(l)
+    const hide = CU_ACCESS_HIDE_RX.exec(l)
+    if (CU_ACCESS_ALSO_RX.test(l)) { inAlso = true; continue }
+    if (hide) { willHide = Number(hide[1]); inAlso = false; continue }
+    if (inAlso) { alsoRequested.push(l.trim()); continue }
+    if (g) { apps.push(g[1]); continue }
+    if (more) { notShown = Number(more[1]); continue }
+    if (CU_ACCESS_OTHER_APP_RX.test(l) || /^\s*⚠/.test(l)) continue
+    // Box chrome and the optional reason line are tolerated; nothing else is
+    // modelled, and nothing else needs to be: the grant is the ◉ lines plus
+    // the flags, and both are cross-checked against the button below.
+  }
+  const n = Number(allowM[2])
+  if (apps.length === 0) return { kind: 'unknown', why: 'no app line to grant' }
+  if (n !== apps.length) return { kind: 'unknown', why: `the Allow button counts ${n} app(s), the list shows ${apps.length}` }
+  return { kind: 'dialog', dialog: { apps, alsoRequested, notShown, willHide, focus: denyPtr ? 'deny' : 'allow' } }
+}
+
+/** What identifies one dialog: the same grant (apps + flags), whatever the focus. */
+export function computerUseAccessSignature(d: ComputerUseAccessDialog): string {
+  return JSON.stringify([d.apps, d.alsoRequested, d.notShown, d.willHide])
+}
+
 // Claude Code's self-drafted feedback modal (first observed 2026-08-31 on
 // agent-samu, which sat not-ready for 10 minutes with 5 inter-agent messages
 // queued behind it). When the model drafts a feedback report it parks the TUI

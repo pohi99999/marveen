@@ -72,7 +72,7 @@ export async function pollApprovalCallbacks(
     let line: CallbackLine
     try { line = JSON.parse(raw) as CallbackLine } catch { outcomes.push({ data: raw.slice(0, 40), outcome: 'malformed' }); continue }
     const o = await handleCallbackLine(line, ownerId, deps ?? {
-      apply: (id, nonce, decision) => applyOwnerDecision(id, nonce, decision),
+      apply: (id, nonce, decision) => applyOwnerDecision(id, nonce, decision, undefined, 'button'),
       answer: (cb, text) => TELEGRAM_BOT_TOKEN ? answerTelegramCallbackQuery(TELEGRAM_BOT_TOKEN, cb, text) : Promise.resolve(false),
     })
     logger.info({ data: o.data, outcome: o.outcome, reason: o.reason }, 'approval-callbacks: owner button press handled')

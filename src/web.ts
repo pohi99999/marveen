@@ -28,7 +28,7 @@ import { createAgentMessage } from './db.js'
 import { setOwnerChatMissingSink } from './notify.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startScheduleRunner, startHeartbeatGapGuard } from './web/schedule-runner.js'
-import { startChannelPluginMonitor } from './web/channel-monitor.js'
+import { startChannelPluginMonitor, startComputerUseAccessWatcher } from './web/channel-monitor.js'
 import { startInboundProber } from './web/inbound-probe.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
 import { startChannelIntakeMonitor } from './web/channel-intake-monitor.js'
@@ -498,6 +498,8 @@ export function startWebServer(port = 3420): http.Server {
   const midTurnCommandInterval = webOnly ? undefined : startMidTurnCommandWatcher()
   // Card 3558: the owner's approval buttons (plugin patch 'apr' -> approval-callbacks.jsonl -> here).
   const approvalCallbackInterval = webOnly ? undefined : startApprovalCallbackWatcher()
+  // The computer-use request_access dialog, answered by the owner's Telegram button.
+  const computerUseAccessInterval = webOnly ? undefined : startComputerUseAccessWatcher()
   if (!webOnly) logger.info('Mid-turn command watcher started (3s poll)')
 
   const stuckToolCallInterval = webOnly ? undefined : startStuckToolCallWatcher()
@@ -763,6 +765,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
     clearInterval(stuckInputInterval)
     if (midTurnCommandInterval) clearInterval(midTurnCommandInterval)
     if (approvalCallbackInterval) clearInterval(approvalCallbackInterval)
+    if (computerUseAccessInterval) clearInterval(computerUseAccessInterval)
     clearInterval(stuckToolCallInterval)
     if (inboxNudgeInterval) clearInterval(inboxNudgeInterval)
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)

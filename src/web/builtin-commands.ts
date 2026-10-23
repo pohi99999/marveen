@@ -839,7 +839,7 @@ export function registerBuiltinCommands(): void {
       const a = Number.isInteger(n) && n >= 1 ? list[n - 1] : undefined
       if (!a) { await ctx.reply(`Nincs ${args[0]}. várakozó jóváhagyás. Lásd /approvals.`); return }
       const decision = args[1].toLowerCase() === 'approve' ? 'approved' : 'rejected'
-      const r = applyOwnerDecision(a.id, args[2], decision, Math.floor(ctx.now / 1000))
+      const r = applyOwnerDecision(a.id, args[2], decision, Math.floor(ctx.now / 1000), 'command')
       if (!r.ok) { await ctx.reply(`${ownerDecisionRefusalText(r.reason)} (${n}. tétel, id: ${a.id})`); return }
       await ctx.reply(`${decision === 'approved' ? 'Jóváhagyva' : 'Elutasítva'}: ${a.category} · ${clip(a.action_description, 60)} (id: ${a.id}).`)
     },
