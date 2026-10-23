@@ -80,6 +80,12 @@ EXTRALIST="$(mktemp -t claudeclaw-extra.XXXXXX)"
 # verification below then reports the holes, and the nightly job fails.
 # BACKUP_DIR is not a sweep target, and the EXIT trap still removes the stage.
 STAGE="$(mktemp -d "${BACKUP_DIR}/.stage.XXXXXX")"
+# Every line that fails the run also goes to a failure log next to the archive.
+# The stdout/stderr of a scheduled run reaches no file a person opens (the
+# scheduler keeps only the first 200 stderr characters, in store/dashboard.log),
+# so the alert below points here. Written only on failure.
+FAIL_LOG="${BACKUP_DIR}/claudeclaw-${STAMP}.failures.txt"
+fail_note() { echo "backup: $*" >&2; ( umask 077; printf '%s\n' "$*" >> "${FAIL_LOG}" ); }
 BUNDLE=""
 trap 'rm -f "${REPOLIST}" "${HOMELIST}" "${MANIFEST}" "${EXTRALIST}"; [[ -n "${BUNDLE}" ]] && rm -f "${BUNDLE}"; rm -rf "${STAGE}"' EXIT
 
@@ -200,7 +206,7 @@ if [[ -f "${EXTRA_CONF}" ]]; then
     _dir="${_dir%%#*}"; _dir="$(printf '%s' "${_dir}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
     [[ -z "${_dir}" ]] && continue
     if [[ "${_dir}" != /* || ! -d "${_dir}" ]]; then
-      echo "backup: WARN extra DB dir is not an existing absolute directory: ${_dir} -- the run will fail (exit 6)" >&2
+      fail_note "WARN extra DB dir is not an existing absolute directory: ${_dir} -- the run will fail (exit 6)"
       EXTRA_FAILS=$((EXTRA_FAILS + 1)); continue
     fi
     _label="$(printf '%s' "${_dir#/}" | sed -E 's#[^A-Za-z0-9._-]+#_#g')"
@@ -280,7 +286,7 @@ stage_group() {  # stage_group <listfile> <base> <group>
       # the manifest names the directory, which did get in, so verification
       # alone would pass. Count every staging failure and fail the run on it.
       STAGE_FAILS=$((STAGE_FAILS + 1))
-      echo "backup: WARN could not fully stage ${group}/${rel} -- the run will fail (exit 6)" >&2
+      fail_note "WARN could not fully stage ${group}/${rel} -- the run will fail (exit 6)"
     fi
   done < "${list}"
 }
@@ -292,10 +298,18 @@ stage_group "${HOMELIST}" "${HOME}" home
 # SQLite backup API (the -wal content included), made standalone (journal_mode
 # delete) and checked with integrity_check. A plain cp of a DB the dashboard is
 # writing is not a snapshot.
+# Read-only first. A WAL-mode database that nobody holds open has no -shm, and
+# a read-only connection cannot create one, so that open fails ("unable to open
+# database file"; 2026-10-23 04:30, the brunella-core checkpoints.db). Then
+# open it read-write: mode=rw never creates a missing database, the backup API
+# only reads, and SQLite's own locking keeps the copy consistent against a
+# writer that opens it meanwhile. The one side effect is the -wal/-shm pair
+# SQLite creates next to the source, the same files its owner creates.
 snapshot_db() {
   local src="$1" dest="$2"
   rm -f "${dest}" "${dest}-wal" "${dest}-shm"
-  sqlite3 "file:${src}?mode=ro" ".backup \"${dest}\"" >/dev/null 2>&1 \
+  { sqlite3 "file:${src}?mode=ro" ".backup \"${dest}\"" >/dev/null 2>&1 \
+      || { rm -f "${dest}" && sqlite3 "file:${src}?mode=rw" ".backup \"${dest}\"" >/dev/null 2>&1; }; } \
     && sqlite3 "${dest}" 'PRAGMA journal_mode=DELETE;' >/dev/null 2>&1 \
     && rm -f "${dest}-wal" "${dest}-shm" \
     && [[ "$(sqlite3 "file:${dest}?mode=ro" 'PRAGMA integrity_check;' 2>/dev/null)" = ok ]]
@@ -307,7 +321,7 @@ if [[ "${HAVE_SQLITE}" = 1 ]]; then
     [[ "${rel}" = */*/* ]] && continue
     if ! snapshot_db "${REPO_ROOT}/${rel}" "${STAGE}/repo/${rel}"; then
       STAGE_FAILS=$((STAGE_FAILS + 1))
-      echo "backup: WARN could not snapshot repo/${rel} (sqlite .backup or integrity_check failed) -- the run will fail (exit 6)" >&2
+      fail_note "WARN could not snapshot repo/${rel} (sqlite .backup or integrity_check failed) -- the run will fail (exit 6)"
     fi
   done < "${REPOLIST}"
 fi
@@ -316,10 +330,10 @@ if [[ -s "${EXTRALIST}" ]]; then
     _rel="${line%%  (from *}"; _src="${line#*  (from }"; _src="${_src%)}"
     mkdir -p "${STAGE}/$(dirname "${_rel}")"
     if [[ "${HAVE_SQLITE}" != 1 ]]; then
-      STAGE_FAILS=$((STAGE_FAILS + 1)); echo "backup: WARN no sqlite3 CLI, cannot snapshot ${_src} -- the run will fail (exit 6)" >&2
+      STAGE_FAILS=$((STAGE_FAILS + 1)); fail_note "WARN no sqlite3 CLI, cannot snapshot ${_src} -- the run will fail (exit 6)"
     elif ! snapshot_db "${_src}" "${STAGE}/${_rel}"; then
       STAGE_FAILS=$((STAGE_FAILS + 1)); rm -f "${STAGE}/${_rel}"
-      echo "backup: WARN could not snapshot ${_src} (not a readable SQLite database?) -- the run will fail (exit 6)" >&2
+      fail_note "WARN could not snapshot ${_src} (not a readable SQLite database?) -- the run will fail (exit 6)"
     else
       chmod 600 "${STAGE}/${_rel}"
     fi
@@ -366,7 +380,7 @@ while IFS= read -r want; do
   # be satisfied by "store/xyz". LITERALLY (card a8a92d55): as a regex, a route
   # dir like `[id]` never matched itself and failed a complete backup.
   if ! archive_list_has "${ARCHIVE_LIST}" "${want}"; then
-    echo "backup: MISSING from the archive: ${want}" >&2
+    fail_note "MISSING from the archive: ${want}"
     missing=$((missing + 1))
   fi
 done < <(sed -e 's/  *(.*)$//' "${MANIFEST}")
@@ -376,7 +390,7 @@ done < <(sed -e 's/  *(.*)$//' "${MANIFEST}")
 # credential-carrying store/ files by the whitelist that preceded it.
 for marker in "repo/store/claudeclaw.db" "home/.claude/skills" "home/.claude/scheduled-tasks"; do
   archive_list_has "${ARCHIVE_LIST}" "${marker}" || {
-    echo "backup: MISSING load-bearing item: ${marker}" >&2
+    fail_note "MISSING load-bearing item: ${marker}"
     missing=$((missing + 1))
   }
 done
@@ -384,25 +398,25 @@ done
 # a fresh install does not fail its first backup.
 if ( cd "${HOME}" && find .claude/projects -maxdepth 2 -type d -name memory -print -quit 2>/dev/null | grep -q . ); then
   grep -qE "^home/\.claude/projects/.*/memory(/|$)" "${ARCHIVE_LIST}" || {
-    echo "backup: MISSING load-bearing item: the file-based memory directories" >&2
+    fail_note "MISSING load-bearing item: the file-based memory directories"
     missing=$((missing + 1))
   }
 fi
 
 if [[ "${EXTRA_FAILS}" -gt 0 ]]; then
-  echo "backup: FAILED config -- ${EXTRA_FAILS} line(s) of store/backup-extra-db-dirs name no existing directory." >&2
+  fail_note "FAILED config -- ${EXTRA_FAILS} line(s) of store/backup-extra-db-dirs name no existing directory."
   missing=$((missing + EXTRA_FAILS))
 fi
 if [[ "${STAGE_FAILS}" -gt 0 ]]; then
-  echo "backup: FAILED staging -- ${STAGE_FAILS} entr(y/ies) could not be copied completely (see WARN lines above)." >&2
+  fail_note "FAILED staging -- ${STAGE_FAILS} entr(y/ies) could not be copied completely (see WARN lines above)."
   missing=$((missing + STAGE_FAILS))
 fi
 
 if [[ "${missing}" -gt 0 ]]; then
-  echo "backup: FAILED verification -- ${missing} item(s) named in the manifest are not in ${ARCHIVE}." >&2
+  fail_note "FAILED verification -- ${missing} item(s) named in the manifest are not in ${ARCHIVE}."
   echo "backup: the archive is kept for inspection, but do NOT treat it as a good copy." >&2
-  # launchd sends this script's output to logs/backup.log, which nobody opens.
-  # A loud failure into an unread file is the same silence the verification
+  # The run's output reaches no file anyone opens (see FAIL_LOG above), and
+  # a loud failure into an unread place is the same silence the verification
   # above exists to break, so the failure also goes onto the agent message
   # queue, where it survives the agent being asleep at 04:30 and gets read on
   # the next turn. Best-effort: a messaging problem must not change the exit
@@ -414,12 +428,13 @@ if [[ "${missing}" -gt 0 ]]; then
   # re-read .env here: a second, simpler parse took the FIRST definition, kept
   # the quotes, and without `|| true` aborted the script under pipefail on an
   # install with no MAIN_AGENT_ID line (card a95cada0).
+  echo "backup: details: ${FAIL_LOG}" >&2
   if [[ -x "${REPO_ROOT}/scripts/agent-msg.sh" ]]; then
     # BACKUPALERT925: the recipient used to be a literal agent name from the
     # author's machine, so on any other fleet the alert went nowhere and the
     # swallowed error hid that too. Address this install's main agent.
     bash "${REPO_ROOT}/scripts/agent-msg.sh" "${MAIN_AGENT_ID}" "${MAIN_AGENT_ID}" \
-      "[MENTES] A napi mentes ellenorzese ELBUKOTT ${STAMP}-kor: ${missing} tetel hianyzik az archivumbol (reszletek: logs/backup.log). Az archivum NEM tekintheto jo masolatnak." \
+      "[MENTES] A napi mentes ellenorzese ELBUKOTT ${STAMP}-kor: ${missing} tetel hianyzik az archivumbol. Elso: $(head -n 1 "${FAIL_LOG}" 2>/dev/null | cut -c1-300). Reszletek: ${FAIL_LOG}. Az archivum NEM tekintheto jo masolatnak." \
       >/dev/null 2>&1 || echo "backup: WARN could not queue the failure alert for ${MAIN_AGENT_ID}" >&2
   fi
   exit 6
@@ -435,6 +450,6 @@ echo "backup: WARNING -- archive contains sensitive tokens; keep ${BACKUP_DIR} o
 # for macOS bash 3.2 compatibility.
 ls -1t "${BACKUP_DIR}"/claudeclaw-*.tar.gz 2>/dev/null | tail -n +$((KEEP + 1)) | while IFS= read -r f; do
   [[ -z "${f}" ]] && continue
-  rm -f "${f}"
+  rm -f "${f}" "${f%.tar.gz}.failures.txt"
   echo "backup: pruned $(basename "${f}")"
 done
