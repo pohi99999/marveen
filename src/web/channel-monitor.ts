@@ -59,6 +59,7 @@ import {
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { recordChannelEvent } from './channel-event-log.js'
 import { notifyChannel, type AlertMeta } from '../notify.js'
+import { ComputerUseAccessGuard, liveComputerUseAccessDeps } from './computer-use-access.js'
 import { escalatePermissionPrompt, type PermPromptEscalationState } from './permission-prompt-escalation.js'
 import { sendRoutineAlert } from './routine-alert.js'
 import { getProvider, channelStateDir, channelStateDirEnvVar, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
@@ -2352,6 +2353,33 @@ function checkMainKeepaliveStaleness(): void {
   }
 }
 
+let cuAccessGuard: ComputerUseAccessGuard | null = null
+function computerUseAccess(): ComputerUseAccessGuard {
+  cuAccessGuard ??= new ComputerUseAccessGuard(liveComputerUseAccessDeps((s) => capturePane(s), tmuxBin, (text) => sendAlert(text)))
+  return cuAccessGuard
+}
+
+/**
+ * The fast path for the computer-use dialog: the main session every 5 s (so the owner is asked
+ * without waiting for the minute pass), plus any session with an open request (so the keystroke
+ * follows the owner's button within seconds).
+ */
+export function startComputerUseAccessWatcher(intervalMs = 5000): NodeJS.Timeout {
+  let running = false
+  const t = setInterval(() => {
+    if (running) return
+    running = true
+    void (async () => {
+      const g = computerUseAccess()
+      const seen = new Set<string>()
+      for (const [session, label] of g.pendingSessions()) { seen.add(session); await g.tick(session, label) }
+      if (!seen.has(MAIN_CHANNELS_SESSION)) await g.tick(MAIN_CHANNELS_SESSION, BOT_NAME)
+    })().catch((err) => logger.warn({ err }, 'computer-use access watcher tick failed')).finally(() => { running = false })
+  }, intervalMs)
+  t.unref?.()
+  return t
+}
+
 export function sendAlert(text: string, meta?: AlertMeta): void {
   notifyChannel(text, meta).catch(() => {})
 }
@@ -2686,6 +2714,14 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     for (const t of menuTargets) {
       const pane = capturePane(t.session)
       menuTargetsWalked++
+      // The computer-use request_access dialog is the OWNER's to answer, from Telegram
+      // (computer-use-access.ts): while it stands, the generic recovery below must not touch it --
+      // its Escape is a deny the owner never gave (2026-10-22 22:02:58).
+      if (!t.gateOnly && await computerUseAccess().tick(t.session, t.isMarveen ? BOT_NAME : (t.agentName ?? t.session), pane)) {
+        paneMenuState.delete(t.session)
+        permPromptState.delete(t.session)
+        continue
+      }
       // First-run gates (fresh-install folder-trust / bypass acceptance /
       // login picker) are detected SEPARATELY from generic blocking menus,
       // because the recovery differs: Escape on the trust/bypass dialogs

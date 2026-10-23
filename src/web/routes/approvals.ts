@@ -13,7 +13,7 @@ import { readBody, json } from '../http-helpers.js'
 import { resolveOwnerChatId } from '../../owner-chat.js'
 import { sendOwnerMessage } from '../../notify.js'
 import { sendTelegramMessage, editTelegramMessageText, answerTelegramCallbackQuery } from '../telegram.js'
-import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, checkOwnerCallback, OWNER_RESOLVER, type OwnerDecision } from '../telegram-approval.js'
+import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, checkOwnerCallback, OWNER_RESOLVER, isButtonOnlyCategory, type OwnerDecision, type OwnerDecisionVia } from '../telegram-approval.js'
 import type { RouteContext } from './types.js'
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -113,8 +113,15 @@ export function buildOwnerApprovalText(approval: Approval): string {
 // conditional UPDATE in the DB. The notification is rewritten with the outcome, best effort.
 export type OwnerDecisionResult =
   | { ok: true; approval: Approval }
-  | { ok: false; reason: 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired'; approval?: Approval }
-export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDecision, nowS = Math.floor(Date.now() / 1000)): OwnerDecisionResult {
+  | { ok: false; reason: 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired' | 'button_only'; approval?: Approval }
+export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDecision, nowS = Math.floor(Date.now() / 1000), via: OwnerDecisionVia = 'http'): OwnerDecisionResult {
+  if (via !== 'button') {
+    const target = getApproval(id)
+    if (target && isButtonOnlyCategory(target.category)) {
+      logger.warn({ id, category: target.category, via }, 'owner decision refused: this category is decided by the Telegram button only')
+      return { ok: false, reason: 'button_only', approval: target }
+    }
+  }
   const r = resolveApprovalByOwner({ id, nonce, decision, resolvedBy: OWNER_RESOLVER, nowS })
   if (r.ok) {
     logger.info({ id, decision, resolved_by: OWNER_RESOLVER }, 'Approval resolved by the owner on Telegram')
@@ -130,6 +137,11 @@ export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDec
   return r
 }
 
+// The nonce of a button-only approval is what a forged decision would need, so no GET serves it.
+export function redactButtonOnlyNonce(a: Approval): Approval {
+  return isButtonOnlyCategory(a.category) && a.owner_nonce ? { ...a, owner_nonce: null } : a
+}
+
 export function ownerDecisionRefusalText(reason: string): string {
   switch (reason) {
     case 'not_found': return 'Nincs ilyen jóváhagyás.'
@@ -137,6 +149,7 @@ export function ownerDecisionRefusalText(reason: string): string {
     case 'wrong_nonce': return 'A kód nem ehhez a jóváhagyáshoz tartozik; nem változtattam semmit.'
     case 'already_resolved': return 'Ez a jóváhagyás már eldőlt; nem változtattam semmit.'
     case 'expired': return 'Ez a jóváhagyás lejárt; nem változtattam semmit.'
+    case 'button_only': return 'Ezt csak a Telegram-üzenet gombjával lehet eldönteni; nem változtattam semmit.'
     default: return 'Nem sikerült feloldani; nem változtattam semmit.'
   }
 }
@@ -296,6 +309,10 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'category is required' }, 400)
       return true
     }
+    if (isButtonOnlyCategory(category.trim())) {
+      json(res, { error: 'this category is raised by the dashboard itself, not over the API' }, 403)
+      return true
+    }
     if (typeof action_description !== 'string' || !action_description.trim()) {
       json(res, { error: 'action_description is required' }, 400)
       return true
@@ -342,7 +359,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     const limit = limitRaw ? Math.min(parseInt(limitRaw, 10) || 100, 500) : 100
 
     const items = listApprovals({ agent_id, category, status, limit })
-    json(res, items)
+    json(res, items.map(redactButtonOnlyNonce))
     return true
   }
 
@@ -408,7 +425,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'Not found' }, 404)
       return true
     }
-    json(res, approval)
+    json(res, redactButtonOnlyNonce(approval))
     return true
   }
 
@@ -446,7 +463,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
         .catch((err) => logger.warn({ err }, 'answerCallbackQuery failed'))
     }
     if (!r.ok) {
-      const status = r.reason === 'not_found' ? 404 : r.reason === 'wrong_nonce' ? 403 : r.reason === 'expired' ? 410 : 409
+      const status = r.reason === 'not_found' ? 404 : r.reason === 'wrong_nonce' || r.reason === 'button_only' ? 403 : r.reason === 'expired' ? 410 : 409
       json(res, { error: r.reason, text: ownerDecisionRefusalText(r.reason) }, status)
       return true
     }
@@ -481,6 +498,10 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     // It catches naive/accidental self-approvals; the real control lives on the
     // main-agent side (approval-request-handling skill).
     const target = getApproval(idMatch[1])
+    if (target && isButtonOnlyCategory(target.category)) {
+      json(res, { error: 'this approval is decided by the owner\'s Telegram button only' }, 403)
+      return true
+    }
     if (target && resolved_by.trim() === target.agent_id) {
       json(res, { error: 'The requesting agent cannot approve its own request' }, 403)
       return true

@@ -38,7 +38,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - Claude Code hookok (`.claude/settings.json`): **8** esemény, **47** bejegyzés, **31** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **9** -- channel-image, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **51**, ebből a fenti táblázat linkel **16**
+- Dokumentációs lapok a `docs/` alatt: **52**, ebből a fenti táblázat linkel **16**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
@@ -47,6 +47,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [agent-state-observer](agent-state-observer.md)
 - [archivalt-kartyak](archivalt-kartyak.md)
 - [channel-reply-guard](channel-reply-guard.md)
+- [computer-use-access](computer-use-access.md)
 - [config-reference](config-reference.md)
 - [conversation-continuity](conversation-continuity.md)
 - [credential-gate](credential-gate.md)
