@@ -49,6 +49,7 @@ import { logger } from './logger.js'
 import { tryHandleAuth } from './web/routes/auth.js'
 import { tryHandleSecurity } from './web/routes/security.js'
 import { tryHandleBridgeServicePorts } from './web/routes/bridge-service-ports.js'
+import { tryHandleHttpProbe } from './web/routes/http-probe.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
 import { tryHandleFederation } from './web/routes/federation.js'
@@ -220,6 +221,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleOperator(routeCtx, WEB_DIR)) return
       if (await tryHandleSecurity(routeCtx)) return
       if (await tryHandleBridgeServicePorts(routeCtx)) return
+      if (await tryHandleHttpProbe(routeCtx)) return
       if (await tryHandleProfiles(routeCtx)) return
       if (await tryHandleMessages(routeCtx)) return
       if (await tryHandleFederation(routeCtx)) return
