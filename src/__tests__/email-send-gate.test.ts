@@ -112,6 +112,64 @@ describe('gateDecision', () => {
   })
 })
 
+// GWSAPISEND1025: the gws raw API methods `users messages send` and `users drafts send` have no
+// --to flag (gws --help, 2026-10-25), so the old "--to required" rule let every real call through:
+// a sub-agent could send a raw MIME, an --upload .eml or an existing draft. Measured both ways, and
+// the main agent's approved route (the same commands, through ITS gates) must stay exactly as it was.
+describe('gws API sends (GWSAPISEND1025)', () => {
+  const RAW = "gws gmail users messages send --params '{\"userId\":\"me\"}' --json '{\"raw\":\"VG86IGFAZXhhbXBsZS5jb20\",\"threadId\":\"18f\"}'"
+  const RAW_FILE = "gws gmail users messages send --params '{\"userId\":\"me\"}' --json \"$(cat /tmp/raw.json)\""
+  const UPLOAD = "gws gmail users messages send --params '{\"userId\":\"me\"}' --json '{\"threadId\":\"18f\"}' --upload msg.eml --upload-content-type message/rfc822"
+  const DRAFT_SEND = "gws gmail users drafts send --params '{\"userId\":\"me\"}' --json '{\"id\":\"r123\"}'"
+  const SENDS = { RAW, RAW_FILE, UPLOAD, DRAFT_SEND }
+  const bash = (command: string) => gateDecision('Bash', { command })
+
+  it('a sub-agent cannot send through the raw API methods', () => {
+    for (const [name, cmd] of Object.entries(SENDS)) expect(bash(cmd).deny, name).toBe(true)
+  })
+
+  it('a sub-agent keeps the reads, the drafts and the dry run', () => {
+    for (const cmd of [
+      "gws gmail users messages list --params '{\"userId\":\"me\"}'",
+      'gws gmail users messages get --id 18f --format full',
+      "gws gmail users drafts create --params '{\"userId\":\"me\"}' --json '{\"message\":{\"raw\":\"x\"}}'",
+      "gws gmail users drafts list --params '{\"userId\":\"me\"}'",
+      "gws gmail +send --to a@example.com --subject s --body b --draft",
+      "gws gmail users messages send --json '{\"raw\":\"x\"}' --dry-run",
+      'gws gmail users messages send --help',
+    ]) expect(bash(cmd).deny, cmd).toBe(false)
+  })
+
+  it('the hook entrypoint emits the deny for a raw send and stays silent on a read', () => {
+    const run = (command: string) => spawnSync(process.execPath, [join(__dirname, '..', '..', 'scripts', 'email-send-gate.mjs')], {
+      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }), encoding: 'utf-8', timeout: 15_000,
+    })
+    const sent = run(UPLOAD)
+    expect(sent.status).toBe(0)
+    expect(JSON.parse(sent.stdout).hookSpecificOutput.permissionDecision).toBe('deny')
+    const read = run("gws gmail users messages list --params '{\"userId\":\"me\"}'")
+    expect(read.status).toBe(0)
+    expect(read.stdout).toBe('')
+  })
+
+  it("the main agent's gates let its approved raw/upload/drafts sends through as before", () => {
+    const state = mkdtempSync(join(tmpdir(), 'gws-api-send-main-'))
+    const hook = (file: string, command: string) => spawnSync('python3', [join(__dirname, '..', '..', 'scripts', 'hooks', file)], {
+      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }), encoding: 'utf-8', timeout: 15_000,
+      env: { ...process.env, OUTGOING_COPY_GATE_RULES: join(state, 'rules.json'), EMAIL_APPROVAL_GATE_STORE: state },
+    })
+    for (const file of ['outgoing-copy-gate.py', 'email-approval-gate.py']) {
+      for (const [name, cmd] of Object.entries(SENDS)) {
+        const r = hook(file, cmd)
+        expect([r.status, r.stdout, r.stderr], `${file} ${name}`).toEqual([0, '', ''])
+      }
+      // control: the same gate is live, a helper send it CAN read still stops on its own rule
+      const ctl = hook(file, "gws gmail +send --to a@example.com --subject 'Szia' --body 'Szia — itt'")
+      expect(ctl.status, `${file} control`).toBe(2)
+    }
+  })
+})
+
 // The verified-recipient gate (2026-08-14, support@connectors.hu bounce): an
 // address that no source ever produced must not reach a To/Cc/Bcc field, not
 // even in a draft -- the owner presses send on what we typed.

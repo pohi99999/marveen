@@ -111,18 +111,27 @@ const ENV_ASSIGN = /^[A-Za-z_][A-Za-z_0-9]*=/
 const CMD_POSITION_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '{', '!'])
 const SENDER_PROG = /^(sendmail|msmtp|swaks)$/i
 const SENDPY = /^send\.py$/i
-// Card e6287e47: the gws CLI's Gmail send (`gws gmail +send`, `gws gmail users messages send`, with
-// --to). A `--draft` only creates a draft and is not a send. Same rule as the python twin.
+// Card e6287e47: the gws CLI's Gmail send. `gws gmail +send` is the helper: it sends with --to, and
+// a `--draft` only creates a draft. Same rule as the python twin.
+// GWSAPISEND1025: the raw API methods `users messages send` and `users drafts send` have NO --to
+// flag at all (gws --help, 2026-10-25): the recipient travels inside the --json raw body or the
+// --upload .eml, or is already in the draft. They send on every call, so they are a send without
+// --to too; only `--dry-run` (validates locally) and `--help`/`-h` do not reach the API.
 const GWS = /^gws$/i
 function gwsGmailSend(rest) {
   if (rest.length < 2 || rest[0] !== 'gmail') return false
   const sub = rest.slice(1)
-  let args
-  if (sub[0] === '+send') args = sub.slice(1)
-  else if (sub[0] === 'users' && sub[1] === 'messages' && sub[2] === 'send') args = sub.slice(3)
-  else return false
-  if (args.includes('--draft')) return false
-  return args.some((t) => t === '--to' || t.startsWith('--to='))
+  if (sub[0] === '+send') {
+    const args = sub.slice(1)
+    if (args.includes('--draft')) return false
+    return args.some((t) => t === '--to' || t.startsWith('--to='))
+  }
+  return gwsGmailApiSend(rest)
+}
+function gwsGmailApiSend(rest) {
+  if (rest.length < 4 || rest[0] !== 'gmail' || rest[1] !== 'users') return false
+  if (!(rest[2] === 'messages' || rest[2] === 'drafts') || rest[3] !== 'send') return false
+  return !rest.slice(4).some((t) => t === '--dry-run' || t === '--help' || t === '-h')
 }
 // SUBAGENTMAILGATE1016: a version-suffixed interpreter (python3.12, python3.13, and
 // the free-threaded python3.13t) is the same python; the old /^python3?$/ let it

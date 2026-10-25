@@ -95,9 +95,17 @@ _PYTHON = re.compile(r"^python(3(\.\d+t?)?)?$", re.I)
 # teszt-hibakent jelenjen meg, ne incidenskent (Marveen, msg 14289).
 _NODEISH = re.compile(r"^(node|tsx|ts-node|deno|bun|npx)$", re.I)
 _GRAPHMAIL = re.compile(r"^graph-mail(\.ts|\.js)?$", re.I)
-# Card e6287e47 (marveen 2070, 2026-09-27): the gws CLI's Gmail send ran past both gates. The CLI's
-# send forms are `gws gmail +send` and `gws gmail users messages send`, always with --to. A `--draft`
-# only creates a draft (the owner presses send), so it is not a send invocation.
+# Card e6287e47 (marveen 2070, 2026-09-27): the gws CLI's Gmail send ran past both gates. The helper
+# `gws gmail +send` sends with --to; a `--draft` only creates a draft (the owner presses send), so it
+# is not a send invocation.
+# GWSAPISEND1025: the raw API methods `users messages send` / `users drafts send` have NO --to flag
+# (gws --help, 2026-10-25), so the `users messages send --to` branch below never fires on a real
+# call. The sub-agent hard gate (email-send-gate.mjs) counts them as sends; THIS copy deliberately
+# does not. It is loaded only by the MAIN agent's gates (this one, email-approval-gate,
+# credential-gate), and the main agent sends its owner-approved letters exactly this way (a raw MIME
+# or an --upload .eml keeps links intact). None of those gates can read a base64 raw or an .eml, so
+# counting them here would fail-closed block every such letter. The divergence is pinned per case
+# ("python": false) in send-invocation-cases.json.
 _GWS = re.compile(r"^gws$", re.I)
 
 

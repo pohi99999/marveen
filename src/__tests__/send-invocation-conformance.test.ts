@@ -23,7 +23,12 @@ const ROOT = join(__dirname, '..', '..')
 const GATE_PY = join(ROOT, 'scripts', 'hooks', 'outgoing-copy-gate.py')
 const CASES = JSON.parse(
   readFileSync(join(ROOT, 'scripts', 'hooks', 'send-invocation-cases.json'), 'utf-8'),
-) as { cases: Array<{ name: string; cmd: string; expected: boolean }> }
+) as { cases: Array<{ name: string; cmd: string; expected: boolean; python?: boolean; python_reason?: string }> }
+
+// GWSAPISEND1025: a case may pin a DELIBERATE python divergence ("python": <verdict>), and only
+// with its reason written next to it. Today the only ones are the gws API sends: the python copy
+// is loaded solely by the main agent's gates, whose owner-approved letters go out exactly that way.
+const pythonExpected = (c: (typeof CASES.cases)[number]) => c.python ?? c.expected
 
 // One python process for the whole list: stdin carries the JSON cases, stdout
 // returns the per-case verdicts. Spawning per-case would be ~30x slower.
@@ -45,8 +50,14 @@ describe('send-invocation conformance: both gates agree with the shared contract
     it(`${c.name} -> ${c.expected}`, () => {
       const js = isSendInvocation(c.cmd)
       expect(js, `JS verdict for: ${c.cmd}`).toBe(c.expected)
-      expect(py[i], `python verdict for: ${c.cmd}`).toBe(c.expected)
+      expect(py[i], `python verdict for: ${c.cmd}`).toBe(pythonExpected(c))
     })
+  })
+
+  it('every python divergence names its reason', () => {
+    const divergent = CASES.cases.filter((c) => c.python !== undefined && c.python !== c.expected)
+    expect(divergent.length).toBeGreaterThan(0)
+    for (const c of divergent) expect(c.python_reason, c.name).toMatch(/\S/)
   })
 
   it('the shared list is non-trivial in both directions', () => {
