@@ -35,6 +35,7 @@ import { AGENTS_BASE_DIR } from './web/agent-config.js'
 import {
   acquirePortLock,
   acquirePidfileLock,
+  argvBelongsToInstall,
   writeBufferFully,
   DeferToPeerError,
   type ProcessLockContext,
@@ -92,10 +93,9 @@ function processCwd(pid: number): string | null {
 }
 
 function argvBelongsToThisInstall(argv: string, pid: number): boolean {
-  // Boundary-suffixed so /path/marveen never matches /path/marveen2.
-  if (argv.includes(PROJECT_ROOT + '/')) return true
-  const cwd = processCwd(pid)
-  return cwd !== null && (cwd === PROJECT_ROOT || cwd.startsWith(PROJECT_ROOT + '/'))
+  // Boundary-suffixed matching (/path/marveen never matches /path/marveen2) and
+  // the foreign-absolute-entry rule live in the pure, tested argvBelongsToInstall.
+  return argvBelongsToInstall(argv, PROJECT_ROOT, () => processCwd(pid))
 }
 
 // Build the I/O surface used by process-lock.ts. Kept here so the pure

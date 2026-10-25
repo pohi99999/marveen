@@ -441,3 +441,30 @@ export async function acquirePidfileLock(
   }
   throw new Error(`Failed to acquire pidfile lock at ${path} after ${maxAttempts} attempts`)
 }
+
+// The dashboard entry token in an argv: `dist/index.js` or `src/index.ts`,
+// relative or as the tail of an absolute path.
+const DASHBOARD_ENTRY_TOKEN = /(?:^|\/)(?:dist\/index\.js|src\/index\.ts)$/
+
+/**
+ * Whether a process (argv + cwd) belongs to THIS install -- the attribution
+ * behind index.ts's binary-pattern listing and port-holder check.
+ *
+ * An absolute dashboard entry decides on its own: ours only when it sits under
+ * PROJECT_ROOT and not in a dependency (node_modules). The cwd may only decide
+ * for a RELATIVE entry or a non-entry argv. Measured 2026-10-22 on the Mac: a
+ * dashboard restart SIGTERMed five MCP servers of the main session
+ * (`node ~/.local/lib/node_modules/<pkg>/dist/index.js`), because their cwd is
+ * PROJECT_ROOT -- the main session runs from there -- and the cwd alone was
+ * accepted as proof.
+ *
+ * `cwdOf` is lazy: the cwd lookup (lsof on macOS) runs only when it decides.
+ */
+export function argvBelongsToInstall(argv: string, projectRoot: string, cwdOf: () => string | null): boolean {
+  const under = (path: string) => path.startsWith(projectRoot + '/')
+  const absoluteEntries = argv.split(/\s+/).filter((t) => t.startsWith('/') && DASHBOARD_ENTRY_TOKEN.test(t))
+  if (absoluteEntries.length > 0) return absoluteEntries.some((t) => under(t) && !t.includes('/node_modules/'))
+  if (argv.includes(projectRoot + '/')) return true
+  const cwd = cwdOf()
+  return cwd !== null && (cwd === projectRoot || under(cwd))
+}
