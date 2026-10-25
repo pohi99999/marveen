@@ -504,6 +504,9 @@ def _python_head_sends(rest) -> bool:
     if script is not None and _SENDPY.match(_basename(script)):
         return recipient
     if script is not None and _UNDECIDABLE_PATH.search(script):
+        name = _basename(script)
+        if name and not _UNDECIDABLE_PATH.search(name):
+            return recipient
         return recipient or any(t != script and "$" in t for t in rest)
     if stdin or (script is None and stdin_redirect):
         return recipient

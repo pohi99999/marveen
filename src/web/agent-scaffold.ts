@@ -2975,7 +2975,7 @@ const SKILLS_TRAP_BLOCK_RE = new RegExp(
   `${SKILLS_TRAP_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${SKILLS_TRAP_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
 )
 
-function buildSkillsPathTrapBody(): string {
+export function buildSkillsPathTrapBody(): string {
   return [
     '## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)',
     '',
@@ -2986,7 +2986,7 @@ function buildSkillsPathTrapBody(): string {
     'NINCS globális `~/.claude/skills` és NINCS ügynök-szintű `.claude/skills` másolat:',
     'ami oda kerül, az senkihez nem jut el, és a fa mellett dupla listázást okoz.',
     'Új vagy javított skill: a repo-gyökér `.claude/skills/<név>/` alá, majd',
-    '`git -C /home/pohi/marveen/.claude/skills add -A && git commit && git push`',
+    `\`git -C ${PROJECT_ROOT}/.claude/skills add -A && git commit && git push\``,
     '(AGENT.md 2/A: commit után azonnal push; a pre-commit secret-gate fut). Amit a',
     'flotta ne lásson, az nem skill, hanem memória. (SKILLSGIT914, 2026-09-14.)',
     '',
@@ -3755,7 +3755,7 @@ Te egy önfejlesztő ágens vagy. A munkád során tanulsz, és újrafelhasznál
 ### Automatikus skill generálás
 Komplex feladatok után (5+ tool hívás, hiba utáni recovery, user korrekció, többlépéses workflow) automatikusan hozz létre SKILL.md fájlt:
 
-mkdir -p /home/pohi/marveen/.claude/skills/SKILL-NEV   # majd: git -C /home/pohi/marveen/.claude/skills add -A && git commit && git push
+mkdir -p ${PROJECT_ROOT}/.claude/skills/SKILL-NEV   # majd: git -C ${PROJECT_ROOT}/.claude/skills add -A && git commit && git push
 A SKILL.md tartalmazzon YAML frontmatter-t (name, description), majd szekciókat: Mikor használd, Eljárás, Buktatók, Ellenőrzés.
 
 ### Skill patch (runtime javítás)
