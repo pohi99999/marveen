@@ -95,7 +95,7 @@ describe('applyWorkerCredentials (both directions)', () => {
       deps: {
         platform,
         clearKeychain: () => { calls.clear++ },
-        readHostLogin: () => { calls.read++; return HOST_LOGIN },
+        readHostLogin: (): string | null => { calls.read++; return HOST_LOGIN },
       },
     }
   }
