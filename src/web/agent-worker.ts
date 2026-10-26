@@ -9,7 +9,7 @@ import { logger } from '../logger.js'
 import { launchableInstallDefaultSync, launchableDistributionDefaultSync } from './default-model-guard.js'
 import { measureClaudeCliVersionSync } from './claude-cli-version.js'
 import { CLAUDE_MODEL_MIN_CLI, baseModelId, isModelUnsupportedByCli } from '../claude-cli-support.js'
-import { MAIN_AGENT_ID, PROJECT_ROOT, DEFAULT_AGENT_MODEL, DEFAULT_AGENT_MODEL_IS_DISTRIBUTION, WORKER_AUTOUPDATE } from '../config.js'
+import { MAIN_AGENT_ID, PROJECT_ROOT, STORE_DIR, DEFAULT_AGENT_MODEL, DEFAULT_AGENT_MODEL_IS_DISTRIBUTION, WORKER_AUTOUPDATE } from '../config.js'
 import {
   capturePane,
   isSessionReadyForPrompt,
@@ -22,6 +22,7 @@ import {
 } from './agent-process.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
+import { checkOauthTokenFile } from './agent-oauth-token-file.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
 import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
@@ -321,22 +322,113 @@ function clearWorkerKeychainEntry(ctx: WorkerCtx): void {
   } catch { /* absent -> nothing to clear */ }
 }
 
+// =============================================================================
+// WORKERTOKEN1026: the worker's own setup-token.
+//
+// Seeding copies the host login JSON -- access AND refresh token -- into the
+// worker's config dir. From then on two processes hold the SAME rotating
+// refresh token in two different stores (the host's default Keychain entry and
+// the worker's path-hashed one). Whichever refreshes first leaves the other
+// with a dead refresh token. The worker heals itself (auth failure -> reseed);
+// the main channels session does not, it waits for the owner's /login.
+// Measured 2026-10-25: worker reseed 18:32, worker Keychain entry written
+// 23:00:00, main session's first request after that 23:13 -> "Login expired"
+// (and 10-24 23:00 reseed -> main dead 10-25 06:40).
+//
+// With store/agent-tokens/worker.oauth-token present (a `claude setup-token`
+// token, shared by the slow and the fast worker) both workers authenticate
+// from it via CLAUDE_CODE_OAUTH_TOKEN, and the host login is never copied.
+// The file is validated like a per-agent oauthTokenFile (owner, 0600,
+// sk-ant-oat prefix, not the fleet file). Absent -> the previous behaviour,
+// byte for byte. Present but unusable -> ERROR log and the previous behaviour:
+// the alternative, a logged-out worker, falls back to the SDK backend on API
+// billing (runAgent authFailed), which is the costlier silent failure.
+// =============================================================================
+
+export const WORKER_OAUTH_TOKEN_PATH = join(STORE_DIR, 'agent-tokens', 'worker.oauth-token')
+
+export type WorkerAuthDecision =
+  | { kind: 'worker-token'; path: string; fingerprint: string }
+  | { kind: 'host-login'; refused?: { path: string; reason: string; detail: string } }
+
+/** Pure apart from reading the token file; never returns the token value. */
+export function decideWorkerAuth(opts: {
+  tokenPath?: string
+  fleetTokenPath?: string
+  uid?: number | null
+} = {}): WorkerAuthDecision {
+  const path = opts.tokenPath ?? WORKER_OAUTH_TOKEN_PATH
+  const check = checkOauthTokenFile(path, {
+    uid: opts.uid !== undefined ? opts.uid : (typeof process.getuid === 'function' ? process.getuid() : null),
+    fleetTokenPath: opts.fleetTokenPath ?? FLEET_OAUTH_TOKEN_PATH,
+  })
+  if (check.ok) return { kind: 'worker-token', path: check.path, fingerprint: check.fingerprint }
+  if (check.reason === 'missing') return { kind: 'host-login' }
+  return { kind: 'host-login', refused: { path: check.path, reason: check.reason, detail: check.detail } }
+}
+
+/** decideWorkerAuth + the log line a launch needs (path and fingerprint only). */
+function resolveWorkerAuth(ctx: WorkerCtx): WorkerAuthDecision {
+  const auth = decideWorkerAuth()
+  if (auth.kind === 'worker-token') {
+    logger.info({ session: ctx.session, path: auth.path, fingerprint: auth.fingerprint }, 'WORKERTOKEN1026: worker authenticates from its own setup-token; the host login is not copied')
+  } else if (auth.refused) {
+    logger.error({ session: ctx.session, ...auth.refused }, 'WORKERTOKEN1026: worker token file present but unusable -- falling back to copying the host login (the refresh-token race with the main session stays open)')
+  }
+  return auth
+}
+
 /**
- * Make the worker's file-based credentials authoritative + fresh:
- *  1. materialise the host's current login JSON as <CONFIG_DIR>/.credentials.json
- *     (the host keeps its `Claude Code-credentials` token fresh);
- *  2. delete the stale path-hashed Keychain entry that would otherwise shadow it.
+ * The launch-line auth clause. The worker token wins over the fleet token: it
+ * exists precisely so the worker does not share a credential with anyone.
+ * The secret is read by the shell at launch, never in argv/`ps`.
+ */
+export function workerOauthTokenEnv(auth: WorkerAuthDecision, fleetTokenPresent: boolean, fleetTokenPath: string = FLEET_OAUTH_TOKEN_PATH): string {
+  if (auth.kind === 'worker-token') return `export CLAUDE_CODE_OAUTH_TOKEN="$(cat ${shArg(auth.path)})"; `
+  return fleetTokenPresent ? `export CLAUDE_CODE_OAUTH_TOKEN="$(cat ${shArg(fleetTokenPath)})"; ` : ''
+}
+
+/**
+ * The worker's credential files for an auth decision. Exported with injectable
+ * deps so both directions are testable without the Keychain.
+ *  - host-login: the previous behaviour -- clear the path-hashed Keychain entry
+ *    (darwin) and materialise the host login JSON as .credentials.json.
+ *  - worker-token: clear the path-hashed entry (darwin) and REMOVE any earlier
+ *    seeded .credentials.json -- it still carries a copy of the host's refresh
+ *    token, and an on-disk credential can win over the env token. The host
+ *    login is not read at all.
+ * Returns what was done.
+ */
+export function applyWorkerCredentials(
+  configDir: string,
+  auth: WorkerAuthDecision,
+  deps: { platform: NodeJS.Platform; clearKeychain: () => void; readHostLogin: () => string | null },
+): 'token' | 'seeded' | 'none' {
+  if (deps.platform === 'darwin') deps.clearKeychain()
+  const credPath = join(configDir, '.credentials.json')
+  if (auth.kind === 'worker-token') {
+    if (lstatSyncSafe(credPath)) rmSync(credPath, { force: true })
+    return 'token'
+  }
+  const credentialsJson = deps.readHostLogin()
+  if (!credentialsJson) return 'none'
+  if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
+  writeFileSync(credPath, credentialsJson, { mode: 0o600 })
+  return 'seeded'
+}
+
+/**
+ * Make the worker's credentials authoritative + fresh (see applyWorkerCredentials).
  * Cheap (two `security` calls) so it is safe to run before every (re)boot. Off
  * macOS readClaudeCodeOauthJson returns null and the worker runs logged-out.
  * Returns true if a credential file was written.
  */
-function seedWorkerCredentials(ctx: WorkerCtx): boolean {
-  if (process.platform === 'darwin') clearWorkerKeychainEntry(ctx)
-  const credentialsJson = readClaudeCodeOauthJson()
-  if (!credentialsJson) return false
-  if (!existsSync(ctx.configDir)) mkdirSync(ctx.configDir, { recursive: true })
-  writeFileSync(join(ctx.configDir, '.credentials.json'), credentialsJson, { mode: 0o600 })
-  return true
+function seedWorkerCredentials(ctx: WorkerCtx, auth: WorkerAuthDecision = decideWorkerAuth()): boolean {
+  return applyWorkerCredentials(ctx.configDir, auth, {
+    platform: process.platform,
+    clearKeychain: () => clearWorkerKeychainEntry(ctx),
+    readHostLogin: readClaudeCodeOauthJson,
+  }) === 'seeded'
 }
 
 /** Scan the worker pane tail for Claude Code's auth-failure chrome. */
@@ -457,7 +549,7 @@ interface WorkerSettings { enabledPlugins?: Record<string, boolean>; [k: string]
  * No CLAUDE.md is written here: the cwd is outside PROJECT_ROOT, so the worker
  * boots with a neutral context.
  */
-export function ensureWorkerCwd(ctx: WorkerCtx = ctxSlow): void {
+export function ensureWorkerCwd(ctx: WorkerCtx = ctxSlow, auth: WorkerAuthDecision = decideWorkerAuth()): void {
   if (!existsSync(ctx.home)) mkdirSync(ctx.home, { recursive: true })
   if (!existsSync(ctx.scratchDir)) mkdirSync(ctx.scratchDir, { recursive: true })
 
@@ -475,7 +567,8 @@ export function ensureWorkerCwd(ctx: WorkerCtx = ctxSlow): void {
     // cross-process refresh race the fleet token exists to avoid (the Linux
     // #537 failure family; 2026-07-15 bootcamp). Without a fleet token the
     // symlink stays -- it is then the worker's only auth source.
-    const skipSharedCreds = hasFleetOauthToken()
+    // WORKERTOKEN1026: the worker's own token is the same kind of env auth.
+    const skipSharedCreds = hasFleetOauthToken() || auth.kind === 'worker-token'
     if (skipSharedCreds) {
       const credsLink = join(ctx.configDir, '.credentials.json')
       if (lstatSyncSafe(credsLink)?.isSymbolicLink()) rmSync(credsLink, { force: true })
@@ -520,8 +613,9 @@ export function ensureWorkerCwd(ctx: WorkerCtx = ctxSlow): void {
 
   // Subscription auth: materialise the host login JSON as .credentials.json AND
   // clear the stale path-hashed Keychain entry that would shadow it (see the
-  // macOS auth-precedence note at the top of this file).
-  seedWorkerCredentials(ctx)
+  // macOS auth-precedence note at the top of this file). With the worker's own
+  // token nothing is copied (WORKERTOKEN1026).
+  seedWorkerCredentials(ctx, auth)
 
   // Inherit project-scoped MCP servers under the worker's own cwd key, AND
   // pre-accept the first-run dialogs so the headless interactive session never
@@ -596,7 +690,8 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     return
   }
   if (workerSessionExists(ctx)) return
-  ensureWorkerCwd(ctx)
+  const auth = resolveWorkerAuth(ctx)
+  ensureWorkerCwd(ctx, auth)
   // Detached session; launch claude via a login shell so PATH + the config-dir
   // env are set. The model suffix ([1m]) is single-quoted so it is not globbed.
   // Fleet setup-token (when present) via $(cat) at launch so the secret never
@@ -669,7 +764,7 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     logger.warn({ session: ctx.session }, 'WORKERAUTOUPDATE1011: WORKER_AUTOUPDATE is on but claude is not a native install; the slow worker stays pinned')
   }
   const launch =
-    (hasFleetOauthToken() ? `export CLAUDE_CODE_OAUTH_TOKEN="$(cat ${shArg(FLEET_OAUTH_TOKEN_PATH)})"; ` : '') +
+    workerOauthTokenEnv(auth, hasFleetOauthToken()) +
     `export CLAUDE_CONFIG_DIR=${shArg(ctx.configDir)}; ` +
     autoUpdaterEnv +
     `export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false; ` +
