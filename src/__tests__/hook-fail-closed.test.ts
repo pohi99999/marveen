@@ -266,8 +266,8 @@ describe('the real security gates on a disposable copy', () => {
     const entries = (settings.hooks.PreToolUse as { matcher: string; hooks: { command: string }[] }[])
       .flatMap((e) => e.hooks.map((h) => ({ matcher: e.matcher, command: h.command })))
     const security = entries.filter((e) => /outgoing-copy-gate\.py|email-approval-gate\.py|egress-gate\.mjs/.test(e.command))
-    // Fork: 14, not 13 -- the marveen-api MCP tools carry the copy gate too (PR #16, kanban 5f3617d9).
-    expect(security.length).toBe(14)
+    // Fork: 16, not upstream's 15 -- the marveen-api MCP tools carry the copy gate too (PR #16, kanban 5f3617d9).
+    expect(security.length).toBe(16)
     for (const e of security) {
       expect(e.command, e.matcher).toContain(GATE_FAIL_CLOSED_TAG)
       const rel = e.command.match(/scripts\/(hooks\/[a-z-]+\.(?:py|mjs))/)![1]

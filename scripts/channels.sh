@@ -726,7 +726,14 @@ unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN
 # scrub the env var before any tmux command runs.
 unset TMUX
 
-export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# NATIVECLAUDEFIRST1011 (#1896): $HOME/.local/bin leads, so `command -v claude`
+# below picks the install user's native launcher (~/.local/bin/claude) over a
+# Homebrew/npm copy in /opt/homebrew/bin -- the order the dashboard's launchd
+# PATH and platform.ts KNOWN_BIN_DIRS already use. With /opt/homebrew/bin first,
+# a Mac that also had an older shared claude there ran the main session on that
+# one while the sub-agents ran the native build, and claude_is_native looked at
+# the wrong binary. Every other directory keeps its relative order.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 # FLEETVENV923: the fleet Python venv's bin/ goes FIRST, when it is set and
 # exists, so the main session's `python3` (and markitdown & co.) come from the
@@ -822,7 +829,9 @@ export CLAUDE_CODE_DISABLE_AGENT_VIEW=1
 #     self-heal for an update a power-off or a race left half-finished.
 #   * claude PRESENT -> at most one update per 24h (stamp file), in the
 #     BACKGROUND. A foreground `npm install -g` would hold the Telegram
-#     channel offline for the 20-40s it takes, on every boot.
+#     channel offline for the 20-40s it takes, on every boot. And only once
+#     the main session is up (claude_daily_check_start, DAILYRACE1024): the
+#     install swaps the very binary the session launches from.
 # Failures are logged, never fatal: a stale claude still works, and a missing
 # one is retried by the next KeepAlive restart 30 seconds later.
 CLAUDE_UPDATE_STAMP="$INSTALL_DIR/store/.claude-update-stamp"
@@ -943,6 +952,64 @@ claude_relink_native() {
   command -v claude >/dev/null 2>&1
 }
 
+# NATIVEBEHIND1011 (#1901 review): a host that once ran the native installer and
+# then went back to npm keeps an intact ~/.local/bin/claude -> versions/<old>.
+# With ~/.local/bin first on the PATH, that older build now wins, and because
+# claude_is_native is true the update path is skipped. The #1613 evidence that
+# npm was the live install -- the update stamp newer than the build -- is
+# named here with both versions, so the owner sees that the CLI went backwards
+# and why. Only a log line: the session still starts. The npm version is read
+# from package.json, never by running a second binary at boot.
+# Once per build (#1901 re-review): the line is written once for a given native
+# build and npm copy, not on every start; a new native build or a new npm copy
+# names it again. Without npm on the PATH the npm half of the advice is moot, so
+# only `claude install stable` is suggested.
+claude_native_behind_npm_note() {
+  local b t ver npm_root npm_ver="" npm_state fix key
+  local seen="$INSTALL_DIR/store/.claude-native-behind-warned"
+  b="$(command -v claude 2>/dev/null)" || return 0
+  t="$(claude_realpath "$b")" || return 0
+  [ -n "$t" ] && [ -e "$CLAUDE_UPDATE_STAMP" ] && [ "$CLAUDE_UPDATE_STAMP" -nt "$t" ] || return 0
+  ver="$(basename "$t")"
+  if command -v npm >/dev/null 2>&1; then
+    npm_root="$(npm root -g 2>/dev/null)"
+    if [ -n "$npm_root" ] && [ -f "$npm_root/@anthropic-ai/claude-code/package.json" ]; then
+      npm_ver="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$npm_root/@anthropic-ai/claude-code/package.json" | head -1)"
+    fi
+    npm_state="${npm_ver:-unknown}"
+    fix="\`claude install stable\` to bring the native build forward, or remove ~/.local/bin/claude to stay on npm"
+  else
+    npm_state="unknown (npm not found)"
+    fix="\`claude install stable\` to bring the native build forward"
+  fi
+  key="$t $npm_state"
+  [ "$(cat "$seen" 2>/dev/null)" = "$key" ] && return 0
+  if { echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh: WARN the native claude launcher wins and runs build ${ver} ($t), but the npm update stamp is newer than that build -- npm was the live install (npm copy: ${npm_state}). The main session now runs the OLDER native build and the update path is skipped. Fix: ${fix}." >> "$INSTALL_DIR/store/channels-failures.log"; } 2>/dev/null; then
+    { printf '%s\n' "$key" > "$seen"; } 2>/dev/null || true
+  fi
+}
+
+# DAILYRACE1024: the daily update is decided here but STARTED only once the
+# main session is up (claude_daily_check_start, after START_TS below). Started
+# here, in the background, it raced the launch a few lines down: `npm install
+# -g` replaces bin/claude.exe in place, and a launch that lands in that window
+# dies at once -- before remain-on-exit is set, so the whole tmux session goes
+# with it. Measured on a live install, three of five daily checks: install OK
+# 3 s after START, then "rapid-exit after 0s reason=session-gone", exit 1, the
+# OnFailure crash alert, and a systemd restart 10 s later (2026-10-14 20:09,
+# 2026-10-16 07:37, 2026-10-21 04:37). The two checks that did not crash took
+# 73-75 s (a new version to download): the swap came after the session was up,
+# and replacing the file under a running claude is harmless. So the update now
+# always runs under a running session, never under a launch; a new version
+# takes effect on the next restart, as before.
+DAILY_CLAUDE_CHECK=0
+claude_daily_check_start() {
+  [ "$DAILY_CLAUDE_CHECK" = "1" ] || return 0
+  DAILY_CLAUDE_CHECK=0
+  claude_install "daily check" &
+}
+
 if ! command -v claude >/dev/null 2>&1; then
   if ! claude_relink_native; then
     claude_install "binary missing -- self-heal"
@@ -968,10 +1035,13 @@ elif claude_is_native; then
   else
     echo "$(date '+%F %T') claude update SKIPPED: native install, checked within 24h" >&2
   fi
+  # upstream: one log line when the native launcher runs an older build than the npm copy (local check, no network)
+  claude_native_behind_npm_note
 elif [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_UPDATE_STAMP" -mtime -1 2>/dev/null)" ]; then
   # AVX-less hosts are excluded on purpose: their claude is pinned, and
   # "keep it current" is exactly what breaks them.
-  claude_install "daily check" &
+  # Due, not started: see DAILYRACE1024 above.
+  DAILY_CLAUDE_CHECK=1
 fi
 
 CLAUDE="$(command -v claude)"
@@ -1442,7 +1512,14 @@ _tmux_set_auth_globals() {
   # on this.
   $TMUX set-environment -g DISABLE_AUTOUPDATER 1 2>/dev/null || true
 }
-$TMUX start-server 2>/dev/null || true
+# start-server, too, runs without the state-dir var exported above (same rule
+# as TMUXSERVERREAP929 for new-session). With exit-empty on (the default) the
+# server it forks exits at once, but under `set -g exit-empty off` (a user
+# tmux.conf) it LIVES, carrying <PROVIDER>_STATE_DIR in its own environ and
+# global env: every session created before the -g -u below inherits the main
+# session's channel dir, and the server process itself matches the reap's env
+# needle for its whole life (measured with tmux 3.4 on an isolated socket).
+env -u "$STATE_ENV_VAR" $TMUX start-server 2>/dev/null || true
 _tmux_set_auth_globals
 
 # Layer 1 of CHANNELSAUTHRACE923, WITHOUT the secret in any argv (TOKENARGV929).
@@ -1535,6 +1612,21 @@ if [ "$CHANNEL_PROVIDER" = "telegram" ]; then
     python3 "$INSTALL_DIR/scripts/patch-telegram-plugin.py" --state "$INSTALL_DIR/store/telegram-plugin-patch.json" 2>> "$INSTALL_DIR/store/channels-failures.log" || true
   fi
 fi
+
+# Discord answer buttons (DCBTN1023): the plugin's reply tool gets an optional
+# `buttons` list. Same rules as the Telegram patch above: before the plugin is
+# spawned, only the cache this session launches from, idempotent, a missing
+# anchor leaves the file unchanged with one loud line, never fails the start.
+# Also when Discord is only co-listened (CHANNEL_PLUGINS_EXTRA).
+case " $CHANNEL_PROVIDER $CHANNEL_PLUGINS_EXTRA " in
+  *" discord "*|*" discord@"*)
+    if [ -n "$CFG_ENV" ]; then
+      CLAUDE_CONFIG_DIR="$_cfg_dir" python3 "$INSTALL_DIR/scripts/patch-discord-plugin.py" --state "$INSTALL_DIR/store/discord-plugin-patch.json" 2>> "$INSTALL_DIR/store/channels-failures.log" || true
+    else
+      python3 "$INSTALL_DIR/scripts/patch-discord-plugin.py" --state "$INSTALL_DIR/store/discord-plugin-patch.json" 2>> "$INSTALL_DIR/store/channels-failures.log" || true
+    fi
+    ;;
+esac
 
 # Hybrid channel-coordinator model: the native plugin stays the PRIMARY inbound
 # path (it always polls getUpdates here -- never outbound-only). The standalone
@@ -1914,6 +2006,14 @@ fi
 # failure and exit non-zero so the service manager's own back-off kicks in
 # instead of tight-looping and burning API tokens.
 START_TS=$(date +%s)
+
+# DAILYRACE1024: the session is launched and past its dialogs; only now may the
+# daily update swap the binary under it. A session that is already gone does
+# not get it: this start exits as a rapid failure, and the next start, under a
+# session that came up, runs the check instead.
+if $TMUX has-session -t "=$SESSION:" 2>/dev/null; then
+  claude_daily_check_start
+fi
 
 # Plugin liveness watchdog (main channels session only) -- a last-resort
 # backstop UNDER the dashboard channel-monitor, not a replacement. The monitor

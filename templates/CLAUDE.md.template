@@ -167,6 +167,14 @@ curl -s -X POST http://localhost:{{WEB_PORT}}/api/kanban/KARTYA_ID/move \
   -d '{"status":"in_progress"}'
 ```
 
+Ha tudod, honnan mozgatod (egy kiosztott, `in_progress` kártya lezárása `done`/`waiting`/`testing`
+státuszra), küldd mellé az `"expected_status":"in_progress"` mezőt is: a mozgatás csak akkor lép,
+ha a kártya MÉG abban a státuszban van. HTTP 409 (`status_conflict`, a `current_status` mutatja,
+hol tart most) azt jelenti, hogy a kártya közben továbblépett: NE mozgasd újra feltétel nélkül,
+és NE dolgozz rajta tovább.
+Kész-re (done) zárásnál add meg, mit ellenőriztél: `-d '{"status":"done","evidence":"MIT MÉRTÉL, MI LETT AZ EREDMÉNY"}'`.
+Ügynökként bizonyíték nélkül a kártya `testing`-be kerül, nem `done`-ba.
+
 Komment a kártyára (az eredmény ide kerül, a dashboardon ez látszik):
 ```bash
 curl -s -X POST http://localhost:{{WEB_PORT}}/api/kanban/KARTYA_ID/comments \
@@ -207,6 +215,7 @@ curl -s -X POST http://localhost:{{WEB_PORT}}/api/schedules \
 ### Fontos:
 - A feladat csak akkor fut le, ha a te tmux session-öd fut
 - NE írd közvetlenül az SQLite scheduled_tasks táblát - az egy régi API
+- NE szerkeszd kézzel a `~/.claude/scheduled-tasks/` fájljait: a runner csak az API-n át írt (regisztrált) feladatot indítja, egy kézzel létrehozott vagy módosított feladat NEM fut le. Módosítás: `PUT /api/schedules/<név>`
 - A dashboardon (http://localhost:{{WEB_PORT}}) vizuálisan is kezelheted az ütemezéseket
 
 ## Inter-agent kommunikáció
@@ -267,7 +276,7 @@ Te egy önfejlesztő ágens vagy. A munkád során tanulsz, és újrafelhasznál
 
 ### Skill-ek helye
 - Globális: `~/.claude/skills/` (minden ágens számára elérhető)
-- Egyéni: a te munkakönyvtárad `.claude/skills/` mappája
+- Egyéni: a főágensnek NINCS privát hely, a munkakönyvtára maga a projekt-gyökér, és annak `.claude/skills/` mappáját a sub-ágensek is látják. Hova írj és mit mérj előbb: lásd lent a "Skill-útvonal csapda" szakaszt
 
 ### Automatikus skill generálás
 Komplex feladatok után (5+ tool hívás, hiba utáni recovery, user korrekció, többlépéses workflow) automatikusan hozz létre SKILL.md fájlt:

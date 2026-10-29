@@ -32,10 +32,36 @@
 // A real wedge satisfies BOTH. A real slow-but-progressing tool-call fails
 // the second (counter keeps incrementing) so we never act.
 //
-// Scope: MAIN channels session only. Sub-agents are managed by Marveen
-// inter-agent; their tool-call freezes are not user-facing in the same way
-// and the respawn path (stopAgentProcess + startAgentProcess) is different.
-// Extend if a sub-agent case ever materialises.
+// Scope, main session: detect AND recover (respawn-pane), as above. One
+// waiting shape is alert-only on the main session too: a held peer message
+// (see checkMainHeldPeer below).
+//
+// Scope, sub-agents (SUBWAIT925, card c3f8f062): detect and ALERT only, never
+// recover, never a keystroke. The case materialised on 2026-09-23: a sub-agent
+// in a strict permission profile sat on an approval dialog (a held cross-session
+// message) for hours, and nothing told the owner -- this watcher was main-only,
+// the channel-monitor's menu pass only walks channel-owning agents and does not
+// recognise that dialog, and the router's session-stuck alert needs QUEUED
+// inter-agent messages, which a cross-session send never leaves behind. Every
+// running sub-agent is now swept for two WAITING shapes:
+//   - a held peer message: on every sub-agent;
+//   - a tool-permission prompt: only on sub-agents WITHOUT a channel. For a
+//     channel-owning agent the channel-monitor's menu pass already alerts the
+//     owner on that prompt (45 s confirm, 5 min dedup), so alerting here too
+//     sent two messages for one prompt (#1596 review, point 1).
+// A second signal for the tool-permission wait (STATEOBS1012): the
+// agent-state-observer file (<store>/mod-state/<agent>.json). The mod writes
+// awaiting_approval when a dialog opens, including the one a hook's `ask` opens
+// with no PermissionRequest, whose card the pane matcher may not know. It can
+// only ADD a 'permission' wait the pane did not show, and the one-owner rule
+// above applies to it unchanged.
+// A waiting prompt is a QUESTION, not a wedge: the alert says who is waiting
+// and what it asks, and never sends a keystroke (Escape would answer "no").
+// A stagnant tool-call counter on a sub-agent is deliberately NOT watched here:
+// without the main path's transcript-freshness and CPU guards it reads a
+// residual "Worked for Ns" summary above a working turn as a wedge (#1596
+// review, point 2). That half follows separately, with a per-agent
+// transcript-mtime guard.
 
 import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
@@ -43,11 +69,13 @@ import { tmuxStderr } from './tmux-stderr.js'
 import { resolveFromPath } from '../platform.js'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT, STORE_DIR } from '../config.js'
-import { capturePane } from './agent-process.js'
+import { PROJECT_ROOT, STORE_DIR, BOT_NAME, MAIN_AGENT_ID } from '../config.js'
+import { capturePane, isAgentRunning, agentSessionName, agentHasChannel } from './agent-process.js'
+import { listAgentNames, readAgentRemoteHost } from './agent-config.js'
 import { readTranscriptMtimeAcrossConfigDirs } from './active-model.js'
+import { STATE_OBSERVER_STATE_DIR } from './state-observer.js'
 import { mainConfigRoots } from './inbound-probe.js'
-import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+import { MAIN_CHANNELS_SESSION, withoutMainAgent } from './main-agent.js'
 import { resumeMarveenSession, sendAlert, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
 import { sendRoutineAlert } from './routine-alert.js'
 import {
@@ -56,10 +84,18 @@ import {
   detectPaneState,
   parkedChannelInput,
   parkedMachineOriginInput,
+  detectsPermissionDialog,
+  detectsHeldPeerMessage,
+  permissionPromptSummary,
+  decidePaneErrorAlert,
   type StuckToolCallState,
   type StuckToolCallThresholds,
+  type PaneErrorAlertState,
+  type PaneErrorAlertThresholds,
+  type PermissionPromptSummary,
 } from '../pane-state.js'
 import { exactTmuxTarget } from '../tmux-target.js'
+import { whileNotFrozen } from './fleet-freeze.js'
 
 const TMUX = resolveFromPath('tmux')
 
@@ -109,6 +145,8 @@ export function confirmsWedgeProfile(cpuPercent: number | null, maxCpuPercent: n
 // files that replace each other, and of 938 five-minute windows with writes
 // only 5 had two writers, all of them session hand-overs -- so no overlap here.
 // An install that runs a second claude session in the same project dir has it.
+// KILLGATECWD1022: when the session's working directory differs from PROJECT_ROOT, the writers of both project dirs count
+// (newest wins), so a second session in the session's own directory can also mask a wedge.
 export const STALE_VERDICT_FRESH_MS = 30_000
 
 // STUCKALLCLEAR923 (owner request, 2026-09-23). The failed-recovery branch
@@ -194,9 +232,6 @@ function writePendingFailureAlert(pendingSince: number | null): void {
 // sweep, while losing the PERSISTED stamp above would lose it entirely.
 let healthyStreak = 0
 
-// Pure: is the recovery verdict stale because the session's transcript shows
-// recent activity? null mtime (dir unreadable) -> false: fail-open, the
-// stagnation signal stands on its own, same rule as the CPU guard.
 // The transcript mtime the kill-boundary gate reads. A function with its own default arguments so that
 // "the gate reads EVERY candidate root" (STUCKROOT923) is something a test can pin: reverting the gate to a
 // single root (`[mainConfigRoots()[0]]`) used to pass the whole suite. Newest wins across the roots.
@@ -207,6 +242,53 @@ export function killGateTranscriptMtime(
   return readTranscriptMtimeAcrossConfigDirs(workingDir, roots)
 }
 
+// KILLGATECWD1022: the kill gate must read the transcript of the session it is about to kill, and a session writes its
+// transcript under its own working directory, which is not always PROJECT_ROOT. Two known cases: scripts/channels.sh restarts
+// the main session in a mktemp directory (/tmp/marveen-channels-XXXXXX) when the first start fails with EPERM, and a dashboard
+// can run from a different directory than the one the session was started in (a release layout, <releases>/<sha>). In both
+// cases, the PROJECT_ROOT read saw either nothing or a frozen mtime, so the gate could never hold the kill of a live
+// session. Newest wins across PROJECT_ROOT and the session's working directory (every candidate config root for each); a
+// missing working directory (tmux failed), an empty one, or the same directory gives exactly the old read. The result is
+// never older than the old read, so this can only hold a kill, never cause one.
+let killGateCwdFallbackLogged = false
+
+export function killGateTranscriptMtimeForSession(
+  projectRoot: string,
+  paneCwd: string | null,
+  roots: ReadonlyArray<string | undefined> = mainConfigRoots(),
+): number | null {
+  const own = killGateTranscriptMtime(projectRoot, roots)
+  if (!paneCwd || paneCwd === projectRoot) return own
+  const session = killGateTranscriptMtime(paneCwd, roots)
+  // The session directory has no transcript but PROJECT_ROOT has one: the layout fallback is in use. Say so once per
+  // process, so a layout change (a transcript the gate cannot see) does not stay invisible.
+  if (session === null && own !== null && !killGateCwdFallbackLogged) {
+    killGateCwdFallbackLogged = true
+    // No path in the log: only that the working directory differs from PROJECT_ROOT, and its length.
+    logger.info({ paneCwdDiffersFromProjectRoot: true, paneCwdLength: paneCwd.length }, 'stuck-tool-call-watcher: no transcript under the main session working directory; the PROJECT_ROOT transcript is used for the kill gate (layout fallback)')
+  }
+  if (own === null) return session
+  if (session === null) return own
+  return Math.max(own, session)
+}
+
+// KILLGATECWD1022: the main session's working directory (the tmux pane_current_path of the exact session target), or null
+// on any failure. The main channels session is one pane; `list-panes -s` lists every window of the session, and anything
+// other than exactly one pane gives null (no guessing between panes), so the caller falls back to the PROJECT_ROOT read.
+export function mainPaneCwd(session: string): string | null {
+  try {
+    const lines = execFileSync(TMUX, ['list-panes', '-s', '-t', exactTmuxTarget(session), '-F', '#{pane_current_path}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+      .split('\n').map(l => l.trim()).filter(Boolean)
+    return lines.length === 1 ? lines[0] : null
+  } catch (err) {
+    logger.warn({ site: 'stuck-tool-call-watcher.mainPaneCwd', session, tmux: tmuxStderr(err) }, 'tmux list-panes failed')
+    return null
+  }
+}
+
+// Pure: is the recovery verdict stale because the session's transcript shows
+// recent activity? null mtime (dir unreadable) -> false: fail-open, the
+// stagnation signal stands on its own, same rule as the CPU guard.
 export function verdictStaleByTranscript(
   transcriptMtimeMs: number | null,
   nowMs: number,
@@ -666,7 +748,8 @@ async function checkSession(label: string, session: string): Promise<void> {
     // 2026-09-23 17:28 this watcher killed a session whose transcript was being
     // written in that same second. Take the candidate list from the shared
     // mainConfigRoots() and let newest-wins decide; never write a second list.
-    const transcriptMtime = killGateTranscriptMtime()
+    // KILLGATECWD1022: there are also two candidate project directories: PROJECT_ROOT and the session's working directory.
+    const transcriptMtime = killGateTranscriptMtimeForSession(PROJECT_ROOT, mainPaneCwd(session))
     if (verdictStaleByTranscript(transcriptMtime, Date.now())) {
       logTranscriptAbort(
         session, next.stagnantSince,
@@ -741,6 +824,238 @@ async function checkSession(label: string, session: string): Promise<void> {
   }
 }
 
+// ---- sub-agents: alert-only (SUBWAIT925, card c3f8f062) ---------------------
+
+export type AgentWaitKind = 'permission' | 'peer-message'
+
+// Pure: which waiting shape, if any, the pane shows. The tool-permission card
+// is checked first because it is the more specific shape (question + Yes/No);
+// the held-peer-message dialog is the 2026-09-23 incident shape.
+export function classifyAgentWait(pane: string | null): AgentWaitKind | null {
+  if (pane == null) return null
+  if (detectsPermissionDialog(pane)) return 'permission'
+  if (detectsHeldPeerMessage(pane)) return 'peer-message'
+  return null
+}
+
+// A prompt answered within a few minutes is the strict profile's normal
+// rhythm, not an incident; the confirm window keeps those quiet. A prompt
+// still open after it is exactly what the owner asked to hear about. The
+// dedup window re-reports a prompt that is STILL open (with the routine-alert
+// count), and the clear window rides out a flapping capture.
+export const AGENT_WAIT_THRESHOLDS: PaneErrorAlertThresholds = {
+  confirmMs: 3 * 60 * 1000,
+  dedupMs: 30 * 60 * 1000,
+  clearMs: 2 * 60 * 1000,
+}
+
+export function formatAgentWaitAlert(
+  agent: string,
+  session: string,
+  kind: AgentWaitKind,
+  waitingMs: number,
+  ask: PermissionPromptSummary | null,
+): string {
+  const min = Math.max(1, Math.round(waitingMs / 60000))
+  if (kind === 'peer-message') {
+    return `⏸️ A(z) ${agent} ágens ${min} perce egy másik sessionből érkezett üzenet jóváhagyására vár. Nem hiba: a session él, csak egy igen/nem kérdés áll a bemenet előtt, és azt csak ember válaszolhatja meg. Nem nyomtam meg semmit (az Escape ott elutasítást jelentene). Döntsd el: tmux attach -t ${session}`
+  }
+  const what = ask ? ` Amit kér: ${ask.title}: ${ask.reason}.` : ''
+  return `⏸️ A(z) ${agent} ágens ${min} perce egy tool-engedélykérésre vár.${what} Nem hiba: a session él, egy igen/nem kérdés áll a bemenet előtt, és azt csak ember válaszolhatja meg. Nem nyomtam meg semmit (az Escape ott NEM-et jelentene). Döntsd el: tmux attach -t ${session}`
+}
+
+// ---- the agent-state-observer file as a second signal (STATEOBS1012) --------
+
+export interface AgentStateReading {
+  state: string
+  /** The tool the open dialog asks about; null when absent or not a plain word. */
+  tool: string | null
+  /** Epoch ms the session last proved alive (the mod refreshes it every minute). */
+  aliveAt: number
+}
+
+/** A state file older than this says nothing: its session is gone or frozen. */
+export const AGENT_STATE_STALE_MS = 5 * 60 * 1000
+
+// The state and the tool name reach an owner alert: only a plain word passes.
+const PLAIN_WORD_RX = /^[A-Za-z0-9_.:-]{1,80}$/
+
+// Pure: the fields this watcher reads, or null for anything that is not a
+// well-formed state file.
+export function parseAgentStateFile(text: string): AgentStateReading | null {
+  let s: unknown
+  try {
+    s = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!s || typeof s !== 'object') return null
+  const o = s as Record<string, unknown>
+  if (typeof o.state !== 'string' || !PLAIN_WORD_RX.test(o.state)) return null
+  if (typeof o.alive_at !== 'number' || !Number.isFinite(o.alive_at)) return null
+  const tool = typeof o.tool === 'string' && PLAIN_WORD_RX.test(o.tool) ? o.tool : null
+  return { state: o.state, tool, aliveAt: o.alive_at }
+}
+
+// Pure: does the state file add a 'permission' wait? Only a fresh
+// awaiting_approval does, and not over a busy pane: an APPROVED tool's own run
+// still reads awaiting_approval (the mod's known limit) and shows the busy
+// markers, which an open dialog hides (the captured permission cards read
+// 'unknown', never 'busy'). Not over an idle pane either: a dialog replaces the
+// input box, so an idle prompt cannot sit under one, and a reading kept past
+// the dialog (a deny path ending without tool.call or turn.complete) must not
+// alert over it every 30 minutes.
+export function stateFileSaysWaiting(reading: AgentStateReading | null, pane: string | null, now: number): boolean {
+  if (!reading || reading.state !== 'awaiting_approval') return false
+  if (now - reading.aliveAt >= AGENT_STATE_STALE_MS) return false
+  if (pane != null) {
+    const paneState = detectPaneState(pane)
+    if (paneState === 'busy' || paneState === 'idle') return false
+  }
+  return true
+}
+
+// The live reader: a local agent's file only (the mod never loads into a
+// remote agent, so a local file under its name would be a stale leftover).
+function readLocalAgentState(agent: string): AgentStateReading | null {
+  if (!/^[a-z0-9_-]+$/i.test(agent) || readAgentRemoteHost(agent)) return null
+  try {
+    return parseAgentStateFile(readFileSync(join(STATE_OBSERVER_STATE_DIR, `${agent}.json`), 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+export interface SubAgentSweepDeps {
+  listAgents: () => string[]
+  isRunning: (agent: string) => boolean
+  /** The agent owns a channel: its permission prompts are the channel-monitor's to report. */
+  hasChannel: (agent: string) => boolean
+  capture: (agent: string, session: string) => string | null
+  now: () => number
+  alertWait: (agent: string, session: string, kind: AgentWaitKind, waitingMs: number, ask: PermissionPromptSummary | null) => void
+  /** The agent's agent-state-observer reading (second signal); absent = pane only. */
+  readState?: (agent: string) => AgentStateReading | null
+  waitThresholds?: PaneErrorAlertThresholds
+}
+
+// Per-agent waiting-spell state.
+const agentWaitState = new Map<string, PaneErrorAlertState>()
+
+export function resetSubAgentWatchState(): void {
+  agentWaitState.clear()
+}
+
+// One sweep over every running sub-agent. Pure apart from the injected deps,
+// so the tests drive it with canned panes and a fake clock. Never throws for
+// one agent's sake: a capture failure on one session must not skip the rest.
+export function sweepSubAgents(deps: SubAgentSweepDeps): void {
+  const waitThresholds = deps.waitThresholds ?? AGENT_WAIT_THRESHOLDS
+  let agents: string[]
+  try {
+    agents = withoutMainAgent(deps.listAgents())
+  } catch (err) {
+    logger.debug({ err }, 'stuck-tool-call-watcher: sub-agent list failed')
+    return
+  }
+  const seen = new Set<string>()
+  for (const agent of agents) {
+    try {
+      if (!deps.isRunning(agent)) continue
+      seen.add(agent)
+      const session = agentSessionName(agent)
+      const pane = deps.capture(agent, session)
+      const now = deps.now()
+
+      // Waiting on a person (permission prompt / held peer message). A
+      // permission prompt on a channel-owning agent is the channel-monitor's
+      // (one owner per state, #1596 review point 1).
+      let kind = classifyAgentWait(pane)
+      // The state file only adds a wait the pane did not show (STATEOBS1012).
+      const reading = kind == null && deps.readState ? deps.readState(agent) : null
+      if (kind == null && stateFileSaysWaiting(reading, pane, now)) kind = 'permission'
+      if (kind === 'permission' && deps.hasChannel(agent)) kind = null
+      const prevWait = agentWaitState.get(agent) ?? { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
+      const wait = decidePaneErrorAlert(kind != null, prevWait, now, waitThresholds)
+      if (wait.next.firstSeenAt === null) agentWaitState.delete(agent)
+      else agentWaitState.set(agent, wait.next)
+      if (wait.alert && kind != null) {
+        // What it asks: the card on the pane, else the tool the state file names.
+        const ask = kind !== 'permission'
+          ? null
+          : (pane != null ? permissionPromptSummary(pane) : null)
+            ?? (reading ? { title: reading.tool ?? 'ismeretlen eszköz', reason: 'az állapotfigyelő szerint jóváhagyásra vár' } : null)
+        logger.warn({ agent, session, kind, waitingMs: now - (wait.next.firstSeenAt ?? now) }, 'stuck-tool-call-watcher: sub-agent is waiting on a person (no keystrokes sent) -- alerting')
+        deps.alertWait(agent, session, kind, now - (wait.next.firstSeenAt ?? now), ask)
+      }
+    } catch (err) {
+      logger.debug({ err, agent }, 'stuck-tool-call-watcher: sub-agent check error')
+    }
+  }
+  // Forget agents that stopped, so a restart begins with a clean spell.
+  for (const key of [...agentWaitState.keys()]) {
+    if (!seen.has(key)) agentWaitState.delete(key)
+  }
+}
+
+const LIVE_SUB_AGENT_DEPS: SubAgentSweepDeps = {
+  listAgents: listAgentNames,
+  isRunning: isAgentRunning,
+  hasChannel: agentHasChannel,
+  capture: (agent, session) => capturePane(session, readAgentRemoteHost(agent)),
+  now: () => Date.now(),
+  alertWait: (agent, session, kind, waitingMs, ask) => {
+    sendRoutineAlert(`agent-wait:${agent}`, formatAgentWaitAlert(agent, session, kind, waitingMs, ask))
+  },
+  readState: readLocalAgentState,
+}
+
+// ---- the main session's held peer message (#1596 follow-up) -----------------
+//
+// The channel-monitor's menu pass used to Escape a held peer message on the
+// main session like any other modal. #1596 stopped that (Escape there may
+// decline the message and tell the sender so), and the sweep above leaves the
+// main agent out, so on the main session nothing reported the dialog any more
+// (#1596 review: alert instead of Escape). The main session joins the
+// alert-only rule for this one shape: the same thresholds and text as a
+// sub-agent, never a keystroke. Its tool-permission prompt stays with the
+// channel-monitor's escalation (card 68cb6715): one owner per state.
+
+export interface MainHeldPeerDeps {
+  capture: () => string | null
+  now: () => number
+  alertWait: (waitingMs: number) => void
+  waitThresholds?: PaneErrorAlertThresholds
+}
+
+let mainHeldPeerState: PaneErrorAlertState | null = null
+
+export function resetMainHeldPeerState(): void {
+  mainHeldPeerState = null
+}
+
+export function checkMainHeldPeer(deps: MainHeldPeerDeps): void {
+  const pane = deps.capture()
+  const now = deps.now()
+  const held = pane != null && detectsHeldPeerMessage(pane)
+  const prev = mainHeldPeerState ?? { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
+  const wait = decidePaneErrorAlert(held, prev, now, deps.waitThresholds ?? AGENT_WAIT_THRESHOLDS)
+  mainHeldPeerState = wait.next.firstSeenAt === null ? null : wait.next
+  if (wait.alert && held) {
+    const waitingMs = now - (wait.next.firstSeenAt ?? now)
+    logger.warn({ session: MAIN_CHANNELS_SESSION, waitingMs }, 'stuck-tool-call-watcher: main session holds a peer message for approval (no keystrokes sent) -- alerting')
+    deps.alertWait(waitingMs)
+  }
+}
+
+const LIVE_MAIN_HELD_PEER_DEPS: MainHeldPeerDeps = {
+  capture: () => capturePane(MAIN_CHANNELS_SESSION),
+  now: () => Date.now(),
+  alertWait: (waitingMs) => {
+    sendRoutineAlert(`agent-wait:${MAIN_AGENT_ID}`, formatAgentWaitAlert(BOT_NAME, MAIN_CHANNELS_SESSION, 'peer-message', waitingMs, null))
+  },
+}
+
 export function startStuckToolCallWatcher(): NodeJS.Timeout {
   async function sweep() {
     try {
@@ -748,7 +1063,17 @@ export function startStuckToolCallWatcher(): NodeJS.Timeout {
     } catch (err) {
       logger.debug({ err }, 'stuck-tool-call-watcher: main session check error')
     }
+    try {
+      checkMainHeldPeer(LIVE_MAIN_HELD_PEER_DEPS)
+    } catch (err) {
+      logger.debug({ err }, 'stuck-tool-call-watcher: main session held-peer check error')
+    }
+    try {
+      sweepSubAgents(LIVE_SUB_AGENT_DEPS)
+    } catch (err) {
+      logger.debug({ err }, 'stuck-tool-call-watcher: sub-agent sweep error')
+    }
   }
   setTimeout(() => { void sweep() }, INITIAL_DELAY_MS)
-  return setInterval(() => { void sweep() }, INTERVAL_MS)
+  return setInterval(whileNotFrozen('stuck-tool-call', () => { void sweep() }), INTERVAL_MS)
 }

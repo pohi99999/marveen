@@ -34,10 +34,14 @@ vi.mock('node:child_process', () => ({
 vi.mock('../logger.js', () => ({ logger: { info: h.info, warn: h.warn, error: vi.fn(), debug: h.debug } }))
 vi.mock('../platform.js', () => ({ resolveFromPath: () => '/usr/bin/tmux' }))
 vi.mock('../config.js', () => ({ PROJECT_ROOT: '/nonexistent-project-root', STORE_DIR: '/nonexistent-store-dir' }))
-vi.mock('../web/agent-process.js', () => ({ capturePane: () => h.pane }))
+// The watcher also imports the sub-agent sweep's helpers (SUBWAIT925); they are
+// mocked inert here so this file only drives the main session's checkSession.
+vi.mock('../web/agent-process.js', () => ({ capturePane: () => h.pane, isAgentRunning: () => false, agentSessionName: (a: string) => a, agentHasChannel: () => true }))
+vi.mock('../web/agent-config.js', () => ({ listAgentNames: () => [], readAgentRemoteHost: () => null }))
+vi.mock('../web/state-observer.js', () => ({ STATE_OBSERVER_STATE_DIR: '/nonexistent-state-dir' }))
 vi.mock('../web/active-model.js', () => ({ readTranscriptMtimeAcrossConfigDirs: () => h.mtime }))
 vi.mock('../web/inbound-probe.js', () => ({ mainConfigRoots: () => [] }))
-vi.mock('../web/main-agent.js', () => ({ MAIN_CHANNELS_SESSION: 'main-test' }))
+vi.mock('../web/main-agent.js', () => ({ MAIN_CHANNELS_SESSION: 'main-test', withoutMainAgent: (a: string[]) => a }))
 vi.mock('../web/channel-monitor.js', () => ({
   resumeMarveenSession: h.resume,
   sendAlert: vi.fn(),

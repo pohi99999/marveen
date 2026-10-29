@@ -4,9 +4,9 @@ import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rea
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { gateDecision, buildUnverifiedRecipientMsg, recipientLedgerEnabled, makeRecipientVerifier, readBrandEnv } from '../../scripts/email-send-gate.mjs'
+import { gateDecision, buildUnverifiedRecipientMsg, buildUnparseableRecipientMsg, recipientLedgerEnabled, makeRecipientVerifier, readBrandEnv, extractAddress, threadReplyRequest } from '../../scripts/email-send-gate.mjs'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { isValidSource, normalizeAddress, splitAddresses, loadLedger, isVerifiedIn } from '../../scripts/recipient-ledger.mjs'
+import { isValidSource, normalizeAddress, splitAddresses, parseAddresses, loadLedger, inspectLedger, isVerifiedIn } from '../../scripts/recipient-ledger.mjs'
 import { injectEmailSendGate, agentGetsEmailGate } from '../web/agent-scaffold.js'
 import { MAIN_AGENT_ID } from '../config.js'
 
@@ -244,6 +244,138 @@ describe('unverified recipients', () => {
   })
 })
 
+// Every piece of a recipient field is parsed and checked. The splitter that
+// stood in recipient-ledger.mjs comma-split only a STRING field and took only
+// the first <...>, so to: ["A <known@example.com>, B <invented@example.org>"]
+// was checked as known@example.com alone while Gmail delivers to both. The shared case list pins the
+// parser; the gate denies on any piece that is not exactly one address.
+describe('every recipient piece is parsed, and an unparseable one denies', () => {
+  const ADDR = JSON.parse(readFileSync(join(__dirname, '..', '..', 'scripts', 'hooks', 'recipient-address-cases.json'), 'utf-8')) as {
+    cases: Array<{ name: string; hole?: boolean; input: unknown; addresses: string[]; unparseable: string[] }>
+  }
+  const known = (a: string) => a === 'known@example.com'
+
+  it('parseAddresses returns the expected addresses and unparseable pieces on every shared case', () => {
+    const wrong = ADDR.cases
+      .map((c) => ({ name: c.name, want: { addresses: c.addresses, unparseable: c.unparseable }, got: parseAddresses(c.input) }))
+      .filter((r) => JSON.stringify(r.got) !== JSON.stringify(r.want))
+    expect(wrong, JSON.stringify(wrong.slice(0, 5))).toEqual([])
+    expect(ADDR.cases.filter((c) => c.hole).length).toBeGreaterThanOrEqual(4)
+    expect(ADDR.cases.some((c) => !c.hole && c.addresses.length > 0)).toBe(true)
+  })
+
+  it('control: the previous splitter never saw invented@example.org in a hole case; the parser always does', () => {
+    // Verbatim replay of the previous normalizeAddress / splitAddresses.
+    const oldNorm = (raw: unknown) => {
+      const s = String(raw ?? '').trim()
+      const m = s.match(/<([^>]+)>/)
+      return (m ? m[1] : s).trim().toLowerCase()
+    }
+    const oldSplit = (v: unknown) => (Array.isArray(v) ? v : String(v ?? '').split(',')).map(oldNorm).filter((a) => a.includes('@'))
+    for (const c of ADDR.cases.filter((x) => x.hole)) {
+      expect(JSON.stringify(c.input), c.name).toContain('invented@example.org')
+      expect(oldSplit(c.input).some((a: string) => a.includes('invented@example.org')), c.name).toBe(false)
+      const now = parseAddresses(c.input) as { addresses: string[]; unparseable: string[] }
+      expect(now.addresses.includes('invented@example.org') || now.unparseable.length > 0, c.name).toBe(true)
+    }
+  })
+
+  it('a draft or a manage_email send whose field hides an unknown address is DENIED', () => {
+    for (const c of ADDR.cases.filter((x) => x.hole)) {
+      for (const [name, extra] of [['mcp__gmail__draft_email', {}], ['mcp__google-workspace__manage_email', { operation: 'send', draft: true }]] as const) {
+        const d = gateDecision(name, { ...extra, to: c.input, body: 'x' }, known)
+        expect(d.deny, `${c.name} via ${name}`).toBe(true)
+        expect(['unparseable-recipient', 'unverified-recipient'], `${c.name} via ${name}`).toContain(d.kind)
+      }
+    }
+    // the array item with two addresses: the unknown one is named
+    const d = gateDecision('mcp__gmail__draft_email', { to: ['A <known@example.com>, B <invented@example.org>'] }, known)
+    expect(d).toMatchObject({ deny: true, kind: 'unverified-recipient', addresses: ['invented@example.org'] })
+    // two <...> pairs in one piece: unparseable, named as typed
+    const u = gateDecision('mcp__gmail__draft_email', { to: 'Known <known@example.com> <invented@example.org>' }, known)
+    expect(u).toMatchObject({ deny: true, kind: 'unparseable-recipient', addresses: ['Known <known@example.com> <invented@example.org>'] })
+    // clean fields still pass
+    expect(gateDecision('mcp__gmail__draft_email', { to: ['Known <KNOWN@example.com>'], cc: 'known@example.com;' }, known).deny).toBe(false)
+  })
+
+  it('the unparseable deny names the piece and the fix', () => {
+    const msg = buildUnparseableRecipientMsg(['Known <known@example.com> <invented@example.org>'])
+    expect(msg).toContain('Known <known@example.com> <invented@example.org>')
+    expect(msg).toContain('pontosan EGY cim')
+  })
+
+  it('the thread-reply narrowing refuses a recipient with more than one @', () => {
+    expect(extractAddress('invented@example.org <known@example.com>')).toBe('')
+    expect(extractAddress('Known <known@example.com>')).toBe('known@example.com')
+    expect(extractAddress('"jane@example.com" <Jane@Example.com>')).toBe('jane@example.com')
+    const req = threadReplyRequest({ threadId: 't-1', to: ['invented@example.org <known@example.com>'] })
+    expect(req.ok).toBe(false)
+  })
+
+  it('the hook entrypoint denies an unparseable recipient with the readable reason', () => {
+    const r = spawnSync(process.execPath, [join(__dirname, '..', '..', 'scripts', 'email-send-gate.mjs')], {
+      input: JSON.stringify({ tool_name: 'mcp__gmail__draft_email', tool_input: { to: 'Known <known@example.com> <invented@example.org>' } }),
+      encoding: 'utf-8', timeout: 15_000,
+    })
+    expect(r.status).toBe(0)
+    const out = JSON.parse(r.stdout).hookSpecificOutput
+    expect(out.permissionDecision).toBe('deny')
+    expect(out.permissionDecisionReason).toContain('Nem ertelmezheto cimzett')
+  })
+})
+
+// The Python twin of the ledger reader and the parser (scripts/hooks/recipient_ledger.py,
+// used by the main agent's gate and the senders' own check when the install turns the
+// ledger on for the main agent) must agree with this module on every shared case.
+describe('recipient_ledger.py gives the same verdicts as recipient-ledger.mjs', () => {
+  const HOOKS = join(__dirname, '..', '..', 'scripts', 'hooks')
+  const py = (code: string, input: unknown) => JSON.parse(spawnSync('python3', ['-c', `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(HOOKS)})
+import recipient_ledger as rl
+${code}
+`], { input: JSON.stringify(input), encoding: 'utf-8', timeout: 30_000 }).stdout.trim())
+
+  it('parse_addresses == parseAddresses on every shared address case', () => {
+    const ADDR = JSON.parse(readFileSync(join(HOOKS, 'recipient-address-cases.json'), 'utf-8')) as {
+      cases: Array<{ name: string; input: unknown; addresses: string[]; unparseable: string[] }>
+    }
+    const got = py(`print(json.dumps([dict(zip(("addresses", "unparseable"), rl.parse_addresses(x))) for x in json.load(sys.stdin)]))`,
+      ADDR.cases.map((c) => c.input)) as Array<{ addresses: string[]; unparseable: string[] }>
+    const wrong = ADDR.cases
+      .map((c, i) => ({ name: c.name, js: parseAddresses(c.input), py: got[i], want: { addresses: c.addresses, unparseable: c.unparseable } }))
+      .filter((r) => JSON.stringify(r.py) !== JSON.stringify(r.want) || JSON.stringify(r.js) !== JSON.stringify(r.want))
+    expect(wrong, JSON.stringify(wrong.slice(0, 5))).toEqual([])
+  })
+
+  it('load_ledger == inspectLedger on every shared ledger file', () => {
+    const FILES = JSON.parse(readFileSync(join(HOOKS, 'recipient-ledger-file-cases.json'), 'utf-8')) as {
+      cases: Array<{ name: string; b64: string | null; ok: boolean; recipients: string[] }>
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-files-'))
+    const paths = FILES.cases.map((c, i) => {
+      const p = join(dir, `case-${i}.json`)
+      if (c.b64 !== null) writeFileSync(p, Buffer.from(c.b64, 'base64'))
+      return p
+    })
+    const pyOut = py(`
+out = []
+for p in json.load(sys.stdin):
+    try:
+        out.append({"ok": True, "recipients": sorted(rl.load_ledger(p))})
+    except rl.LedgerUnreadable:
+        out.append({"ok": False, "recipients": []})
+print(json.dumps(out))`, paths) as Array<{ ok: boolean; recipients: string[] }>
+    const wrong = FILES.cases.map((c, i) => {
+      const seen = inspectLedger(paths[i])
+      const js = { ok: !!seen.ledger, recipients: seen.ledger ? Object.keys(seen.ledger.recipients).sort() : [] }
+      return { name: c.name, js, py: pyOut[i], want: { ok: c.ok, recipients: c.recipients } }
+    }).filter((r) => JSON.stringify(r.js) !== JSON.stringify(r.want) || JSON.stringify(r.py) !== JSON.stringify(r.want))
+    expect(wrong, JSON.stringify(wrong.slice(0, 5))).toEqual([])
+    expect(FILES.cases.filter((c) => !c.ok).length).toBeGreaterThanOrEqual(10)
+  })
+})
+
 // The ledger behind the gate: what counts as a source, and what does not.
 describe('recipient ledger', () => {
   it('accepts only re-openable evidence kinds as a source', () => {
@@ -295,7 +427,16 @@ describe('injectEmailSendGate', () => {
     injectEmailSendGate(s)
     const hooks = (s.hooks as Record<string, unknown>).PreToolUse as Array<Record<string, unknown>>
     expect(hooks).toHaveLength(1)
-    expect(hooks[0].matcher).toBe('Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*')
+    expect(hooks[0].matcher).toBe('Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*'
+      + '|.*send_draft.*|.*update_draft.*|.*create_draft.*|.*reply_all.*|.*send_gmail_message.*|.*draft_gmail_message.*'
+      + '|.*[Gg][Mm][Aa][Ii][Ll].*send_message.*|.*[Gg][Mm][Aa][Ii][Ll].*reply.*|.*[Gg][Mm][Aa][Ii][Ll].*forward.*'
+      + '|.*send[-_]mail.*|.*send[-_]shared[-_]mailbox[-_]mail.*|.*send[-_]shared[-_]mailbox[-_]draft.*|.*send[-_]draft[-_]message.*'
+      + '|.*reply[-_]mail[-_]message.*|.*reply[-_]all[-_]mail[-_]message.*|.*forward[-_]mail[-_]message.*'
+      + '|.*reply[-_]shared[-_]mailbox[-_]mail.*|.*reply[-_]all[-_]shared[-_]mailbox[-_]mail.*|.*forward[-_]shared[-_]mailbox[-_]mail.*'
+      + '|.*forward[-_]calendar[-_]event.*|.*reply[-_]to[-_]group[-_]thread.*|.*draft[-_]email.*'
+      + '|.*create[-_]shared[-_]mailbox[-_]draft.*|.*create[-_]reply[-_]draft.*|.*create[-_]reply[-_]all[-_]draft.*|.*create[-_]forward[-_]draft.*'
+      + '|.*create[-_]shared[-_]mailbox[-_]reply[-_]draft.*|.*create[-_]shared[-_]mailbox[-_]reply[-_]all[-_]draft.*|.*create[-_]shared[-_]mailbox[-_]forward[-_]draft.*'
+      + '|.*update[-_]mail[-_]message.*|.*update[-_]shared[-_]mailbox[-_]message.*')
     const inner = (hooks[0].hooks as Array<{ command: string }>)[0]
     expect(inner.command).toContain('email-send-gate.mjs')
   })
@@ -464,5 +605,109 @@ describe('a recipient-ledger module that does not load (HOOKDEPLOAD1008)', () =>
     }
     const r = run(broken, CALLS['non-send Bash'])
     expect(r).toEqual({ status: 0, stdout: '', stderr: '' })
+  })
+})
+
+// MS365MAIL1024: the Microsoft Graph MCP server names its tools with hyphens
+// (send-mail, create-draft-email, ...), so no matcher or classifier shaped on
+// underscores ever saw them, and its letter sits Graph-shaped under `body`
+// (body.Message.subject / body.Message.body.content, recipients as
+// [{emailAddress: {address}}]) instead of the flat to/cc/subject fields.
+describe('Microsoft Graph (ms365) mail tools', () => {
+  const verifiable = (a: string) => a === 'x@y.hu'
+
+  it('the sends are denied with their kind, the reads are not gated at all', () => {
+    const letter = { body: { Message: { subject: 'Targy', body: { contentType: 'Text', content: 'Szia!' } } } }
+    expect(gateDecision('mcp__ms365__send-mail', letter)).toMatchObject({ deny: true, kind: 'connector-send' })
+    expect(gateDecision('mcp__ms365__reply-mail-message', { messageId: 'm1', body: { Comment: 'V' } }))
+      .toMatchObject({ deny: true, kind: 'connector-send' })
+    expect(gateDecision('mcp__ms365__send-draft-message', { messageId: 'd1' }))
+      .toMatchObject({ deny: true, kind: 'send-draft' })
+    expect(gateDecision('mcp__ms365__list-mail-messages', { body: { folderPath: 'inbox' } }).deny).toBe(false)
+  })
+
+  it('a Graph-shaped draft address goes through the same parse and ledger check as a flat to', () => {
+    const draft = { body: { subject: 'Targy', body: { contentType: 'Text', content: 'Szia!' },
+      toRecipients: [{ emailAddress: { address: 'x@y.hu' } }] } }
+    expect(gateDecision('mcp__ms365__create-draft-email', draft, () => false))
+      .toMatchObject({ deny: true, kind: 'unverified-recipient', addresses: ['x@y.hu'] })
+    expect(gateDecision('mcp__ms365__create-draft-email', draft, verifiable).deny).toBe(false)
+  })
+
+  it('a recipient item that is not a clean address object is unparseable (fail-closed)', () => {
+    const bad = { body: { toRecipients: [{ emailAddress: { address: 5 } }] } }
+    expect(gateDecision('mcp__ms365__create-draft-email', bad, verifiable))
+      .toMatchObject({ deny: true, kind: 'unparseable-recipient' })
+  })
+
+  it('update-mail-message: a flag update passes, a draft recipient change is ledger-checked', () => {
+    expect(gateDecision('mcp__ms365__update-mail-message', { messageId: 'm1', body: { isRead: true } }, verifiable).deny).toBe(false)
+    const rcpt = { messageId: 'm1', body: { toRecipients: [{ emailAddress: { address: 'x@y.hu' } }] } }
+    expect(gateDecision('mcp__ms365__update-mail-message', rcpt, () => false))
+      .toMatchObject({ deny: true, kind: 'unverified-recipient', addresses: ['x@y.hu'] })
+  })
+
+  it('a recipient field twice in different case is ambiguous, not a last-one-wins read (fail-closed)', () => {
+    // The server reads keys in any case: if one spelling were dropped, an unverified address in it would pass.
+    const twice = { body: { toRecipients: [{ emailAddress: { address: 'x@y.hu' } }],
+      ToRecipients: [{ emailAddress: { address: 'z@example.org' } }] } }
+    expect(gateDecision('mcp__ms365__create-draft-email', twice, verifiable))
+      .toMatchObject({ deny: true, kind: 'unparseable-recipient' })
+  })
+
+  it('an underscored name is never a Graph tool: its object body does not move it off the flat check', () => {
+    const flat = { to: 'x@y.hu', body: { a: 1 } }
+    expect(gateDecision('mcp__x__update_mail_message', flat, () => false))
+      .toMatchObject({ deny: true, kind: 'unverified-recipient', addresses: ['x@y.hu'] })
+  })
+
+  it('a stray top-level recipient field is checked too (the server moves it into body)', () => {
+    const stray = { toRecipients: [{ emailAddress: { address: 'x@y.hu' } }], body: { subject: 'Targy' } }
+    expect(gateDecision('mcp__ms365__create-draft-email', stray, () => false))
+      .toMatchObject({ deny: true, kind: 'unverified-recipient', addresses: ['x@y.hu'] })
+  })
+
+  it('a body-less draft with only top-level fields is Graph-shaped and ledger-checked', () => {
+    // SECURITY review on MS365MAIL1024: every field stray at the top is Graph-shaped
+    // too (the server moves them into body), so it cannot skip the address check.
+    const flat = { subject: 'Targy', toRecipients: [{ emailAddress: { address: 'x@y.hu' } }] }
+    expect(gateDecision('mcp__ms365__create-draft-email', flat, () => false))
+      .toMatchObject({ deny: true, kind: 'unverified-recipient', addresses: ['x@y.hu'] })
+    expect(gateDecision('mcp__ms365__create-draft-email', flat, verifiable).deny).toBe(false)
+  })
+
+  it('a stray top-level Message is read too (the server moves it into body)', () => {
+    const strayMsg = { Message: { toRecipients: [{ emailAddress: { address: 'x@y.hu' } }] }, body: { Comment: 'V' } }
+    expect(gateDecision('mcp__ms365__create-reply-draft', strayMsg, () => false))
+      .toMatchObject({ deny: true, kind: 'unverified-recipient', addresses: ['x@y.hu'] })
+  })
+
+  it('a flat to next to the Graph shape is ambiguous, not a Graph-only read (fail-closed)', () => {
+    // One reader would hide the other's addresses, so neither may be trusted.
+    const mixed = { to: 'x@y.hu', body: { subject: 'Targy', toRecipients: [{ emailAddress: { address: 'x@y.hu' } }] } }
+    expect(gateDecision('mcp__ms365__create-draft-email', mixed, verifiable))
+      .toMatchObject({ deny: true, kind: 'unparseable-recipient' })
+  })
+
+  it('an address with a display name around it is not one bare address (fail-closed)', () => {
+    const named = { body: { toRecipients: [{ emailAddress: { address: '"x@y.hu" <z@example.org>' } }] } }
+    expect(gateDecision('mcp__ms365__create-draft-email', named, verifiable))
+      .toMatchObject({ deny: true, kind: 'unparseable-recipient' })
+  })
+
+  // SECURITY review on MS365MAIL1024, round 2: the Graph read is chosen by the
+  // tool NAME, not by the payload's shape. A non-Graph draft tool with an OBJECT
+  // body therefore keeps the flat checks -- an object body must not turn the
+  // flat address check into a Graph read (or a "conflict") it never was.
+  it('a non-Graph draft with an object body keeps the flat ledger check', () => {
+    const d = gateDecision('mcp__x__create_draft', { to: 'x@y.hu', body: { a: 1 } }, () => false)
+    expect(d).toMatchObject({ deny: true, kind: 'unverified-recipient', addresses: ['x@y.hu'] })
+  })
+
+  // ...and a Graph draft whose top-level recipient field is not even a list is
+  // read (and refused) by NAME: no Graph shape is needed to enter the read.
+  it('a Graph draft with a top-level toRecipients that is an object is unparseable', () => {
+    const d = gateDecision('mcp__ms365__create-draft-email', { toRecipients: { a: 1 } }, verifiable)
+    expect(d).toMatchObject({ deny: true, kind: 'unparseable-recipient' })
   })
 })

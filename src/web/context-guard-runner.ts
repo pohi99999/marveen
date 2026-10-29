@@ -4,7 +4,7 @@ import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { hardRestartMarveenChannels, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS, markAgentRestartPending } from './channel-monitor.js'
 import { shouldDeferForRecentRespawn } from './stuck-tool-call-watcher.js'
-import { listAgentNames, listAllAgentNames, agentDir, readAgentModel, readAgentRemoteHost } from './agent-config.js'
+import { listAgentNames, listAllAgentNames, agentDir, readAgentModel, readAgentRemoteHost, readAgentWorksourceChannel } from './agent-config.js'
 import { configDirFor } from './main-transcript-root.js'
 import {
   agentRunState,
@@ -16,23 +16,26 @@ import {
   clearSaturationBannerOverride,
 } from './agent-process.js'
 import { sendSystemDirective } from './system-directive.js'
+import { deliverWhenReady, RESUME_DELIVERY_OPTIONS } from './resume-delivery.js'
 import { notifyChannel } from '../notify.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
-import { detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError } from '../pane-state.js'
-import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir } from './active-model.js'
+import { detectPaneState, hasBackgroundWork, paneShowsContextSaturation, paneShowsContextSaturationHardError } from '../pane-state.js'
+import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir, readTranscriptTailFromProjectDir } from './active-model.js'
 import { readContextGuardConfig } from './context-guard-store.js'
 import { sampleShadow } from './context-guard-shadow.js'
+import { setDeliveryHoldProbe, type DeliveryHold } from './delivery-hold.js'
 import {
   readPendingResumes,
   writePendingResumes,
   restorableResumeStates,
+  PENDING_RESUME_TTL_MS,
   type PendingResume,
   type PendingResumeMap,
 } from './context-guard-resume-store.js'
 import { localMidnightMs } from '../auto-restart.js'
 import { ownerQuestionHolds } from './open-question.js'
 import { recordRescueFailure, clearRescueFailures } from './rescue-failure-tracker.js'
-import { createAgentMessage } from '../db.js'
+import { createAgentMessage, countRestartQueueState } from '../db.js'
 import {
   decideGuard,
   contextLimitForModel,
@@ -40,15 +43,23 @@ import {
   handoffStaleMinutes,
   applyDailyHandoffSkipSweep,
   DAILY_HANDOFF_REASON_PREFIX,
+  HANDOFF_RESEND_REASON_PREFIX,
   IDLE_FLUSH_REASON_PREFIX,
   INITIAL_GUARD_STATE,
+  READY_TIMEOUT_MS,
+  RESUME_GIVE_UP_REASON,
+  BUSY_OVERDUE_REASON_PREFIX,
   STALE_REFRESH_REASON_PREFIX,
   SATURATION_CREDIBLE_MIN_PCT,
   saturationBannerCredible,
+  usageLimitEvidenceFromTranscript,
+  usageLimitVerdict,
+  USAGE_LIMIT_MAX_PARK_MS,
   type GuardState,
   type HandoffStaleness,
   type GuardInputs,
 } from '../context-guard.js'
+import { whileNotFrozen } from './fleet-freeze.js'
 
 // Fleet context guard (kanban #81): acts BEFORE a session drowns in its own
 // context. Sweep every agent (main included) every five minutes; at actPct ask the
@@ -119,9 +130,21 @@ function dropPendingResume(name: string, why: string): void {
 export function restorePendingResumes(nowMs: number): string[] {
   pendingResumes = readPendingResumes()
   const { live, expired } = restorableResumeStates(pendingResumes, nowMs)
+  let clamped = false
   for (const [name, st] of live) {
     if (!guardStates.has(name)) guardStates.set(name, st)
+    // Clamp a future restartedAtMs ONCE, here, with the same rule
+    // restorableResumeStates applied to the deadline, and persist it. Clamping
+    // per sweep instead would slide the TTL edge forward on every sweep while
+    // the clock stays behind the stamp, so the in-memory park would outlive the
+    // deadline this restore just set.
+    const entry = pendingResumes[name]
+    if (entry && entry.restartedAtMs > nowMs) {
+      pendingResumes = { ...pendingResumes, [name]: { ...entry, restartedAtMs: nowMs } }
+      clamped = true
+    }
   }
+  if (clamped && expired.length === 0) persistPendingResumes()
   if (expired.length > 0) {
     for (const name of expired) {
       logger.warn(
@@ -165,6 +188,12 @@ const remoteSkipLogged = new Set<string>()
 // ~1150 lines a day into a log nobody then reads. Same idiom as
 // remoteSkipLogged above.
 const bannerMismatchLogged = new Set<string>()
+// Usage-limit parking state per agent: 'limited' while
+// parked, or 'expired:<sinceMs>' once an episode outlived
+// USAGE_LIMIT_MAX_PARK_MS. A limited session stays limited for hours and the
+// sweep sees it every five minutes, so the log lines are emitted on the state
+// change only, like bannerMismatchLogged above.
+const usageLimitLogged = new Map<string, string>()
 
 // Per-agent observed-context high-water mark, persisted across dashboard
 // restarts. calibrateLimit alone is memoryless: the moment the guard
@@ -188,11 +217,13 @@ function readHighwater(): HighwaterMap {
 
 let highwater: HighwaterMap | null = null
 
-function observedHighwater(name: string, model: string, observedNow: number): number {
+// `learn` false reads the stored mark without raising it: a status read must
+// not change the thing it reports on, so only the guard's sweep writes.
+function observedHighwater(name: string, model: string, observedNow: number, learn: boolean): number {
   if (highwater === null) highwater = readHighwater()
   const entry = highwater[name]
   const prior = entry && entry.model === model ? entry.tokens : 0
-  if (observedNow > prior) {
+  if (learn && observedNow > prior) {
     highwater[name] = { model, tokens: observedNow }
     try { writeFileSync(HIGHWATER_PATH, JSON.stringify(highwater, null, 2)) }
     catch (err) { logger.warn({ err }, 'context-guard: highwater persist failed') }
@@ -283,6 +314,42 @@ export function staleRefreshHandoffPrompt(staleMinutes: number, handoffPath: str
   )
 }
 
+/**
+ * The queue sentence of the restart notice. The notice used to tell the main
+ * agent that messages sent to the old session "may have been lost -- check and
+ * resend them", without measuring anything. Resending is usually wrong: pending
+ * rows are delivered into the fresh session once it is ready, and the resume
+ * prompt tells the fresh session to re-read the restart window itself, so a
+ * resend lands as a duplicate in the very session that was just restarted to
+ * get its context down. The sentence now carries the counts instead; the rows
+ * the router will not retry are the failed ones. Exported so a test pins it.
+ */
+export function restartNoticeQueueText(queue: { pending: number; failed: number } | null): string {
+  if (queue === null) {
+    return ' A sor allapotat NEM tudtam megmerni -- ellenorizd kezzel, mielott barmit ujrakuldenel.'
+  }
+  return ` A sor a restart pillanataban: ${queue.pending} pending, ${queue.failed} failed (utolso ora).` +
+    (queue.failed > 0
+      ? ` A ${queue.failed} failed sort a router mar NEM probalja ujra -- ezeket nezd meg (a 'result' mezo mondja meg, miert buktak).`
+      : '') +
+    (queue.pending > 0
+      ? ` A ${queue.pending} pending sort a router a friss sessionbe kezbesiti, amint az kesz -- NE kuldd ujra, mert duplikalodik.`
+      : '') +
+    ' A regi sessionbe az utolso percekben kezbesitett uzeneteket a resume prompt alapjan a friss session maga olvassa vissza -- ezeket se kuldd ujra.' +
+    // Both promises need the resume to happen; a ready-timeout gives it up, and then nothing re-reads.
+    ' Mindez akkor all, ha a friss session elindul es megkapja a resume promptot; ha nem, a sort es ezeket az uzeneteket kezzel nezd meg.'
+}
+
+/** Counts the queue for the restart notice; a failed count yields null, not a guess. */
+export function restartQueueAtRestart(name: string): { pending: number; failed: number } | null {
+  try {
+    return countRestartQueueState(name, Math.floor(Date.now() / 1000) - 3600)
+  } catch (err) {
+    logger.warn({ err, name }, 'context-guard: queue count for the restart notice failed')
+    return null
+  }
+}
+
 export function resumePrompt(
   name: string,
   handoffPath: string,
@@ -349,6 +416,31 @@ export function resumePrompt(
   )
 }
 
+/** Operator notice for a resume give-up. Exported so the wording is pinned by a test. */
+export function resumeGiveUpNotice(name: string, handoffPath: string): string {
+  return `[CONTEXT-GUARD] A(z) "${name}" agent restartja utan a session ${READY_TIMEOUT_MS / 60_000} percen belul nem lett kesz, ` +
+    'ezert a folytatasi (resume) prompt NEM ment ki. Az agent vagy nem fut, vagy nem fogad promptot, vagy a handoff nelkul indult el. ' +
+    `Nezd meg a pane-t; ha all, add be neki kezzel a handoffot: ${handoffPath}`
+}
+
+/**
+ * The resume give-up is decided as action 'none', and the none-branch logs
+ * nothing, so the restarted agent could sit without its handoff pointer while
+ * nobody knew the resume path had failed. Warn, and tell a human through the
+ * same sinks as the rescue-failure alert: the main agent's own inbox is not a
+ * sink for an alert about the main agent.
+ */
+export async function reportResumeGiveUp(name: string): Promise<void> {
+  logger.warn({ name }, 'context-guard: resume give-up -- the restarted session never became ready, resume prompt not sent')
+  const text = resumeGiveUpNotice(name, handoffPathFor(name))
+  try {
+    if (name === MAIN_AGENT_ID) await notifyChannel(text)
+    else createAgentMessage(name, MAIN_AGENT_ID, text, 'context-guard resume give-up notice')
+  } catch (err) {
+    logger.error({ err, name }, 'context-guard: FAILED TO RAISE the resume give-up notice')
+  }
+}
+
 /** Raw observed context size (tokens) for the idle-flush tier's absolute threshold. */
 export function measureContextTokens(name: string): number | null {
   const tokens = readContextTokensFromProjectDir(workingDirFor(name), configDirFor(name))
@@ -367,7 +459,7 @@ export function measureIdleMs(name: string, nowMs: number): number | null {
   return Math.max(0, nowMs - mtime)
 }
 
-export function measurePct(name: string, cfgLimit: number | null): number | null {
+export function measurePct(name: string, cfgLimit: number | null, opts: { learn?: boolean } = {}): number | null {
   const workingDir = workingDirFor(name)
   const configDir = configDirFor(name)
   const tokens = readContextTokensFromProjectDir(workingDir, configDir)
@@ -385,9 +477,125 @@ export function measurePct(name: string, cfgLimit: number | null): number | null
     // Calibrate against the persisted per-(agent, model) maximum, not just
     // the live reading: a fresh post-restart session must not un-learn a
     // window the previous session already proved (see HighwaterMap above).
-    limit = calibrateLimit(observedHighwater(name, model, tokens), contextLimitForModel(model))
+    limit = calibrateLimit(observedHighwater(name, model, tokens, opts.learn !== false), contextLimitForModel(model))
   }
   return tokens / limit
+}
+
+// ---------------------------------------------------------------------------
+// Immediate resume delivery
+// ---------------------------------------------------------------------------
+//
+// The sweep ran every 300 s and was the only thing that looked at a restarted
+// pane, so the resume landed 4.8-5.1 minutes after the restart although the
+// pane is ready ~11 s after the start (measured on a live install). The
+// restart now starts a deliverWhenReady loop (first look 25 s, then 10/20/30 s
+// backoff, sends only to an idle pane and aborts on a busy one). The sweep
+// stays as the backstop: a dashboard that restarts re-arms the loop from the
+// persisted obligation, and a loop that ran out of its deadline leaves the rest
+// to the sweep.
+//
+// Exactly one prompt per restart: `resumeSending` is claimed synchronously by
+// whichever of the two (loop, sweep) reaches its send first, and a delivered
+// resume drops the obligation, which ends the other.
+
+/** Agents with a resume send in flight (loop or sweep). */
+const resumeSending = new Set<string>()
+/** agent -> restartedAtMs of the obligation its running loop serves. */
+const resumeLoops = new Map<string, number>()
+
+function resumeTargetRunning(name: string): boolean {
+  return name === MAIN_AGENT_ID ? capturePane(sessionFor(name)) !== null : agentRunState(name) === 'running'
+}
+
+/** A prompt typed into a usage-limited session is answered by the limit and
+ *  lost. Only the NEW session's refusals count (`restartedAtMs`, as in the
+ *  sweep's await-ready verdict): the newest transcript can still be the
+ *  replaced session's until the fresh one writes its first entry. */
+function resumeTargetLimited(name: string, nowMs: number, restartedAtMs: number): boolean {
+  const tail = readTranscriptTailFromProjectDir(workingDirFor(name), configDirFor(name))
+  return usageLimitVerdict(usageLimitEvidenceFromTranscript(tail ?? ''), nowMs, restartedAtMs).limited
+}
+
+/** Same state decideGuard hands back on inject-resume. */
+function cooldownStateAfterResume(name: string, nowMs: number): GuardState {
+  return {
+    phase: 'cooldown',
+    handoffMtimeAtRequest: null,
+    deadlineMs: 0,
+    cooldownUntilMs: nowMs + readContextGuardConfig(name).cooldownMinutes * 60_000,
+    saturatedStreak: 0,
+    staleRefreshCount: 0,
+    handoffStaleMinutes: null,
+  }
+}
+
+/** Settle the obligation this loop served: cooldown state first (it can throw
+ *  on a config read), then drop. Only while the obligation is still THIS one and
+ *  the machine still waits for it -- anything else moved on without us. */
+function settleResumeLoop(name: string, token: number, why: string): void {
+  if (pendingResumes[name]?.restartedAtMs !== token) return
+  const next = guardStates.get(name)?.phase === 'await-ready' ? cooldownStateAfterResume(name, Date.now()) : null
+  dropPendingResume(name, why)
+  if (next) guardStates.set(name, next)
+}
+
+/**
+ * Start the delivery loop for the agent's persisted resume obligation.
+ * Idempotent per obligation. Fire-and-forget; every outcome is logged.
+ */
+function startResumeDelivery(name: string): void {
+  const entry = pendingResumes[name]
+  if (!entry || resumeLoops.get(name) === entry.restartedAtMs) return
+  const token = entry.restartedAtMs
+  resumeLoops.set(name, token)
+  const session = sessionFor(name)
+  // Time already spent since the restart (a dashboard restart re-arms an old
+  // obligation) counts toward the first look.
+  const spentMs = Math.max(0, Date.now() - token)
+  void deliverWhenReady(
+    name,
+    session,
+    () => {
+      const e = pendingResumes[name] ?? entry
+      return resumePrompt(name, handoffPathFor(name), handoffMtime(name) !== null, e.handoffStaleMinutes)
+    },
+    { ...RESUME_DELIVERY_OPTIONS, firstMs: Math.max(0, RESUME_DELIVERY_OPTIONS.firstMs - spentMs), deadlineMs: READY_TIMEOUT_MS },
+    {
+      // Cheapest probe first: the transcript tail is read only for a pane that
+      // already reads ready, so a long busy spell costs captures, not file reads.
+      isReady: async (target) =>
+        resumeTargetRunning(name) && await isSessionReadyForPrompt(target) && !resumeTargetLimited(name, Date.now(), token),
+      send: async (target, text) => {
+        if (resumeSending.has(name)) return 'skipped-locked'
+        resumeSending.add(name)
+        try {
+          // GUARDHITELES903 anchor, and 'abort': a busy pane gets nothing.
+          const outcome = await sendSystemDirective(name, target, text, null, { onBusyTimeout: 'abort' })
+          // Settle BEFORE the claim is released: the loop's .then runs a few
+          // microtasks later, and a sweep in that gap would see no claim and a
+          // still-owed obligation in await-ready, and send a second resume.
+          if (outcome === 'sent') settleResumeLoop(name, token, `resume delivered ${Math.round((Date.now() - token) / 1000)}s after the restart`)
+          return outcome
+        } finally {
+          resumeSending.delete(name)
+        }
+      },
+      stillOwed: () => pendingResumes[name]?.restartedAtMs === token && guardStates.get(name)?.phase === 'await-ready',
+    },
+  ).then((res) => {
+    // 'sent' was settled inside send, before the claim was released.
+    if (res.status === 'error') {
+      // Not retried (the text may have partly landed), same as the sweep path.
+      settleResumeLoop(name, token, 'resume delivery threw')
+    }
+    // 'deadline' / 'withdrawn': the sweep owns what is left (ready timeout, or
+    // the obligation is already settled).
+  }).catch((err) => {
+    logger.warn({ err, name }, 'context-guard: resume delivery loop failed -- the sweep stays as backstop')
+  }).finally(() => {
+    if (resumeLoops.get(name) === token) resumeLoops.delete(name)
+  })
 }
 
 async function performRestart(name: string): Promise<void> {
@@ -420,9 +628,43 @@ async function performRestart(name: string): Promise<void> {
     // rescue reported success while the pane still held the saturated session
     // it was supposed to drop. Measured twice on levente, 2026-08-31 19:10 and
     // 19:41; the second restart WAS the first one's unnoticed failure.
-    const res = await restartAgentProcess(name, { fresh: true })
+    // ownsResume: this runner delivers the first prompt itself, so the generic
+    // recovery brief stays out and the fresh session gets ONE prompt, not two.
+    const res = await restartAgentProcess(name, { fresh: true, ownsResume: true })
     if (!res.ok) throw new Error(res.error ?? 'agent restart failed')
   }
+}
+
+/** Is this agent fed through the worksource queue (it redelivers unacknowledged items)? */
+function onWorksource(name: string): boolean {
+  try { return readAgentWorksourceChannel(name) } catch { return false }
+}
+
+/**
+ * The "what may have been lost" sentence of the restart notice. The generic
+ * line tells the supervisor that prompts sent to the old session may be gone
+ * and to send them again. For an idle-flush restart of
+ * an agent on the worksource queue that is false twice over: it had nothing in
+ * flight, and the queue redelivers whatever it had not acknowledged. The
+ * supervisor following the generic line sent three needless status messages
+ * (~3.1M input tokens, measured 2026-09-29), so that case gets its own text.
+ * Every other case, and any agent NOT on worksource, gets the queue at restart
+ * time instead (restartNoticeQueueText): a resend advice would duplicate rows
+ * the router still delivers.
+ */
+export function restartLossLine(
+  idleFlush: boolean,
+  worksource: boolean,
+  idleMinutes: number,
+  queue: { pending: number; failed: number } | null,
+): string {
+  if (worksource && idleFlush) {
+    return (
+      `. Tetlen volt (>= ${idleMinutes} perc), folyamatban levo munka nem volt; a nyugtazatlan tetelek a sorbol ujrakezbesulnek; ` +
+      'a resume magatol megy -- NE kuldj allapot-uzenetet es NE kuldj ujra semmit.'
+    )
+  }
+  return '.' + restartNoticeQueueText(queue)
 }
 
 async function checkAgent(name: string, nowMs: number): Promise<void> {
@@ -470,6 +712,57 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
   // (error banner, modal, unknown surface) is treated as NOT busy, so a
   // wedged pane still gets the restart that is its only way out.
   const paneState = pane !== null ? detectPaneState(pane) : 'unknown'
+
+  // Usage limit: every tier parks while the session is
+  // CURRENTLY refused, and that includes await-ready -- a resume prompt typed
+  // into a limited session is lost. Decided from the transcript, never from
+  // the pane banner, which stays up long after the limit lifts (see
+  // USAGE_LIMIT_REASON_PREFIX). Cooldown decides nothing, so it reads nothing.
+  //
+  // Nor does an agent whose only armed mechanism is the saturation net, outside
+  // the two handoff phases: the net is never parked, and the idle phase has no
+  // other tier the verdict could hold back, so the tail read (up to
+  // TRANSCRIPT_TAIL_BYTES per agent per sweep) would buy nothing. The handoff
+  // phases still read it: a sequence can outlive a config change that disarmed
+  // its tier, and await-ready parks the resume for any agent.
+  const onlyNetArmed = !cfg.enabled && !cfg.idleFlushEnabled && !cfg.dailyHandoffEnabled
+  const usageCanMatter = !onlyNetArmed || state.phase === 'await-handoff' || state.phase === 'await-ready'
+  let usage: ReturnType<typeof usageLimitVerdict> | null = null
+  if (running && state.phase !== 'cooldown' && usageCanMatter) {
+    const tail = readTranscriptTailFromProjectDir(workingDirFor(name), configDirFor(name))
+    if (tail === null) {
+      // Absent or unreadable: read as "not limited", i.e. the old behaviour.
+      logger.debug({ name, phase: state.phase }, 'context-guard: transcript tail unreadable or absent -- usage-limit check sees no refusal')
+    }
+    // In await-ready only the NEW session's refusals count (see the
+    // sessionStartMs note at usageLimitVerdict).
+    const sessionStartMs = state.phase === 'await-ready' ? pendingResumes[name]?.restartedAtMs ?? null : null
+    usage = usageLimitVerdict(usageLimitEvidenceFromTranscript(tail ?? ''), nowMs, sessionStartMs)
+  }
+  if (usage !== null) {
+    const prev = usageLimitLogged.get(name)
+    if (usage.limited) {
+      if (prev !== 'limited') {
+        usageLimitLogged.set(name, 'limited')
+        logger.info(
+          { name, session, phase: state.phase, sinceMs: usage.evidence.sinceMs, resetsAtMs: usage.evidence.resetsAtMs, refusal: usage.evidence.text },
+          'context-guard: session is usage-limited (newest transcript turn refused) -- handoff, flush, daily, restart and resume parked until it lifts',
+        )
+      }
+    } else if (usage.reason === 'park-expired' && usage.evidence !== null) {
+      const key = `expired:${usage.evidence.sinceMs}`
+      if (prev !== key) {
+        usageLimitLogged.set(name, key)
+        logger.warn(
+          { name, session, phase: state.phase, sinceMs: usage.evidence.sinceMs, maxParkMs: USAGE_LIMIT_MAX_PARK_MS, refusal: usage.evidence.text },
+          'context-guard: usage-limit parking exceeded its time bound -- no longer trusting the refusal, normal guard logic resumes',
+        )
+      }
+    } else if (prev !== undefined) {
+      usageLimitLogged.delete(name)
+      logger.info({ name, session, phase: state.phase, reason: usage.reason }, 'context-guard: usage limit lifted -- normal guard logic resumes')
+    }
+  }
 
   // The pane banner and the calibrated measurement are TWO signals about one
   // fact, and this sweep is the only place that holds both. Reconciling them
@@ -537,6 +830,9 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     pct: cfg.enabled ? measuredPct : null,
     paneIdle: paneState === 'idle',
     paneBusy: paneState === 'busy',
+    // IDLEFLUSHVETO812: only a pane we actually captured can say "no background
+    // work"; not captured = unknown, and unknown must not let a flush through.
+    paneBackgroundWork: pane === null ? true : hasBackgroundWork(pane),
     sessionReady,
     handoffMtime: needPct ? handoffMtime(name) : null,
     // Already reconciled with the measurement above, so decideGuard itself
@@ -555,6 +851,15 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     // open-question skip: dailyHandoffSkipSweep decides all three,
     // applyDailyHandoffSkipSweep applies the record and the skip flag.
     dailyHandoffDue: applyDailyHandoffSkipSweep(lastDailyHandoff, dailySkipped, name, cfg, running && state.phase === 'idle', localMidnightMs(nowMs), nowMs, () => dailyQuestionOpen(name), () => logger.info({ name }, 'context-guard: daily handoff skipped today -- open inbound question (the next slot fires regardless)')),
+    usageLimited: usage?.limited === true,
+    // Same edge as restorableResumeStates, so the in-memory park and the
+    // persisted obligation end together. No clamp here: restartedAtMs was
+    // clamped once when it was recorded (Date.now()) or restored
+    // (restorePendingResumes), and a per-sweep Math.min(.., nowMs) would slide
+    // the edge along with a clock that stepped backwards.
+    pendingResumeExpiresAtMs: pendingResumes[name]
+      ? pendingResumes[name].restartedAtMs + PENDING_RESUME_TTL_MS
+      : null,
   }
 
   const decision = decideGuard(state, inputs, cfg)
@@ -610,6 +915,8 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     dropPendingResume(name, decision.reason)
   }
   if (decision.action === 'none') {
+    if (decision.reason === RESUME_GIVE_UP_REASON) await reportResumeGiveUp(name)
+    if (decision.reason.startsWith(BUSY_OVERDUE_REASON_PREFIX)) logger.warn({ name, reason: decision.reason }, 'context-guard: pane still busy far past the handoff deadline -- restart stays deferred')
     // Idle-flush non-decisions carry the measurement that blocked them
     // ("quiet for only 4m of 20m"), which is the only way to see the tier
     // failing to reach its threshold. It matters because the idle clock is the
@@ -628,6 +935,20 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
   const pctRound = inputs.pct !== null ? Math.round(inputs.pct * 100) : null
   logger.info({ name, action: decision.action, reason: decision.reason, pct: pctRound, bannerRaw: paneSaturatedRaw, bannerTrusted: paneSaturatedTrusted, measuredPct: measuredPct !== null ? Math.round(measuredPct * 100) : null }, 'context-guard: acting')
 
+  // A re-send after a usage limit is worded exactly like the request the limit
+  // refused, so the prompt is picked by the ORIGINAL reason. decision.reason is
+  // still what the daily-slot bookkeeping above saw, so a re-sent daily request
+  // does not count as a new slot. decideGuard emits it at most once per
+  // parking episode, so this line is once per episode too.
+  const resend = decision.reason.startsWith(HANDOFF_RESEND_REASON_PREFIX)
+  const promptReason = resend ? (state.handoffRequestReason ?? '') : decision.reason
+  if (resend) {
+    logger.info(
+      { name, session, originalReason: state.handoffRequestReason ?? null, deadlineMs: decision.nextState.deadlineMs },
+      'context-guard: usage limit lifted during await-handoff with no handoff written -- re-sending the refused handoff request, timeout window restarted',
+    )
+  }
+
   try {
     switch (decision.action) {
       case 'request-handoff':
@@ -638,16 +959,16 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
         await sendSystemDirective(
           name,
           session,
-          decision.reason.startsWith(STALE_REFRESH_REASON_PREFIX)
+          promptReason.startsWith(STALE_REFRESH_REASON_PREFIX)
             // The handoff exists but went stale while we waited for an idle
             // pane; ask for a refresh, not a first write.
             ? staleRefreshHandoffPrompt(((sm) => typeof sm === 'number' ? sm : 0)(handoffStaleMinutes(inputs)), handoffPathFor(name))
-            : decision.reason.startsWith(IDLE_FLUSH_REASON_PREFIX)
+            : promptReason.startsWith(IDLE_FLUSH_REASON_PREFIX)
               // pct is null whenever the idle tier runs without the proactive
               // tiers, so the alarming percentage-based prompt would read "~0%
               // -- critical". The idle tier states the token count it measured.
               ? idleFlushHandoffPrompt(inputs.contextTokens ?? 0, cfg.idleMinutes, handoffPathFor(name))
-              : decision.reason.startsWith(DAILY_HANDOFF_REASON_PREFIX)
+              : promptReason.startsWith(DAILY_HANDOFF_REASON_PREFIX)
                 // Same trap as the idle tier: pct is null for a daily-only
                 // agent, so the percentage prompt would announce "~0% --
                 // critical" at 04:00 to a session that is perfectly healthy.
@@ -684,6 +1005,7 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
             handoffStaleMinutes: decision.nextState.handoffStaleMinutes,
             reason: decision.reason,
           })
+          startResumeDelivery(name)
         } catch (err) {
           // guardStates was advanced to the post-restart phase BEFORE this
           // switch, so a failed rescue would otherwise be filed as a completed
@@ -744,10 +1066,12 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
             MAIN_AGENT_ID,
             `[CONTEXT-GUARD] Ujrainditottam a(z) "${name}" agentet -- ok: ${decision.reason}` +
             (pctRound !== null ? ` (kontextus ~${pctRound}%)` : '') +
-            `. A regi sessionbe az utolso percekben kuldott uzenetek/utasitasok ELVESZHETTEK -- ellenorizd es kuldd ujra oket.` +
+            // The idle-flush origin comes from the SEQUENCE state: decision.reason
+            // here is the restart's own ("handoff written"), never idle-flush.
+            restartLossLine(state.idleFlushSequence === true, onWorksource(name), cfg.idleMinutes, restartQueueAtRestart(name)) +
             (typeof decision.nextState.handoffStaleMinutes === 'number'
-              // The generic "messages may be lost" line invites the wrong
-              // conclusion when the real gap is the ARTIFACT: say explicitly
+              // The queue line alone invites the wrong conclusion when the
+              // real gap is the ARTIFACT: say explicitly
               // that the handoff does not cover the tail of the session.
               ? ` FIGYELEM: a HANDOFF.md ELAVULT -- az utolso ~${decision.nextState.handoffStaleMinutes} perc munkaja nincs benne, a friss session ezt a szakaszt az elo forrasokbol kapja meg.`
               : decision.nextState.handoffStaleMinutes === 'unknown'
@@ -771,6 +1095,13 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
         // measuring now would be meaningless (the old session is gone).
         // GUARDHITELES903: anchored like the handoff request -- the resume
         // prompt steers a fresh session's entire first turn.
+        // The immediate-delivery loop may be sending right now: one prompt only.
+        if (resumeSending.has(name)) {
+          guardStates.set(name, state)
+          logger.debug({ name }, 'context-guard: resume send already in flight (delivery loop) -- sweep leaves it')
+          break
+        }
+        resumeSending.add(name)
         let outcome: Awaited<ReturnType<typeof sendSystemDirective>>
         try {
           outcome = await sendSystemDirective(
@@ -783,6 +1114,8 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
           // the text already landed, and a second copy is worse than none.
           dropPendingResume(name, 'resume delivery threw')
           throw err
+        } finally {
+          resumeSending.delete(name)
         }
         if (outcome === 'sent') {
           dropPendingResume(name, 'resume delivered')
@@ -818,7 +1151,7 @@ export function getContextGuardStatus(): Array<{
     return {
       agent: name,
       phase: state?.phase ?? 'idle',
-      pct: cfg.enabled && !remote ? measurePct(name, cfg.limitTokens) : null,
+      pct: cfg.enabled && !remote ? measurePct(name, cfg.limitTokens, { learn: false }) : null,
       enabled: cfg.enabled,
       saturationRestart: cfg.saturationRestart,
       ...cooldownStatusExtra(state),
@@ -876,11 +1209,61 @@ export function getHardGuardPhase(name: string): string {
   return guardStates.get(name)?.phase ?? 'idle'
 }
 
+// The hold end already reported as lapsed, per agent: one warn per hold, not one
+// per router tick. One entry per agent, so it cannot grow with time.
+const lapsedHoldLogged = new Map<string, number>()
+
+function lapsed(name: string, phase: string, untilMs: number, nowMs: number): null {
+  if (lapsedHoldLogged.get(name) !== untilMs) {
+    lapsedHoldLogged.set(name, untilMs)
+    logger.warn({ name, phase, overdueMs: nowMs - untilMs }, 'context-guard: delivery hold lapsed past the phase deadline -- delivering to this agent again (fail-open)')
+  }
+  return null
+}
+
+/**
+ * The message router's delivery hold for this agent (delivery-hold.ts): from the
+ * handoff request until the fresh session has its resume prompt.
+ *
+ * - A resume prompt being typed right now holds, whatever the phase: the sweep's
+ *   inject-resume has already moved the state to cooldown when it sends, so this
+ *   is the one stretch the phase does not cover, and a message pasted now would
+ *   land in front of the resume. Bounded by how long a resume can be owed at all
+ *   (the obligation's restart time + PENDING_RESUME_TTL_MS + one sweep), which
+ *   covers both the in-run ready deadline and the longer one a restored
+ *   obligation gets: a send that never returns must not keep the inbox shut.
+ * - await-handoff and await-ready hold until the phase deadline plus one sweep.
+ *   The end is fixed by the deadline, never by `now`: a phase can outlast its
+ *   deadline (a deferral keeps await-handoff past it), and a hold renewed from
+ *   `now` on every look would last exactly as long as that does. Past it the hold
+ *   lapses, with one warn, and the agent's rows flow again (fail-open).
+ */
+export function contextGuardDeliveryHold(name: string, nowMs: number): DeliveryHold | null {
+  if (resumeSending.has(name)) {
+    const owed = pendingResumes[name]
+    // No owed resume while one is being sent should not happen; if it does, hold nothing.
+    if (!owed) return null
+    const untilMs = owed.restartedAtMs + PENDING_RESUME_TTL_MS + INTERVAL_MS
+    return nowMs < untilMs ? { phase: 'resume-sending', untilMs } : lapsed(name, 'resume-sending', untilMs, nowMs)
+  }
+  const st = guardStates.get(name)
+  if (!st || (st.phase !== 'await-handoff' && st.phase !== 'await-ready')) return null
+  const untilMs = st.deadlineMs + INTERVAL_MS
+  return nowMs < untilMs ? { phase: st.phase, untilMs } : lapsed(name, st.phase, untilMs, nowMs)
+}
+
 export function startContextGuardRunner(): NodeJS.Timeout {
+  // Before anything can put an agent into a restart sequence -- including the
+  // await-ready states re-armed just below.
+  setDeliveryHoldProbe(contextGuardDeliveryHold)
   // Before the first sweep can run, so an agent restarted by the
   // previous dashboard process is not re-armed at 'idle' and left without its
   // resume prompt.
-  try { restorePendingResumes(Date.now()) }
+  try {
+    // The re-armed obligations are delivered NOW, not at the first sweep 4.5
+    // minutes later.
+    for (const name of restorePendingResumes(Date.now())) startResumeDelivery(name)
+  }
   catch (err) { logger.warn({ err }, 'context-guard: pending-resume restore failed') }
   let tickRunning = false
   async function sweep() {
@@ -908,5 +1291,5 @@ export function startContextGuardRunner(): NodeJS.Timeout {
     }
   }
   setTimeout(sweep, INITIAL_DELAY_MS)
-  return setInterval(sweep, INTERVAL_MS)
+  return setInterval(whileNotFrozen('context-guard', sweep), INTERVAL_MS)
 }

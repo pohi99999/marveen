@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { existsSync, realpathSync } from 'node:fs'
+import { delimiter, join, sep } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
 
 export type PlatformType = 'macos' | 'linux-server' | 'linux-gui'
 
@@ -59,8 +59,31 @@ const KNOWN_BIN_DIRS = [
 // the known dir. That is the deterministic answer, and if some install location
 // deserves higher precedence, it belongs in KNOWN_BIN_DIRS where the decision is
 // visible, rather than depending on each caller's environment.
+//
+// One exception, and only one: a PATH entry under the OS temp dir is honoured FIRST. That is where a
+// test puts a fake binary (background-tasks-async-tmux, agent-terminal-liveness-async,
+// onboarding-auth-probe-async: mkdtemp + a fake tmux first on PATH), and no install lives there, so the
+// rule above is unchanged for every real binary. Without it those upstream tests (v1.45.0) silently ran
+// the REAL tmux and claude from the policy list against the live tmux server (measured 2026-10-29 on the
+// v1.45.0 trial merge: a test captured the main session's pane, another one started a claude in the
+// trial checkout).
+function tempDirPathCandidate(name: string): string | null {
+  const real = (p: string): string => { try { return realpathSync(p) } catch { return p } }
+  const tmp = real(tmpdir())
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue
+    const d = real(dir)
+    if (d !== tmp && !d.startsWith(tmp + sep)) continue
+    const candidate = join(dir, name)
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
 export function tryResolveFromPath(name: string): string | null {
   if (!/^[a-zA-Z0-9._-]+$/.test(name)) throw new Error('Invalid binary name: ' + name)
+  const fake = tempDirPathCandidate(name)
+  if (fake) return fake
   for (const dir of KNOWN_BIN_DIRS) {
     const candidate = join(dir, name)
     if (existsSync(candidate)) return candidate

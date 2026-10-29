@@ -16,6 +16,7 @@ import { detectReauthFromTranscript } from './reauth-transcript.js'
 import { loginSequence, literalKeyArgs, specialKeyArgs } from './tmux-keys.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { exactTmuxTarget } from '../tmux-target.js'
+import { whileNotFrozen } from './fleet-freeze.js'
 
 // Autonomous re-auth healer (Adam stability-fix #1, scoped 2026-06-03).
 //
@@ -621,5 +622,5 @@ export function startReauthHealer(): NodeJS.Timeout | null {
   }
 
   setTimeout(sweep, INITIAL_DELAY_MS)
-  return setInterval(sweep, PROBE_INTERVAL_MS)
+  return setInterval(whileNotFrozen('reauth-healer', sweep), PROBE_INTERVAL_MS)
 }

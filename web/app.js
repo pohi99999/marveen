@@ -388,6 +388,7 @@ function switchPage(pageId) {
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
   if (pageId === 'ideas') loadIdeasPage()
+  if (pageId === 'notes') loadNotesPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
   if (pageId === 'federation') loadFederationPage()
@@ -512,7 +513,7 @@ const NAV_I18N = {
   approvals: 'nav.approvals',
   docs: 'nav.docs', research: 'nav.research', status: 'nav.status',
   settings: 'nav.settings', vault: 'nav.vault', tokenUsage: 'nav.tokenUsage',
-  ideas: 'nav.ideas', federation: 'nav.federation', updates: 'nav.updates', costs: 'nav.costs',
+  ideas: 'nav.ideas', notes: 'nav.notes', federation: 'nav.federation', updates: 'nav.updates', costs: 'nav.costs',
 }
 
 function renderNav() {
@@ -1280,12 +1281,153 @@ function renderKanbanOngoing(cards) {
   }
 }
 
+// The owner's own queue, above the board and OUTSIDE every filter.
+//
+// Why it ignores the filters: this answers "what is the process waiting on me
+// for", which is a question about the person, not about the current view. A
+// queue that an unrelated project filter can silently empty would be worse
+// than no queue, because an empty strip reads as "nothing to do".
+//
+// Order: priority first (urgent > high > normal > low), then card number, so
+// the oldest card wins inside a priority. Done cards never appear.
+//
+// Two ways onto the strip: the owner's own cards, and any agent's card carrying
+// the "Rád vár" ("waiting on you") label -- the agent keeps the work, the owner
+// owes it a decision. Assignment alone missed most of that queue, because an
+// agent that needs an answer keeps its card. A card that is both appears once
+// (one filter pass over kanbanCards).
+//
+// The label is matched by name, not by id, so a re-created label (new id,
+// same name) still counts. Accents and case are folded because the label
+// editor accepts free text.
+const KANBAN_OWNER_QUEUE_LABEL = 'Rád vár'
+
+function kanbanNormalizeLabelName(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase()
+}
+
+function kanbanIsOnOwnerStrip(card, owner) {
+  if (card.status === 'done') return false
+  if (String(card.assignee || '').trim().toLowerCase() === owner.toLowerCase()) return true
+  const want = kanbanNormalizeLabelName(KANBAN_OWNER_QUEUE_LABEL)
+  return (card.labels || []).some((l) => kanbanNormalizeLabelName(l && l.name) === want)
+}
+
+function renderKanbanOwnerStrip() {
+  const el = document.getElementById('kanbanOwnerStrip')
+  if (!el) return
+  const owner = ownerAssigneeName()
+  if (!owner) { el.hidden = true; return }
+  const mine = kanbanCards
+    .filter((c) => kanbanIsOnOwnerStrip(c, owner))
+    .sort((a, b) => {
+      const pa = KANBAN_PRIORITY_ORDER.indexOf(a.priority || 'normal')
+      const pb = KANBAN_PRIORITY_ORDER.indexOf(b.priority || 'normal')
+      if (pa !== pb) return pa - pb
+      return (a.seq ?? Infinity) - (b.seq ?? Infinity)
+    })
+  if (mine.length === 0) { el.hidden = true; return }
+  el.hidden = false
+
+  const collapsed = localStorage.getItem('marveen.kanbanOwnerStripCollapsed') === '1'
+  el.classList.toggle('collapsed', collapsed)
+  el.innerHTML = ''
+
+  const head = document.createElement('div')
+  head.className = 'kanban-owner-strip-head'
+  // The owner's portrait belongs here, because this strip is the ONLY place
+  // the owner's open cards are drawn (see kanbanHideFromLanes).
+  const face = document.createElement('span')
+  face.className = 'kanban-team-avatar owner kanban-owner-strip-avatar'
+  face.textContent = (owner[0] || '?').toUpperCase()
+  kanbanDecorateAvatar(face, owner)
+  const label = document.createElement('span')
+  label.textContent = t('kanban.owner_strip.title')
+  // The owner's nickname goes here too: this strip replaces the owner's lane,
+  // and the lane header is the other place a nickname is drawn.
+  const ownerNick = kanbanSwimlaneMeta(owner).nickname
+  const nick = document.createElement('span')
+  nick.className = 'kanban-nickname'
+  if (ownerNick) nick.textContent = ownerNick
+  const count = document.createElement('span')
+  count.className = 'kanban-owner-strip-count'
+  count.textContent = mine.length
+  const toggle = document.createElement('span')
+  toggle.className = 'kanban-owner-strip-toggle'
+  toggle.textContent = collapsed ? t('kanban.owner_strip.show') : t('kanban.owner_strip.hide')
+  head.append(face, label, nick, count, toggle)
+  head.addEventListener('click', () => {
+    const now = !el.classList.contains('collapsed')
+    localStorage.setItem('marveen.kanbanOwnerStripCollapsed', now ? '1' : '0')
+    renderKanbanOwnerStrip()
+  })
+  el.appendChild(head)
+
+  // Three tiers, urgent on top, each with its own colour: one chip row in
+  // priority order still made the owner read every dot to find what was
+  // urgent. The tier comes from the priority field: urgent+high = urgent,
+  // normal = when I have time, low = can wait.
+  const groups = document.createElement('div')
+  groups.className = 'kanban-owner-strip-groups'
+  const tierOf = (c) => (c.priority === 'urgent' || c.priority === 'high') ? 'urgent' : (c.priority === 'low' ? 'parked' : 'later')
+  for (const tier of ['urgent', 'later', 'parked']) {
+    const cards = mine.filter((c) => tierOf(c) === tier)
+    if (cards.length === 0) continue
+    const group = document.createElement('div')
+    group.className = 'kanban-owner-strip-group tier-' + tier
+    const gh = document.createElement('div')
+    gh.className = 'kanban-owner-strip-group-head'
+    gh.textContent = t('kanban.owner_strip.tier_' + tier) + ' · ' + cards.length
+    const items = document.createElement('div')
+    items.className = 'kanban-owner-strip-items'
+    group.append(gh, items)
+    groups.appendChild(group)
+    for (const card of cards) {
+      const chip = document.createElement('div')
+      chip.className = 'kanban-owner-strip-item'
+      chip.title = card.title
+      const dot = document.createElement('span')
+      dot.className = 'dot ' + (card.priority || 'normal')
+      const seq = document.createElement('span')
+      seq.className = 'seq'
+      seq.textContent = card.seq != null ? '#' + card.seq : ''
+      const title = document.createElement('span')
+      title.className = 'title'
+      title.textContent = card.title
+      chip.append(dot, seq, title)
+      // A labelled card stays with its agent; the chip says whose it is, so the
+      // owner knows who is waiting on the answer. Their own cards carry no marker.
+      const raw = String(card.assignee || '').trim()
+      if (raw && raw.toLowerCase() !== owner.toLowerCase()) {
+        const m = kanbanAssignees.find((a) => a.name.toLowerCase() === raw.toLowerCase())
+        const name = m ? (m.displayName || m.name) : raw
+        const who = document.createElement('span')
+        who.className = 'who'
+        const av = document.createElement('span')
+        av.className = 'kanban-team-avatar kanban-owner-strip-who-avatar ' + (m ? m.type : 'unknown')
+        av.textContent = (name[0] || '?').toUpperCase()
+        if (m) kanbanDecorateAvatar(av, m.name)
+        const nm = document.createElement('span')
+        nm.className = 'who-name'
+        nm.textContent = name
+        who.append(av, nm)
+        chip.appendChild(who)
+        chip.title = card.title + ' (' + name + ')'
+      }
+      chip.addEventListener('click', () => showCardDetail(card))
+      items.appendChild(chip)
+    }
+  }
+  el.appendChild(groups)
+}
+
 function renderKanban() {
   const cardById = new Map(kanbanCards.map(c => [c.id, c]))
 
   renderKanbanColumnChips()
   renderKanbanQuickFilters()
   renderKanbanSearchHint()
+  renderKanbanOwnerStrip()
 
   // Determine which top-level cards are visible under current filters.
   const visibleCardIds = new Set()
@@ -1406,7 +1548,82 @@ function kanbanSwimlaneMeta(key) {
   if (key === '__unassigned__') return { label: t('kanban.unassigned'), avatarClass: 'unknown', avatarChar: '?' }
   const match = kanbanAssignees.find(a => a.name === key)
   const label = match ? (match.displayName || match.name) : key
-  return { label, avatarClass: match ? match.type : 'unknown', avatarChar: (label[0] || '?').toUpperCase() }
+  return {
+    label,
+    // The character name behind the portrait, from store/team-nicknames.json.
+    // Empty when nobody set one, and the lane then shows the plain name.
+    nickname: (match && match.nickname) ? match.nickname : '',
+    avatarClass: match ? match.type : 'unknown',
+    avatarChar: (label[0] || '?').toUpperCase(),
+  }
+}
+
+// === Character portraits on the board ===
+//
+// Each lane head (and the owner strip) shows the person's portrait over the
+// coloured circle with the first letter of the name.
+//
+// The image is served by the SAME endpoints the agents page already uses, so no
+// new storage and no new upload path: agents/<name>/avatar.png for an agent,
+// store/marveen-avatar.png for the bot, store/owner-avatar.png for the owner.
+//
+// Why an <img> laid OVER the letter instead of asking first whether a picture
+// exists: the board would otherwise need a per-assignee "hasAvatar" round trip
+// before it could draw a single lane. The letter is rendered first and the image
+// covers it; if the file is missing the request 404s, the <img> removes itself,
+// and the letter is already underneath. One less thing that can be stale, and a
+// half-populated set of portraits degrades one lane at a time instead of all.
+function kanbanAvatarUrlFor(key) {
+  if (kanbanGroupBy === 'priority') return null
+  if (!key || key === '__unassigned__') return null
+  const m = kanbanAssignees.find(a => a.name === key)
+  if (!m) return null
+  if (m.type === 'owner') return '/api/marveen/owner-avatar' + avatarBust()
+  if (m.type === 'bot') return '/api/marveen/avatar' + avatarBust()
+  if (m.type === 'agent') return `/api/agents/${encodeURIComponent(m.name)}/avatar` + avatarBust()
+  return null
+}
+
+function kanbanDecorateAvatar(spanEl, key) {
+  if (!spanEl) return
+  const url = kanbanAvatarUrlFor(key)
+  if (!url) return
+  const img = document.createElement('img')
+  img.className = 'kanban-avatar-img'
+  img.alt = ''
+  img.addEventListener('error', () => img.remove())
+  img.src = url
+  spanEl.appendChild(img)
+}
+
+// The owner's cards live in the strip above the board, OUTSIDE every filter
+// (see renderKanbanOwnerStrip). Drawing them in a swimlane as well would show
+// the same card twice. The strip wins: it is always visible and no filter can
+// empty it.
+//
+// Only the owner's OPEN cards are dropped, not the lane itself. The strip
+// deliberately omits done cards, so if one is closed and still on the board,
+// the lane reappears carrying exactly what the strip does not show. Nothing can
+// fall between the two.
+//
+// The "Rád vár" label does NOT hide a card here, on purpose: a labelled agent
+// card shows in the strip AND in its agent's lane, because the lane is where
+// that agent's whole queue is read. Only the owner's cards live in one place.
+//
+// Only when the lanes ARE people (group by assignee). Grouped by priority, a
+// lane is a priority, not the owner's lane: hiding there would drop the
+// owner's most urgent card from the one view built to rank urgency (review of
+// #1860). Whether a card is the owner's open card at all is kanbanIsOwnerOpen,
+// for views that are about people whatever the board grouping.
+function kanbanIsOwnerOpen(card) {
+  if (card.status === 'done') return false
+  const owner = ownerAssigneeName()
+  if (!owner) return false
+  return String(card.assignee || '').trim().toLowerCase() === owner.toLowerCase()
+}
+
+function kanbanHideFromLanes(card) {
+  return kanbanGroupBy === 'assignee' && kanbanIsOwnerOpen(card)
 }
 
 function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
@@ -1415,7 +1632,10 @@ function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
 
   const presentKeys = new Set()
   for (const cards of Object.values(grouped)) {
-    for (const c of cards) presentKeys.add(kanbanSwimlaneKeyFor(c))
+    for (const c of cards) {
+      if (kanbanHideFromLanes(c)) continue
+      presentKeys.add(kanbanSwimlaneKeyFor(c))
+    }
   }
 
   const canonicalOrder = kanbanGroupBy === 'priority'
@@ -1434,7 +1654,7 @@ function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
     const laneCardsByStatus = {}
     let totalCount = 0
     for (const def of KANBAN_STATUS_DEFS) {
-      const cards = grouped[def.status].filter(c => kanbanSwimlaneKeyFor(c) === key)
+      const cards = grouped[def.status].filter(c => !kanbanHideFromLanes(c) && kanbanSwimlaneKeyFor(c) === key)
       laneCardsByStatus[def.status] = cards
       if (!kanbanHiddenColumns.has(def.status)) totalCount += cards.length
     }
@@ -1449,9 +1669,11 @@ function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
     header.innerHTML = `
       <span class="kanban-swimlane-avatar ${meta.avatarClass}">${escapeHtml(meta.avatarChar)}</span>
       <span class="kanban-swimlane-name">${escapeHtml(meta.label)}</span>
+      ${meta.nickname ? `<span class="kanban-nickname">${escapeHtml(meta.nickname)}</span>` : ''}
       <span class="kanban-swimlane-count">${totalCount}</span>
       <button class="kanban-swimlane-toggle" type="button" aria-expanded="${!collapsed}" title="${collapsed ? t('kanban.swimlane.expand') : t('kanban.swimlane.collapse')}">${collapsed ? '▶' : '▼'}</button>
     `
+    kanbanDecorateAvatar(header.querySelector('.kanban-swimlane-avatar'), key)
     header.querySelector('.kanban-swimlane-toggle').addEventListener('click', (e) => {
       e.stopPropagation()
       if (kanbanCollapsedLanes.has(key)) kanbanCollapsedLanes.delete(key)
@@ -1644,8 +1866,13 @@ function createCardEl(card, embeddedChildren = []) {
   // Display the persona displayName (falling back to the id) per #216, while
   // keeping the robust match above and the raw-name fallback chip below.
   const assigneeLabel = assignee ? (assignee.displayName || assignee.name) : ''
+  // The nickname rides along with the name here too. It matters most on the
+  // FLAT board: with no swimlanes there are no lane headers, so this chip is
+  // the only place a person is named at all.
+  const assigneeNick = (assignee && assignee.nickname)
+    ? `<span class="kanban-nickname">${escapeHtml(assignee.nickname)}</span>` : ''
   const assigneeHtml = assignee
-    ? `<span class="kanban-card-assignee"><span class="assignee-dot ${assignee.type}">${escapeHtml(assigneeLabel[0])}</span>${escapeHtml(assigneeLabel)}</span>`
+    ? `<span class="kanban-card-assignee"><span class="assignee-dot ${assignee.type}">${escapeHtml(assigneeLabel[0])}</span>${escapeHtml(assigneeLabel)}${assigneeNick}</span>`
     : rawAssignee
       ? `<span class="kanban-card-assignee"><span class="assignee-dot unknown">${escapeHtml(rawAssignee[0])}</span>${escapeHtml(rawAssignee)}</span>`
       : ''
@@ -1739,10 +1966,17 @@ function createCardEl(card, embeddedChildren = []) {
     embeddedHtml = `<div class="kanban-embedded-subtasks">${items}</div>`
   }
 
+  // Evidence on done: what the closing agent said it checked. Shown only on
+  // done cards that carry it; the full text is in the tooltip and the detail.
+  const evidence = card.status === 'done' && typeof card.done_evidence === 'string' ? card.done_evidence.trim() : ''
+  const evidenceHtml = evidence
+    ? `<span class="kanban-card-evidence" title="${escapeAttr(t('kanban.evidence.tooltip', { text: evidence }))}">${escapeHtml(t('kanban.evidence.badge'))}</span>`
+    : ''
+
   el.innerHTML = `
     ${projectHtml}
     <div class="kanban-card-title">${seqHtml}${escapeHtml(card.title)}</div>
-    <div class="kanban-card-footer">${assigneeHtml}${kanbanAgentLiveBadge(card)}${dueHtml}${blockedHtml}</div>
+    <div class="kanban-card-footer">${assigneeHtml}${kanbanAgentLiveBadge(card)}${dueHtml}${blockedHtml}${evidenceHtml}</div>
     ${labelsHtml}
     <div class="kanban-card-actions">
       <button class="card-breakdown-btn" title="${t('kanban.btn.breakdown')}" aria-label="${t('kanban.btn.breakdown')}">⚡</button>
@@ -2062,6 +2296,13 @@ function getDragAfterElement(col, y) {
   return closest
 }
 
+// The card version the edit form was FILLED from (PUT /api/kanban/:id refuses a
+// stale one with 409). The form is the one write path that does not round-trip the
+// card object -- it rebuilds the body from its fields -- so without this it would be
+// the one UI write that can still replace someone else's description. null = a new
+// card, or a card from a server without versions: the PUT then goes unchecked.
+let cardEditBaseVersion = null
+
 // === New card modal ===
 function openNewCardModal(status) {
   document.getElementById('cardModalTitle').textContent = t('kanban.modal.title_new')
@@ -2071,7 +2312,9 @@ function openNewCardModal(status) {
   document.getElementById('cardPriority').value = 'normal'
   document.getElementById('cardProject').value = ''
   document.getElementById('cardDue').value = ''
+  document.getElementById('cardStart').value = ''
   document.getElementById('cardEditId').value = ''
+  cardEditBaseVersion = null
   document.getElementById('cardEditStatus').value = status || 'planned'
   populateAssigneeSelect('cardAssignee')
   populateProjectSuggestions()
@@ -2106,18 +2349,31 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
     due_date: document.getElementById('cardDue').value
       ? Math.floor(new Date(document.getElementById('cardDue').value).getTime() / 1000)
       : null,
+    start_date: document.getElementById('cardStart').value
+      ? Math.floor(new Date(document.getElementById('cardStart').value).getTime() / 1000)
+      : null,
   }
 
   const editId = document.getElementById('cardEditId').value
 
   try {
     if (editId) {
+      if (cardEditBaseVersion !== null) data.expected_version = cardEditBaseVersion
       const res = await fetch(`/api/kanban/${encodeURIComponent(editId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       })
-      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.status) }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}))
+        if (res.status === 409 && e.conflict === 'stale_version') {
+          // The modal STAYS OPEN: the typed text is the only copy of it, and closing
+          // would destroy it to report that something else was nearly destroyed.
+          showToast(t('kanban.toast.stale_version_form'), 8000)
+          return
+        }
+        throw new Error(e.error || res.status)
+      }
       showToast(t('kanban.toast.card_updated'))
     } else {
       data.status = document.getElementById('cardEditStatus').value
@@ -2458,6 +2714,10 @@ async function showCardDetail(card) {
       <span class="meta-value">${card.project ? escapeHtml(card.project) : t('kanban.meta.none')}</span>
     </div>
     <div class="meta-item">
+      <span class="meta-label">${t('kanban.meta.start')}</span>
+      <span class="meta-value">${card.start_date ? new Date(card.start_date * 1000).toLocaleDateString(_lang === 'en' ? 'en-US' : 'hu-HU') : t('kanban.meta.none')}</span>
+    </div>
+    <div class="meta-item">
       <span class="meta-label">${t('kanban.meta.deadline')}</span>
       <span class="meta-value">${card.due_date ? new Date(card.due_date * 1000).toLocaleDateString(_lang === 'en' ? 'en-US' : 'hu-HU') : t('kanban.meta.none')}</span>
     </div>
@@ -2546,7 +2806,22 @@ async function showCardDetail(card) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...card, assignee: newVal }),
         })
+        // `{...card}` carries the version this object was loaded at, so a card that
+        // changed meanwhile is refused instead of having its description reverted.
+        if (r.status === 409) {
+          const e = await r.json().catch(() => ({}))
+          if (e.conflict === 'stale_version') {
+            assigneeValueEl.textContent = current ? current : '-- nincs --'
+            showToast(t('kanban.toast.stale_version'), 6000)
+            loadKanban && loadKanban()
+            return
+          }
+        }
         if (!r.ok) throw new Error('PUT failed')
+        // The next whole-card write from this same view must carry the NEW version,
+        // or it would be refused as stale against our own write.
+        const saved = await r.json().catch(() => ({}))
+        if (Number.isInteger(saved.version)) card.version = saved.version
         card.assignee = newVal
         assigneeValueEl.textContent = newVal ? newVal : '-- nincs --'
         showToast(t('kanban.toast.assignee_updated'))
@@ -2576,6 +2851,12 @@ async function showCardDetail(card) {
   testStepsBody.textContent = steps
   testStepsBox.hidden = !steps
   testStepsBox.classList.toggle('is-testing', !!steps && card.status === 'testing')
+  const evidenceBox = document.getElementById('cardDetailEvidence')
+  if (evidenceBox) {
+    const ev = typeof card.done_evidence === 'string' ? card.done_evidence.trim() : ''
+    document.getElementById('cardDetailEvidenceBody').textContent = ev
+    evidenceBox.hidden = !ev
+  }
 
   renderCardLabelsSection(card)
   renderCardBlockersSection(card)
@@ -2608,8 +2889,14 @@ async function showCardDetail(card) {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...card, parent_id: newParentId }),
       })
-      if (r.ok) { card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card) }
-      else showToast(t('kanban.toast.save_error'))
+      if (r.ok) {
+        const saved = await r.json().catch(() => ({}))
+        if (Number.isInteger(saved.version)) card.version = saved.version
+        card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card)
+      } else if (r.status === 409 && (await r.json().catch(() => ({}))).conflict === 'stale_version') {
+        showToast(t('kanban.toast.stale_version'), 6000)
+        loadKanban()
+      } else showToast(t('kanban.toast.save_error'))
     }
     parentMetaItem.style.display = ''
   } else {
@@ -2684,7 +2971,13 @@ async function showCardDetail(card) {
     document.getElementById('cardDue').value = card.due_date
       ? new Date(card.due_date * 1000).toISOString().split('T')[0]
       : ''
+    document.getElementById('cardStart').value = card.start_date
+      ? new Date(card.start_date * 1000).toISOString().split('T')[0]
+      : ''
     document.getElementById('cardEditId').value = card.id
+    // Taken at FILL time, not at save time: it has to describe the text the user
+    // is about to edit on top of, or the check certifies nothing.
+    cardEditBaseVersion = Number.isInteger(card.version) ? card.version : null
     document.getElementById('cardEditStatus').value = card.status
     populateAssigneeSelect('cardAssignee', card.assignee)
     populateProjectSuggestions()
@@ -3894,7 +4187,7 @@ function renderAgents() {
       <div class="agent-card-top">
         <div class="agent-avatar gradient-1"><img src="/api/marveen/avatar${avatarBust()}" alt="${escapeHtml(displayName)}"></div>
         <div class="agent-card-info">
-          <div class="agent-name">${escapeHtml(displayName)} <span class="marveen-badge">${t('agents.main_badge')}</span></div>
+          <div class="agent-name">${escapeHtml(displayName)}${m.nickname ? ` <span class="agent-nickname">${escapeHtml(m.nickname)}</span>` : ''} <span class="marveen-badge">${t('agents.main_badge')}</span></div>
           <div class="agent-desc">${escapeHtml(m.description || '')}</div>
         </div>
       </div>
@@ -3963,7 +4256,7 @@ function renderAgents() {
       <div class="agent-card-top">
         <div class="agent-avatar ${gradientClass}">${avatarHtml}</div>
         <div class="agent-card-info">
-          <div class="agent-name">${escapeHtml(label)}${engineBadgeHtml}</div>
+          <div class="agent-name">${escapeHtml(label)}${agent.nickname ? ` <span class="agent-nickname">${escapeHtml(agent.nickname)}</span>` : ''}${engineBadgeHtml}</div>
           <div class="agent-desc">${escapeHtml(agent.description || '')}</div>
         </div>
       </div>
@@ -4271,7 +4564,13 @@ async function openAgentDetail(agentName) {
   // Delete button (restore visibility for normal agents)
   document.getElementById('deleteAgentBtn').style.display = ''
   document.getElementById('deleteAgentBtn').onclick = async () => {
-    if (!confirm(t('agents.confirm.delete', { name: currentAgent.name }))) return
+    const confirmed = await confirmDialog({
+      title: t('agents.confirm.delete_title'),
+      message: t('agents.confirm.delete', { name: currentAgent.name }),
+      okLabel: t('agents.confirm.delete_ok'),
+      danger: true,
+    })
+    if (!confirmed) return
     try {
       await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, { method: 'DELETE' })
       closeModal(agentDetailOverlay)
@@ -4563,7 +4862,13 @@ function postMarveenRestart(force) {
 }
 
 document.getElementById('marveenRestartBtn').addEventListener('click', async () => {
-  if (!confirm(t('agents.confirm.hard_restart'))) return
+  const confirmed = await confirmDialog({
+    title: t('agents.confirm.hard_restart_title'),
+    message: t('agents.confirm.hard_restart'),
+    okLabel: t('agents.confirm.hard_restart_ok'),
+    danger: true,
+  })
+  if (!confirmed) return
   const btn = document.getElementById('marveenRestartBtn')
   btn.disabled = true
   try {
@@ -4572,7 +4877,13 @@ document.getElementById('marveenRestartBtn').addEventListener('click', async () 
       const blocked = await res.clone().json().catch(() => ({}))
       if (blocked.error === 'restart-blocked') {
         const key = blocked.reason === 'busy' ? 'agents.confirm.force_restart_busy' : 'agents.confirm.force_restart_unreadable'
-        if (!confirm(t(key))) { showToast(t('agents.toast.restart_not_forced')); return }
+        const forced = await confirmDialog({
+          title: t('agents.confirm.hard_restart_title'),
+          message: t(key),
+          okLabel: t('agents.confirm.force_restart_ok'),
+          danger: true,
+        })
+        if (!forced) { showToast(t('agents.toast.restart_not_forced')); return }
         res = await postMarveenRestart(true)
       }
     }
@@ -4620,7 +4931,13 @@ document.getElementById('agentStartBtn').addEventListener('click', async () => {
 
 document.getElementById('agentStopBtn').addEventListener('click', async () => {
   if (!currentAgent) return
-  if (!confirm(t('agents.confirm.stop'))) return
+  const confirmed = await confirmDialog({
+    title: t('agents.confirm.stop_title'),
+    message: t('agents.confirm.stop'),
+    okLabel: t('agents.confirm.stop_ok'),
+    danger: true,
+  })
+  if (!confirmed) return
 
   try {
     const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/stop`, { method: 'POST' })
@@ -5332,13 +5649,15 @@ document.getElementById('saveIdleFlushBtn').addEventListener('click', async () =
   // Like auto-restart, this applies to the main session too, so role === 'main'
   // is NOT skipped. The context-guard store is keyed by the same id.
   const id = currentAgent.autoRestartId || currentAgent.name
-  // Send the WHOLE config, not just the three idle fields. The endpoint
-  // normalizes the body into a complete config, so a fragment would silently
-  // reset actPct/hardPct/saturationRestart/enabled to their defaults -- saving
-  // an idle-flush preference would disarm the wedge tiers on an agent that had
-  // them on. Re-read rather than trusting the cached detail: not every path
-  // that opens this pane populates contextGuard, and an empty object here is
-  // indistinguishable from a genuinely default config.
+  // Send the WHOLE config, not just the three idle fields. The endpoint used
+  // to REPLACE the stored row with the normalized body, so a fragment reset
+  // actPct/hardPct/saturationRestart/enabled to their defaults -- saving an
+  // idle-flush preference disarmed the wedge tiers on an agent that had them
+  // on. It merges now (mergeContextGuardConfig); the full body stays because
+  // it is correct under both behaviours. Re-read rather than trusting the
+  // cached detail: not every path that opens this pane populates
+  // contextGuard, and an empty object here is indistinguishable from a
+  // genuinely default config.
   let current = {}
   try {
     const cur = await fetch(`/api/agents/${encodeURIComponent(id)}/context-guard`)
@@ -5945,7 +6264,15 @@ document.getElementById('chTestBtn').addEventListener('click', async () => {
         + (missing.includes('im:read') ? ' ' + t('channel.toast.missing_scopes_imread') : '')
       showToast(msg, 12000)
     } else {
-      showToast('Kapcsolat rendben!')
+      const exp = data.secretExpiry
+      const suffix = !exp ? ''
+        : exp.state === 'missing' ? ' ' + t('channel.toast.teams_secret_expiry_missing')
+        : exp.state === 'invalid' ? ' ' + t('channel.toast.teams_secret_expiry_invalid')
+        : exp.state === 'ok' ? ' ' + t('channel.toast.teams_secret_expiry_ok', { date: exp.date, days: exp.daysLeft })
+        : exp.state === 'soon' ? ' ' + t('channel.toast.teams_secret_expiry_soon', { date: exp.date, days: exp.daysLeft })
+        : exp.state === 'expired' ? ' ' + t('channel.toast.teams_secret_expiry_expired', { date: exp.date })
+        : ''
+      showToast('Kapcsolat rendben!' + suffix, suffix ? 8000 : undefined)
     }
   } catch {
     showToast(t('channel.toast.smoke_failed'))
@@ -6490,8 +6817,9 @@ document.getElementById('saveSkillBtn').addEventListener('click', async () => {
       const err = await res.json()
       throw new Error(err.error || 'Hiba')
     }
+    const created = await res.json().catch(() => ({}))
     closeModal(skillModalOverlay)
-    showToast(t('skills.toast.added'))
+    showToast(created.pending ? t('skills.toast.queued') : t('skills.toast.added'))
     if (isGlobal) {
       loadGlobalSkills()
     } else {
@@ -6534,7 +6862,7 @@ document.getElementById('importSkillBtn').addEventListener('click', async () => 
     const result = await res.json()
     closeModal(skillModalOverlay)
     const importedList = Array.isArray(result.imported) ? result.imported : []
-    showToast(t('skills.toast.imported', { list: importedList.join(', ') }))
+    showToast(t(result.pending ? 'skills.toast.imported_queued' : 'skills.toast.imported', { list: importedList.join(', ') }))
     skillFile = null
     document.getElementById('skillFileName').textContent = ''
     if (isGlobal) {
@@ -6808,7 +7136,9 @@ async function loadScheduleAgents() {
 async function loadSchedules() {
   try {
     const [schedulesRes] = await Promise.all([
-      fetch('/api/schedules'),
+      // include=prompt: the edit form fills its prompt from this list (openEditSchedule),
+      // and the list leaves prompts out by default (card 12b0f698).
+      fetch('/api/schedules?include=prompt'),
       loadScheduleAgents(),
     ])
     schedules = await schedulesRes.json()
@@ -7761,10 +8091,24 @@ function renderMemories(memories) {
       e.stopPropagation()
       if (!confirm('Biztosan torlod ezt az emleket?')) return
       try {
-        await fetch(`/api/memories/${mem.id}`, { method: 'DELETE' })
-        showToast(t('memories.toast.deleted'))
-        loadMemories()
-        loadMemStats()
+        // MARVEENGAPS1020 (a): below data_delete level 3 the first DELETE files
+        // an approval request (409 approval_required). Once it is approved, the
+        // same click finishes the delete with the one-shot approval id.
+        let res = await fetch(`/api/memories/${mem.id}`, { method: 'DELETE' })
+        let body = await res.json().catch(() => ({}))
+        if (res.status === 409 && body.error === 'approval_required' && body.status === 'approved') {
+          res = await fetch(`/api/memories/${mem.id}?approval_id=${encodeURIComponent(body.approval_id)}`, { method: 'DELETE' })
+          body = await res.json().catch(() => ({}))
+        }
+        if (res.ok) {
+          showToast(t('memories.toast.deleted'))
+          loadMemories()
+          loadMemStats()
+        } else if (body.error === 'approval_required') {
+          showToast(t('memories.toast.delete_pending'))
+        } else {
+          showToast(`${t('common.error_delete')}: ${body.error || res.status}`)
+        }
       } catch {
         showToast(t('common.error_delete'))
       }
@@ -11661,9 +12005,154 @@ async function loadGlobalSkills() {
     globalSkills = await globalRes.json()
     localAgentSkills = localRes.ok ? await localRes.json() : []
     renderGlobalSkills()
+    loadPendingSkills()
   } catch (err) {
     console.error('Skills betoltes hiba:', err)
     skillsGrid.innerHTML = `<div class="connector-loading">${t('skills.error')}</div>`
+  }
+}
+
+// MARVEENGAPS1020 (b): skills waiting for approval. A generated or imported
+// skill is not live until it is approved here. The approver sees every file
+// in FULL (the text of every non-binary file, size and sha256 of every file,
+// scripts and executables listed first), the scan's findings, and where the
+// skill will land; the approval is bound to the hash of exactly that content,
+// name and target. Everything below is built with textContent: the skill's
+// own text is untrusted data, never markup.
+async function loadPendingSkills() {
+  const box = document.getElementById('skillsPending')
+  if (!box) return
+  let list = []
+  try {
+    const res = await fetch('/api/skills/pending')
+    list = res.ok ? await res.json() : []
+  } catch { list = [] }
+  if (!Array.isArray(list)) list = []
+  const details = await Promise.all(list.map(async (p) => {
+    try {
+      const r = await fetch(`/api/skills/pending/${encodeURIComponent(p.id)}`)
+      return r.ok ? await r.json() : null
+    } catch { return null }
+  }))
+  renderPendingSkills(box, details.filter(Boolean))
+}
+
+function pendingEl(tag, cls, text) {
+  const el = document.createElement(tag)
+  if (cls) el.className = cls
+  if (text != null) el.textContent = String(text)
+  return el
+}
+
+function pendingFileRow(f) {
+  const det = pendingEl('details', 'skills-pending-file')
+  const flagged = f.kind === 'script' || f.kind === 'binary' || f.executable
+  const sum = pendingEl('summary', flagged ? 'is-flagged' : null)
+  const flags = [f.kind]
+  if (f.executable) flags.push(t('skills.pending.executable'))
+  if (f.shebang) flags.push(f.shebang)
+  sum.appendChild(pendingEl('code', null, f.path))
+  sum.appendChild(pendingEl('span', null, ` ${f.size} B · ${flags.join(' · ')}`))
+  det.appendChild(sum)
+  det.appendChild(pendingEl('div', 'skills-pending-sha', `sha256 ${f.sha256 || '-'}`))
+  det.appendChild(f.text != null
+    ? pendingEl('pre', null, f.text)
+    : pendingEl('div', 'skills-pending-warn', t('skills.pending.binary_not_shown')))
+  // #2088 delta 3: the readable runs of an image (what `cat` would hand the model)
+  if (f.text == null && f.strings) {
+    det.appendChild(pendingEl('div', 'skills-pending-warn', t('skills.pending.image_strings')))
+    det.appendChild(pendingEl('pre', null, f.strings))
+    det.open = true
+  }
+  if (f.path === 'SKILL.md') det.open = true
+  return det
+}
+
+function renderPendingSkills(box, list) {
+  box.replaceChildren()
+  if (!list.length) { box.hidden = true; return }
+  box.hidden = false
+  box.appendChild(pendingEl('h2', 'skills-pending-title', t('skills.pending.title', { n: list.length })))
+  box.appendChild(pendingEl('p', 'skills-pending-intro', t('skills.pending.intro')))
+  for (const p of list) {
+    const card = pendingEl('div', 'skills-pending-card')
+    const head = pendingEl('div', 'skills-pending-head')
+    head.appendChild(pendingEl('strong', null, p.name))
+    const where = p.target && p.target.scope === 'agent'
+      ? t('skills.pending.target_agent', { agent: p.target.agent })
+      : t('skills.pending.target_global')
+    const src = p.source === 'import' ? t('skills.pending.source_import') : t('skills.pending.source_generate')
+    head.appendChild(pendingEl('span', 'skills-pending-meta', `${src} · ${new Date(p.createdAt).toLocaleString()}`))
+    card.appendChild(head)
+    card.appendChild(pendingEl('div', p.target && p.target.scope === 'agent' ? 'skills-pending-target' : 'skills-pending-target is-global', where))
+
+    const report = p.report || { files: [], findings: [], truncated: false }
+    const files = Array.isArray(report.files) ? report.files : []
+    const risky = files.filter((f) => f.kind === 'script' || f.kind === 'binary' || f.executable)
+    const rest = files.filter((f) => !risky.includes(f))
+    if (risky.length) {
+      card.appendChild(pendingEl('div', 'skills-pending-sub is-flagged', t('skills.pending.scripts', { n: risky.length })))
+      for (const f of risky) card.appendChild(pendingFileRow(f))
+    }
+    card.appendChild(pendingEl('div', 'skills-pending-sub', t('skills.pending.files', { n: rest.length })))
+    for (const f of rest) card.appendChild(pendingFileRow(f))
+
+    card.appendChild(pendingEl('div', 'skills-pending-sub',
+      report.findings.length ? t('skills.pending.findings', { n: report.findings.length }) : t('skills.pending.no_findings')))
+    if (report.findings.length) {
+      const fl = pendingEl('ul', 'skills-pending-findings')
+      for (const f of report.findings) {
+        const li = pendingEl('li')
+        li.appendChild(pendingEl('span', 'skills-pending-pattern', f.pattern))
+        li.appendChild(pendingEl('code', null, `${f.file}:${f.line}`))
+        li.appendChild(pendingEl('span', 'skills-pending-excerpt', f.excerpt))
+        fl.appendChild(li)
+      }
+      card.appendChild(fl)
+    }
+    if (report.findingsTruncated) card.appendChild(pendingEl('div', 'skills-pending-warn', t('skills.pending.findings_truncated')))
+    if (Array.isArray(report.unreviewable) && report.unreviewable.length) {
+      card.appendChild(pendingEl('div', 'skills-pending-warn', t('skills.pending.unreviewable', { list: report.unreviewable.join(', ') })))
+    } else if (!p.approvable) {
+      card.appendChild(pendingEl('div', 'skills-pending-warn', t('skills.pending.not_approvable')))
+    }
+
+    const actions = pendingEl('div', 'skills-pending-actions')
+    const approve = pendingEl('button', 'btn-primary btn-compact', t('skills.pending.approve'))
+    const reject = pendingEl('button', 'btn-danger btn-compact', t('skills.pending.reject'))
+    approve.disabled = !p.approvable
+    approve.addEventListener('click', async () => {
+      if (!confirm(t('skills.pending.confirm_approve', { name: p.name, where }))) return
+      approve.disabled = true
+      try {
+        const res = await fetch(`/api/skills/pending/${encodeURIComponent(p.id)}/approve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hash: p.hash }),
+        })
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(body.error || String(res.status))
+        showToast(t('skills.pending.approved', { name: p.name }))
+        loadGlobalSkills()
+      } catch (err) {
+        showToast(`${t('skills.pending.error')}: ${err.message}`)
+        loadPendingSkills()
+      } finally { approve.disabled = !p.approvable }
+    })
+    reject.addEventListener('click', async () => {
+      if (!confirm(t('skills.pending.confirm_reject', { name: p.name }))) return
+      reject.disabled = true
+      try {
+        const res = await fetch(`/api/skills/pending/${encodeURIComponent(p.id)}/reject`, { method: 'POST' })
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || String(res.status))
+        showToast(t('skills.pending.rejected', { name: p.name }))
+      } catch (err) {
+        showToast(`${t('skills.pending.error')}: ${err.message}`)
+      } finally { reject.disabled = false; loadPendingSkills() }
+    })
+    actions.append(approve, reject)
+    card.appendChild(actions)
+    box.appendChild(card)
   }
 }
 
@@ -14874,10 +15363,12 @@ async function renderAuthCard() {
   if (!status) { body.innerHTML = `<p class="auth-muted">${t('auth.card.unavailable')}</p>`; return }
   if (status.setup_required) { renderCreateLoginForm(body) }
   else if (status.method === 'session') { renderSessionPanel(body, status) }
-  else renderTokenModePanel(body)
+  else renderTokenModePanel(body, status)
   // Device keys are managed by token/session operators only (a device key
   // itself gets 403 from the management endpoints, so don't render the panel).
-  if (status.method === 'token' || status.method === 'session') {
+  // Once a login exists, issuing keys and pairing take the owner's session
+  // (DEVKEYMINT1022), so a token-mode browser gets the sign-in button above instead.
+  if (status.method === 'session' || (status.method === 'token' && status.setup_required)) {
     renderDeviceKeysSection(body)
     renderBridgeEnrollSection(body)
     renderOperatorAccessSection(body)
@@ -15276,9 +15767,28 @@ async function renderAuthSessions() {
   } catch { el.innerHTML = '' }
 }
 
-function renderTokenModePanel(body) {
+function renderTokenModePanel(body, status) {
   body.innerHTML =
     `<p class="auth-muted">${t('auth.card.token_mode')}</p>`
+  if (!status || !status.login_available) return
+  // The browser sends a stored access token ahead of the session cookie, so a
+  // browser that came in with ?token= (or the mobile QR) never reaches the login.
+  // Dropping the stored token and reloading lands on the sign-in overlay; from
+  // then on this browser runs on the owner's session (DEVKEYMINT1022).
+  const p = document.createElement('p')
+  p.className = 'auth-muted'
+  p.textContent = t('auth.card.token_mode_signin_desc')
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'btn-primary'
+  btn.id = 'authTokenSignIn'
+  btn.textContent = t('auth.card.token_mode_signin_btn')
+  btn.addEventListener('click', () => {
+    try { localStorage.removeItem('marveen-dashboard-token') } catch { /* storage blocked */ }
+    window.location.reload()
+  })
+  body.appendChild(p)
+  body.appendChild(btn)
 }
 
 // Dismissible setup banner: shown only when the operator is authed via the token
@@ -15317,7 +15827,74 @@ document.addEventListener('DOMContentLoaded', () => {
   wireAuthBanner()
   initAuthBanner()
   wireBranchDriftBanner()
+  wireFleetFreeze()
 })
+
+// --- Fleet freeze, the red button (KILLSWITCH1022) ---------------------------
+// Pulling it is open to every signed-in browser; lifting it needs the owner's
+// dashboard login (the server answers 403 owner_session_required otherwise).
+const FLEET_FREEZE_POLL_MS = 15000
+
+function renderFleetFreeze(data) {
+  const banner = document.getElementById('fleetFreezeBanner')
+  const text = document.getElementById('fleetFreezeBannerText')
+  const btn = document.getElementById('fleetFreezeBtn')
+  if (!banner || !text || !btn) return
+  const st = data && data.frozen ? data.state : null
+  if (!st) {
+    banner.hidden = true
+    btn.disabled = false
+    return
+  }
+  const when = st.at ? new Date(st.at).toLocaleString() : ''
+  text.textContent = t(st.mode === 'stop' ? 'fleet_freeze.banner.stop' : 'fleet_freeze.banner.freeze',
+    { by: st.by || '?', at: when, reason: st.reason || '' })
+  banner.hidden = false
+  btn.disabled = st.mode === 'stop'
+}
+
+async function pollFleetFreeze() {
+  try {
+    const res = await fetch('/api/fleet/freeze')
+    if (!res.ok) return
+    renderFleetFreeze(await res.json())
+  } catch { /* the next poll retries */ }
+}
+
+function wireFleetFreeze() {
+  const btn = document.getElementById('fleetFreezeBtn')
+  const unfreezeBtn = document.getElementById('fleetUnfreezeBtn')
+  if (!btn || !unfreezeBtn) return
+  btn.addEventListener('click', async () => {
+    const reason = (window.prompt(t('fleet_freeze.prompt.reason')) || '').trim()
+    if (!reason) return
+    const mode = window.confirm(t('fleet_freeze.prompt.stop')) ? 'stop' : 'freeze'
+    try {
+      const res = await fetch('/api/fleet/freeze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason, mode }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) { showToast(data.error || ('HTTP ' + res.status)); return }
+      renderFleetFreeze(data)
+      showToast(t('fleet_freeze.toast.frozen'))
+    } catch (err) { showToast(String(err.message || err)) }
+  })
+  unfreezeBtn.addEventListener('click', async () => {
+    if (!window.confirm(t('fleet_freeze.prompt.unfreeze'))) return
+    try {
+      const res = await fetch('/api/fleet/unfreeze', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (res.status === 403) { showToast(t('fleet_freeze.toast.owner_only'), 8000); return }
+      if (!res.ok) { showToast(data.error || ('HTTP ' + res.status)); return }
+      renderFleetFreeze({ frozen: false })
+      showToast(t('fleet_freeze.toast.unfrozen'))
+    } catch (err) { showToast(String(err.message || err)) }
+  })
+  pollFleetFreeze()
+  setInterval(pollFleetFreeze, FLEET_FREEZE_POLL_MS)
+}
 
 async function loadSettings() {
   const tabNav = document.getElementById('settingsTabNav')
@@ -15397,6 +15974,7 @@ async function loadSettings() {
       for (const def of defs) {
         group.appendChild(buildSettingRow(def))
       }
+      buildSettingsGroupReset(group)
       panel.appendChild(group)
       tabPanels.appendChild(panel)
     }
@@ -15430,6 +16008,7 @@ async function loadSettings() {
         for (const def of securityDefs) {
           group.appendChild(buildSettingRow(def))
         }
+        buildSettingsGroupReset(group)
         panel.appendChild(group)
       }
       tabPanels.appendChild(panel)
@@ -15511,6 +16090,7 @@ async function loadSettings() {
         for (const def of claudePlansDefs) {
           group.appendChild(buildSettingRow(def))
         }
+        buildSettingsGroupReset(group)
         panel.appendChild(group)
       }
 
@@ -15605,6 +16185,7 @@ async function renderClaudePlansPanel(body) {
         <div class="form-group" style="flex:1">
           <label>${t('settings.claude_plans.form.mode')}</label>
           <select class="input" id="cpFormMode">
+            <option value="login">${t('settings.claude_plans.form.mode_login')}</option>
             <option value="token">${t('settings.claude_plans.form.mode_token')}</option>
             <option value="configDir">${t('settings.claude_plans.form.mode_config_dir')}</option>
           </select>
@@ -15621,6 +16202,23 @@ async function renderClaudePlansPanel(body) {
         <label for="cpFormToken">${t('settings.claude_plans.form.token')}</label>
         <input class="input" id="cpFormToken" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-oat01-…">
         <div class="claude-plans-form-hint" id="cpFormTokenHint">${t('settings.claude_plans.form.token_hint')}</div>
+      </div>
+      <div class="form-group" id="cpFormLoginGroup" hidden>
+        <div class="claude-plans-form-hint">${t('settings.claude_plans.login.hint')}</div>
+        <div id="cpLoginStep" class="claude-plans-login-step" hidden>
+          <a class="btn-secondary btn-compact" id="cpLoginLink" href="#" target="_blank" rel="noopener noreferrer">${t('settings.claude_plans.login.open_link')}</a>
+          <label for="cpLoginUrl">${t('settings.claude_plans.login.copy_hint')}</label>
+          <div class="form-row">
+            <input class="input" id="cpLoginUrl" style="flex:1" readonly spellcheck="false">
+            <button class="btn-secondary btn-compact" id="cpLoginCopyBtn">${t('settings.claude_plans.login.copy_btn')}</button>
+          </div>
+          <label for="cpLoginCode">${t('settings.claude_plans.login.code')}</label>
+          <div class="form-row">
+            <input class="input" id="cpLoginCode" style="flex:1" autocomplete="off" spellcheck="false">
+            <button class="btn-secondary btn-compact" id="cpLoginCodeBtn">${t('settings.claude_plans.login.submit_code')}</button>
+          </div>
+        </div>
+        <div id="cpLoginStatus" class="claude-plans-form-hint" role="status" hidden></div>
       </div>
       <div class="form-group" id="cpFormConfigDirGroup" hidden>
         <label for="cpFormConfigDir">${t('settings.claude_plans.form.config_dir')}</label>
@@ -15639,15 +16237,27 @@ async function renderClaudePlansPanel(body) {
   `
 
   document.getElementById('cpFormMode').addEventListener('change', () => syncClaudePlanFormMode())
-  document.getElementById('cpFormAddBtn').addEventListener('click', () => saveClaudePlan())
-  document.getElementById('cpFormCancelBtn').addEventListener('click', () => resetClaudePlanForm())
+  document.getElementById('cpFormAddBtn').addEventListener('click', () => {
+    if (document.getElementById('cpFormMode').value === 'login' && !claudePlanFormEditing) startClaudePlanLogin()
+    else saveClaudePlan()
+  })
+  document.getElementById('cpFormCancelBtn').addEventListener('click', () => {
+    if (claudePlanLoginActive) cancelClaudePlanLogin()
+    else resetClaudePlanForm()
+  })
+  document.getElementById('cpLoginCodeBtn').addEventListener('click', () => submitClaudePlanLoginCode())
+  document.getElementById('cpLoginCopyBtn').addEventListener('click', () => copyClaudePlanLoginUrl())
+  document.getElementById('cpLoginUrl').addEventListener('focus', (e) => e.target.select())
+  document.getElementById('cpLoginCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitClaudePlanLoginCode() })
   for (const id of ['cpFormId', 'cpFormLabel', 'cpFormConfigDir', 'cpFormToken']) {
     document.getElementById(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') saveClaudePlan() })
   }
   claudePlanFormEditing = null
+  claudePlanLoginActive = false
   syncClaudePlanFormMode()
 
   await loadClaudePlansList()
+  await resumeClaudePlanLogin()
 }
 
 // The plan being edited in the form (the GET /api/claude-plans object), or
@@ -15691,9 +16301,19 @@ function syncClaudePlanFormMode() {
   const mode = document.getElementById('cpFormMode')?.value
   const tokenGroup = document.getElementById('cpFormTokenGroup')
   const dirGroup = document.getElementById('cpFormConfigDirGroup')
-  if (!tokenGroup || !dirGroup) return
+  const loginGroup = document.getElementById('cpFormLoginGroup')
+  if (!tokenGroup || !dirGroup || !loginGroup) return
   tokenGroup.hidden = mode !== 'token'
-  dirGroup.hidden = mode === 'token'
+  dirGroup.hidden = mode !== 'configDir'
+  loginGroup.hidden = mode !== 'login'
+  // Logging in creates a NEW plan; an edit keeps the paste and config-dir ways.
+  const loginOption = document.querySelector('#cpFormMode option[value="login"]')
+  if (loginOption) loginOption.hidden = !!claudePlanFormEditing
+  const addBtn = document.getElementById('cpFormAddBtn')
+  if (addBtn && !claudePlanFormEditing) {
+    addBtn.textContent = t(mode === 'login' ? 'settings.claude_plans.login.start_btn' : 'settings.claude_plans.form.add_btn')
+    addBtn.hidden = mode === 'login' && claudePlanLoginActive
+  }
   const hasStoredToken = !!claudePlanFormEditing?.tokenSecretId
   const hint = document.getElementById('cpFormTokenHint')
   if (hint) {
@@ -15715,13 +16335,14 @@ function resetClaudePlanForm() {
   document.getElementById('cpFormLabel').value = ''
   document.getElementById('cpFormConfigDir').value = ''
   document.getElementById('cpFormToken').value = ''
-  document.getElementById('cpFormMode').value = 'token'
+  document.getElementById('cpFormMode').value = 'login'
   document.getElementById('cpFormType').value = 'personal'
   document.getElementById('cpFormChannelsAllowed').checked = true
   document.getElementById('cpFormTitle').textContent = t('settings.claude_plans.form.title_add')
   document.getElementById('cpFormAddBtn').textContent = t('settings.claude_plans.form.add_btn')
   document.getElementById('cpFormCancelBtn').hidden = true
   document.getElementById('cpFormError').hidden = true
+  showClaudePlanLoginStep(null)
   syncClaudePlanFormMode()
 }
 
@@ -15796,6 +16417,183 @@ async function saveClaudePlan() {
     errEl.textContent = t('settings.claude_plans.form.error_generic')
     errEl.hidden = false
   }
+}
+
+// "Log in to add a plan" (SETUPTOKENWIZ1022): the server runs claude
+// setup-token, this form shows its login link, takes the code the login page
+// gives, and the server stores the token it catches. The token never reaches
+// the browser. The paste and config-dir modes stay as they were.
+let claudePlanLoginActive = false
+
+// Pure: the start body from the form fields, or an i18n error key.
+function buildClaudePlanLoginStartBody(fields) {
+  const id = String(fields.id || '').trim()
+  const label = String(fields.label || '').trim()
+  if (!id || !label) return { error: 'settings.claude_plans.form.error_required' }
+  return { body: { id, label, planType: fields.planType, channelsAllowed: !!fields.channelsAllowed } }
+}
+
+// Server error code -> i18n key; unknown codes fall back to the server text.
+const CLAUDE_PLAN_LOGIN_ERROR_KEYS = {
+  'busy': 'settings.claude_plans.login.error_busy',
+  'id-taken': 'settings.claude_plans.login.error_id_taken',
+  'invalid-plan': 'settings.claude_plans.login.error_invalid',
+  'claude-not-found': 'settings.claude_plans.login.error_claude_missing',
+  'url-timeout': 'settings.claude_plans.login.error_no_link',
+  'code-timeout': 'settings.claude_plans.login.error_expired',
+  'token-timeout': 'settings.claude_plans.login.error_no_token',
+  'exited': 'settings.claude_plans.login.error_no_token',
+  'bad-code': 'settings.claude_plans.login.error_bad_code',
+  'wrong-phase': 'settings.claude_plans.login.error_expired',
+  'verify-failed': 'settings.claude_plans.login.error_rejected',
+  // Every route here takes the owner session or a paired Bridge key: a token or other device-key window gets this.
+  'owner_session_required': 'settings.claude_plans.login.error_owner_session',
+}
+
+function claudePlanLoginErrorText(data) {
+  const key = data && CLAUDE_PLAN_LOGIN_ERROR_KEYS[data.code]
+  if (key) return t(key)
+  return (data && data.error) || t('settings.claude_plans.form.error_generic')
+}
+
+// url: show the link + code step; null: back to the start button.
+function showClaudePlanLoginStep(url) {
+  const step = document.getElementById('cpLoginStep')
+  const link = document.getElementById('cpLoginLink')
+  const code = document.getElementById('cpLoginCode')
+  if (!step || !link || !code) return
+  claudePlanLoginActive = !!url
+  step.hidden = !url
+  const safeUrl = url && url.startsWith('https://') ? url : ''
+  link.href = safeUrl || '#'
+  const urlField = document.getElementById('cpLoginUrl')
+  if (urlField) urlField.value = safeUrl
+  code.value = ''
+  for (const id of ['cpFormId', 'cpFormLabel', 'cpFormType', 'cpFormChannelsAllowed', 'cpFormMode']) {
+    const el = document.getElementById(id)
+    if (el) el.disabled = !!url
+  }
+  const cancelBtn = document.getElementById('cpFormCancelBtn')
+  if (cancelBtn) cancelBtn.hidden = !url && !claudePlanFormEditing
+  setClaudePlanLoginStatus(url ? t('settings.claude_plans.login.waiting_code') : null)
+  syncClaudePlanFormMode()
+}
+
+function setClaudePlanLoginStatus(text) {
+  const el = document.getElementById('cpLoginStatus')
+  if (!el) return
+  el.textContent = text || ''
+  el.hidden = !text
+}
+
+function showClaudePlanFormError(text) {
+  const errEl = document.getElementById('cpFormError')
+  errEl.textContent = text
+  errEl.hidden = false
+}
+
+// The link is also shown as text, for opening it on another device or in
+// another browser profile (the Claude account to add may live there).
+async function copyClaudePlanLoginUrl() {
+  const field = document.getElementById('cpLoginUrl')
+  if (!field || !field.value) return
+  try {
+    await navigator.clipboard.writeText(field.value)
+    showToast(t('settings.claude_plans.login.copied'))
+  } catch {
+    field.focus()
+    field.select()
+  }
+}
+
+async function startClaudePlanLogin() {
+  document.getElementById('cpFormError').hidden = true
+  const built = buildClaudePlanLoginStartBody({
+    id: document.getElementById('cpFormId').value,
+    label: document.getElementById('cpFormLabel').value,
+    planType: document.getElementById('cpFormType').value,
+    channelsAllowed: document.getElementById('cpFormChannelsAllowed').checked,
+  })
+  if (built.error) { showClaudePlanFormError(t(built.error)); return }
+  const addBtn = document.getElementById('cpFormAddBtn')
+  addBtn.disabled = true
+  setClaudePlanLoginStatus(t('settings.claude_plans.login.starting'))
+  try {
+    const res = await fetch('/api/claude-plans/login/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(built.body),
+    })
+    let data = null
+    try { data = await res.json() } catch { /* non-JSON error body */ }
+    if (!res.ok || !data || typeof data.url !== 'string') {
+      setClaudePlanLoginStatus(null)
+      showClaudePlanFormError(claudePlanLoginErrorText(data))
+      return
+    }
+    showClaudePlanLoginStep(data.url)
+    document.getElementById('cpLoginLink').focus()
+  } catch {
+    setClaudePlanLoginStatus(null)
+    showClaudePlanFormError(t('settings.claude_plans.form.error_generic'))
+  } finally {
+    addBtn.disabled = false
+  }
+}
+
+async function submitClaudePlanLoginCode() {
+  const codeEl = document.getElementById('cpLoginCode')
+  const code = codeEl.value.trim()
+  if (!code) return
+  document.getElementById('cpFormError').hidden = true
+  const btn = document.getElementById('cpLoginCodeBtn')
+  btn.disabled = true
+  setClaudePlanLoginStatus(t('settings.claude_plans.login.checking'))
+  try {
+    const res = await fetch('/api/claude-plans/login/code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    })
+    let data = null
+    try { data = await res.json() } catch { /* non-JSON error body */ }
+    if (res.status === 201 && data) {
+      showToast(t(data.verified ? 'settings.claude_plans.login.done' : 'settings.claude_plans.login.done_unverified', { label: data.label || data.id }))
+      resetClaudePlanForm()
+      await loadClaudePlansList()
+      return
+    }
+    // A mistyped code leaves the login waiting; anything else has ended it.
+    if (data && data.code === 'bad-code') {
+      setClaudePlanLoginStatus(t('settings.claude_plans.login.waiting_code'))
+    } else {
+      showClaudePlanLoginStep(null)
+    }
+    showClaudePlanFormError(claudePlanLoginErrorText(data))
+  } catch {
+    showClaudePlanLoginStep(null)
+    showClaudePlanFormError(t('settings.claude_plans.form.error_generic'))
+  } finally {
+    btn.disabled = false
+  }
+}
+
+async function cancelClaudePlanLogin() {
+  try { await fetch('/api/claude-plans/login/cancel', { method: 'POST' }) } catch { /* the server ends it on its own timeout */ }
+  resetClaudePlanForm()
+}
+
+// Coming back to the tab while a login waits for its code: show its link again.
+async function resumeClaudePlanLogin() {
+  try {
+    const res = await fetch('/api/claude-plans/login/status')
+    if (!res.ok) return
+    const data = await res.json()
+    if (data && data.active && typeof data.url === 'string') {
+      document.getElementById('cpFormMode').value = 'login'
+      showClaudePlanLoginStep(data.url)
+    }
+  } catch { /* status is a convenience */ }
 }
 
 // POST /api/claude-plans/rotate for the main agent (agentId defaults to it
@@ -16240,6 +17038,15 @@ function openAddProviderModal(container, editProvider = null) {
   })
 }
 
+// t() answers a missing key with the key itself, which is truthy, so a plain
+// `t(...) || def.description` never fell back and the row showed the raw
+// settings.desc.<KEY> (#2228). Compare with the key instead.
+function settingDescription(def) {
+  const key = 'settings.desc.' + def.key
+  const text = t(key)
+  return text === key ? (def.description || '') : text
+}
+
 function buildSettingRow(def) {
   const row = document.createElement('div')
   row.className = 'settings-row'
@@ -16260,7 +17067,7 @@ function buildSettingRow(def) {
 
   const desc = document.createElement('div')
   desc.className = 'settings-row-desc'
-  desc.textContent = t('settings.desc.' + def.key) || def.description
+  desc.textContent = settingDescription(def)
   info.appendChild(desc)
 
   const meta = document.createElement('div')
@@ -16272,6 +17079,7 @@ function buildSettingRow(def) {
   }
   if (def.type === 'color') metaParts.push(t('settings.meta.format') + ': #rrggbb')
   metaParts.push(t('settings.meta.default') + ': ' + def.default)
+  if (def.source === 'override') metaParts.push(t('settings.meta.overridden'))
   meta.textContent = metaParts.join(' · ')
   info.appendChild(meta)
 
@@ -16327,8 +17135,238 @@ function buildSettingRow(def) {
   valueInput.addEventListener('input', () => markSettingDirty(def.key, valueInput, originalValue, def.type, errorEl))
   valueInput.addEventListener('change', () => markSettingDirty(def.key, valueInput, originalValue, def.type, errorEl))
 
+  // A value saved from this page is an override (config-overrides.json), and
+  // until now it could only be replaced, never removed. The button drops the
+  // override; the row is rebuilt from the answer so the input, the dirty
+  // tracking and the button itself all reflect the layer that answers now.
+  if (def.source === 'override') {
+    const resetBtn = document.createElement('button')
+    resetBtn.type = 'button'
+    resetBtn.className = 'btn-secondary btn-compact settings-reset-default-btn'
+    resetBtn.textContent = t('settings.btn.reset_default')
+    const preview = settingResetPreview(def)
+    resetBtn.title = t('settings.btn.reset_default_title') + ' ' + formatSettingValue(preview.from) + ' \u2192 ' + formatSettingValue(preview.to) + ' (' + preview.source + ')'
+    resetBtn.addEventListener('click', () => resetSettingToDefault(def, row, resetBtn, errorEl))
+    editor.insertBefore(resetBtn, errorEl)
+  }
+
+  row._settingDef = def
   row.appendChild(editor)
   return row
+}
+
+// Removes one saved override and rebuilds its row from the answer. Shared by
+// the row button and the per-tab button; reports instead of toasting so the
+// caller decides what to tell the operator.
+async function removeSettingOverride(row) {
+  const def = row._settingDef
+  const errorEl = row.querySelector('.settings-row-error')
+  if (errorEl) errorEl.textContent = ''
+  try {
+    const res = await fetch('/api/settings/' + encodeURIComponent(def.key), { method: 'DELETE' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      if (errorEl) errorEl.textContent = data.error || 'Hiba'
+      return { ok: false }
+    }
+    settingsDirty.delete(def.key)
+    row.replaceWith(buildSettingRow({ ...def, value: data.value, source: data.source, resetValue: data.value, resetSource: data.source }))
+    return { ok: true, source: data.source, requiresRestart: !!data.requiresRestart }
+  } catch {
+    if (errorEl) errorEl.textContent = 'Kapcsolati hiba'
+    return { ok: false }
+  }
+}
+
+async function resetSettingToDefault(def, row, btn, errorEl) {
+  // One row is confirmed the same way as a tab: the button used to reset at
+  // once, and the first sign of a wrong click could be a notification on the
+  // wrong channel.
+  if (!(await confirmSettingsReset([settingResetPreview(def)]))) return
+  btn.disabled = true
+  const group = row.closest('.settings-group')
+  const result = await removeSettingOverride(row)
+  if (!result.ok) {
+    btn.disabled = false
+    return
+  }
+  refreshSettingsGroupReset(group)
+  updateSettingsSaveBar()
+  loadClaudePlansReadiness()
+  const base = result.source === 'env' ? t('settings.toast.reset_env') : t('settings.toast.reset_default')
+  showToast(result.requiresRestart ? base + ' ' + t('settings.toast.reset_restart_suffix') : base)
+}
+
+// One button per tab: every overridden row of this group back to its default.
+// It changes several values at once, so it is confirmed, and the question
+// lists the keys -- the operator approves a named set, not "everything here".
+function overriddenSettingRows(group) {
+  return [...group.querySelectorAll('.settings-row')].filter((r) => r._settingDef && r._settingDef.source === 'override')
+}
+
+function buildSettingsGroupReset(group) {
+  const bar = document.createElement('div')
+  bar.className = 'settings-group-actions'
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'btn-secondary btn-compact settings-reset-tab-btn'
+  btn.addEventListener('click', () => resetSettingsGroupToDefault(group))
+  bar.appendChild(btn)
+  group.prepend(bar)
+  refreshSettingsGroupReset(group)
+}
+
+function refreshSettingsGroupReset(group) {
+  const btn = group ? group.querySelector('.settings-reset-tab-btn') : null
+  if (!btn) return
+  const count = overriddenSettingRows(group).length
+  btn.disabled = count === 0
+  btn.textContent = count === 0 ? t('settings.btn.reset_tab') : t('settings.btn.reset_tab') + ' (' + count + ')'
+  btn.title = count === 0 ? t('settings.btn.reset_tab_none') : t('settings.btn.reset_tab_title')
+}
+
+// What a row turns into when its override is removed, as the page knows it
+// from GET /api/settings: the value that answers without the override, and the
+// layer it comes from (.env or the registry default).
+function settingResetPreview(def) {
+  return {
+    key: def.key,
+    from: String(def.value),
+    to: String(def.resetValue !== undefined ? def.resetValue : def.default),
+    source: def.resetSource === 'env' ? t('settings.source.env') : t('settings.source.default'),
+    requiresRestart: !!def.requiresRestart,
+  }
+}
+
+function formatSettingValue(value) {
+  return value === '' ? t('settings.value.empty') : value
+}
+
+// The app's own confirmation dialog, in place of the native confirm(): that one
+// carries the host name as its title, cannot show a list as a list, and looks
+// the same for "stop" as for "delete". Resolves true only on the explicit
+// confirm button; Escape, the close button, the backdrop and Cancel all resolve
+// false, and Cancel has the focus, so Enter on a freshly opened dialog changes
+// nothing. `danger` styles the confirm button for an action that cannot be
+// undone or cuts running work. Every text goes in through textContent; extra
+// markup (`content`) is built by the caller from elements, never from HTML.
+function confirmDialog({ title, message, okLabel, danger = false, content = null, wide = false, bodyClass = '' }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div')
+    overlay.className = 'modal-overlay active'
+    overlay.setAttribute('role', 'dialog')
+    overlay.setAttribute('aria-modal', 'true')
+
+    const modal = document.createElement('div')
+    modal.className = wide ? 'modal modal-wide' : 'modal'
+
+    const header = document.createElement('div')
+    header.className = 'modal-header'
+    const titleEl = document.createElement('h2')
+    titleEl.textContent = title
+    const closeBtn = document.createElement('button')
+    closeBtn.type = 'button'
+    closeBtn.className = 'modal-close'
+    closeBtn.textContent = '\u00d7'
+    header.append(titleEl, closeBtn)
+
+    const body = document.createElement('div')
+    body.className = 'modal-body confirm-dialog' + (bodyClass ? ' ' + bodyClass : '')
+    const messageEl = document.createElement('p')
+    messageEl.textContent = message
+    body.appendChild(messageEl)
+    if (content) body.appendChild(content)
+    const actions = document.createElement('div')
+    actions.className = 'confirm-dialog-actions'
+    const cancelBtn = document.createElement('button')
+    cancelBtn.type = 'button'
+    cancelBtn.className = 'btn-secondary'
+    cancelBtn.textContent = t('common.cancel')
+    const okBtn = document.createElement('button')
+    okBtn.type = 'button'
+    okBtn.className = danger ? 'btn-danger' : 'btn-primary'
+    okBtn.textContent = okLabel
+    actions.append(cancelBtn, okBtn)
+    body.appendChild(actions)
+
+    modal.append(header, body)
+    overlay.appendChild(modal)
+
+    const finish = (answer) => {
+      document.removeEventListener('keydown', onKey)
+      overlay.remove()
+      resolve(answer)
+    }
+    const onKey = (e) => { if (e.key === 'Escape') finish(false) }
+    document.addEventListener('keydown', onKey)
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(false) })
+    closeBtn.addEventListener('click', () => finish(false))
+    cancelBtn.addEventListener('click', () => finish(false))
+    okBtn.addEventListener('click', () => finish(true))
+
+    document.body.appendChild(overlay)
+    cancelBtn.focus()
+  })
+}
+
+// The confirmation for a reset, per row and per tab. An override is often a
+// deliberate choice, and removing one can switch a safety setting back
+// (notifications on again, isolation off), so the dialog shows for every key
+// what the value is now, what it becomes and where that comes from -- the owner
+// approves a change, not a list of names.
+function confirmSettingsReset(items) {
+  const list = document.createElement('ul')
+  list.className = 'settings-reset-confirm-keys'
+  for (const item of items) {
+    const li = document.createElement('li')
+    const key = document.createElement('span')
+    key.className = 'settings-reset-confirm-key'
+    key.textContent = item.key
+    const change = document.createElement('span')
+    change.className = 'settings-reset-confirm-change'
+    change.textContent = formatSettingValue(item.from) + ' \u2192 ' + formatSettingValue(item.to) + ' (' + item.source + ')'
+    li.append(key, change)
+    if (item.requiresRestart) {
+      const restart = document.createElement('span')
+      restart.className = 'settings-restart-badge'
+      restart.textContent = t('settings.restart_badge')
+      li.appendChild(restart)
+    }
+    list.appendChild(li)
+  }
+  return confirmDialog({
+    title: t('settings.confirm.reset_tab_title'),
+    message: t('settings.confirm.reset_tab'),
+    okLabel: t('settings.confirm.reset_tab_ok'),
+    content: list,
+    wide: true,
+    bodyClass: 'settings-reset-confirm',
+  })
+}
+
+async function resetSettingsGroupToDefault(group) {
+  const rows = overriddenSettingRows(group)
+  if (rows.length === 0) return
+  if (!(await confirmSettingsReset(rows.map((r) => settingResetPreview(r._settingDef))))) return
+
+  const btn = group.querySelector('.settings-reset-tab-btn')
+  if (btn) btn.disabled = true
+  let failed = 0
+  let needsRestart = false
+  for (const row of rows) {
+    const result = await removeSettingOverride(row)
+    if (!result.ok) failed++
+    else if (result.requiresRestart) needsRestart = true
+  }
+  refreshSettingsGroupReset(group)
+  updateSettingsSaveBar()
+  loadClaudePlansReadiness()
+  if (failed) {
+    showToast(t('settings.toast.reset_tab_partial'), 6000)
+  } else {
+    const base = t('settings.toast.reset_tab')
+    showToast(needsRestart ? base + ' ' + t('settings.toast.reset_restart_suffix') : base)
+  }
 }
 
 async function saveAllSettings() {
@@ -16355,6 +17393,14 @@ async function saveAllSettings() {
       } else {
         input.dataset.originalValue = String(raw)
         if (data.requiresRestart) needsRestart = true
+        // The saved value is an override now: rebuild the row so it offers
+        // "reset to default" without a page reload.
+        const savedRow = input.closest('.settings-row')
+        if (savedRow && savedRow._settingDef) {
+          const rebuilt = buildSettingRow({ ...savedRow._settingDef, value: data.value ?? raw, source: 'override' })
+          savedRow.replaceWith(rebuilt)
+          refreshSettingsGroupReset(rebuilt.closest('.settings-group'))
+        }
       }
     } catch {
       errorEl.textContent = 'Kapcsolati hiba'
@@ -17537,6 +18583,169 @@ let ideaScope = (() => {
 })()
 const STATUS_COLORS = { new: 'var(--accent)', reviewed: '#f59e0b', kanban: '#22c55e', rejected: '#ef4444' }
 const STATUS_LABELS = { new: () => t('ideas.status.new'), reviewed: () => t('ideas.status.reviewed'), kanban: () => t('ideas.status.kanban'), rejected: () => t('ideas.status.rejected') }
+
+// ============================================================
+// === Team notes ("Jegyzetek") ===
+// ============================================================
+// The team's small follow-ups, kept off the kanban board. Rows come from
+// /api/notes (active, sorted by due date) and ?include_deleted=1 for the
+// last-7-days deleted section. Deletion is soft on the server.
+
+let notesAssigneesLoaded = false
+
+function notesLocalToday() {
+  // The viewer's local date (the browser's timezone), not UTC.
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function notesFmtTs(unix) {
+  if (!unix) return ''
+  const locale = (window._lang || 'hu') === 'en' ? 'en-GB' : 'hu-HU'
+  return new Date(unix * 1000).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function notesAssigneeLabel(name) {
+  if (name === 'mindenki') return t('notes.assignee.mindenki')
+  if (name === 'gazda') return t('notes.assignee.gazda')
+  return name
+}
+
+async function loadNotesAssignees() {
+  const sel = document.getElementById('notesAssignee')
+  if (!sel) return
+  let names = []
+  let loaded = false
+  try {
+    const r = await fetch('/api/agents')
+    if (r.ok) {
+      const list = await r.json()
+      if (Array.isArray(list)) { names = list.map((a) => a && a.name).filter(Boolean); loaded = true }
+    }
+  } catch { /* the fixed entries below are enough to keep the form usable */ }
+  // Stored assignees are lower-case (the server lower-cases them too).
+  const main = mainAgentId().toLowerCase()
+  const fixed = ['mindenki', 'gazda', main]
+  const all = [...fixed, ...[...new Set(names.map((n) => String(n).toLowerCase()))].filter((n) => !fixed.includes(n)).sort()]
+  const prev = sel.value
+  sel.innerHTML = all.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(notesAssigneeLabel(n))}</option>`).join('')
+  if (prev && all.includes(prev)) sel.value = prev
+  // Only a real agent list counts as loaded: after a failed request the next
+  // visit tries again instead of keeping the fallback list for the session.
+  notesAssigneesLoaded = loaded
+}
+
+async function loadNotesPage() {
+  // The author (kanbanMoveActor) and the assignee list (mainAgentId) both read
+  // window._marveen, which only some pages fill: resolve it first, or a
+  // token-authenticated first add/delete goes out without a name and gets a 400.
+  await ensureMarveenLoaded()
+  wireNotesPage()
+  if (!notesAssigneesLoaded) loadNotesAssignees()
+  // A language switch since the options were drawn: relabel them in place.
+  document.querySelectorAll('#notesAssignee option').forEach((o) => { o.textContent = notesAssigneeLabel(o.value) })
+  const tbody = document.getElementById('notesTbody')
+  const delTbody = document.getElementById('notesDeletedTbody')
+  let rows = []
+  try {
+    const r = await fetch('/api/notes?include_deleted=1')
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    rows = await r.json()
+  } catch (err) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="notes-empty">${escapeHtml(t('notes.load_error', { msg: String(err.message || err) }))}</td></tr>`
+    return
+  }
+  const active = rows.filter((n) => n.deleted_at == null)
+  const deleted = rows.filter((n) => n.deleted_at != null).sort((a, b) => b.deleted_at - a.deleted_at)
+  const today = notesLocalToday()
+
+  if (tbody) {
+    tbody.innerHTML = active.length ? active.map((n) => {
+      const overdue = n.due_date && n.due_date < today
+      const dueToday = n.due_date === today
+      const cls = overdue ? 'notes-row-overdue' : dueToday ? 'notes-row-today' : ''
+      const dueLabel = n.due_date
+        ? escapeHtml(n.due_date) + (overdue ? ` <span class="notes-due-tag">${escapeHtml(t('notes.overdue'))}</span>` : dueToday ? ` <span class="notes-due-tag">${escapeHtml(t('notes.today'))}</span>` : '')
+        : '<span class="notes-muted">-</span>'
+      return `<tr class="${cls}">
+        <td data-label="${escapeHtml(t('notes.col.assignee'))}" class="notes-assignee">${escapeHtml(notesAssigneeLabel(n.assignee))}</td>
+        <td data-label="${escapeHtml(t('notes.col.content'))}" class="notes-content">${escapeHtml(n.content)}</td>
+        <td data-label="${escapeHtml(t('notes.col.created'))}" class="notes-muted">${escapeHtml(notesFmtTs(n.created_at))} · ${escapeHtml(n.created_by)}</td>
+        <td data-label="${escapeHtml(t('notes.col.due'))}">${dueLabel}</td>
+        <td class="notes-actions"><button class="btn-secondary btn-compact" data-note-done="${escapeHtml(n.id)}">${escapeHtml(t('notes.btn.done'))}</button></td>
+      </tr>`
+    }).join('') : `<tr><td colspan="5" class="notes-empty">${escapeHtml(t('notes.empty'))}</td></tr>`
+  }
+
+  if (delTbody) {
+    delTbody.innerHTML = deleted.length ? deleted.map((n) => `<tr>
+        <td data-label="${escapeHtml(t('notes.col.assignee'))}">${escapeHtml(notesAssigneeLabel(n.assignee))}</td>
+        <td data-label="${escapeHtml(t('notes.col.content'))}" class="notes-content">${escapeHtml(n.content)}</td>
+        <td data-label="${escapeHtml(t('notes.deleted.col_when'))}" class="notes-muted">${escapeHtml(notesFmtTs(n.deleted_at))}</td>
+        <td data-label="${escapeHtml(t('notes.deleted.col_by'))}">${escapeHtml(n.deleted_by || '')}</td>
+        <td data-label="${escapeHtml(t('notes.deleted.col_reason'))}" class="notes-muted">${escapeHtml(n.delete_reason || '-')}</td>
+      </tr>`).join('') : `<tr><td colspan="5" class="notes-empty">${escapeHtml(t('notes.deleted.empty'))}</td></tr>`
+  }
+  const summary = document.querySelector('#notesDeleted > summary')
+  if (summary) summary.textContent = t('notes.deleted.title_n', { n: deleted.length })
+}
+
+let notesPageWired = false
+function wireNotesPage() {
+  if (notesPageWired) return
+  notesPageWired = true
+  document.getElementById('notesForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const assignee = document.getElementById('notesAssignee')?.value || ''
+    const contentEl = document.getElementById('notesContent')
+    const dueEl = document.getElementById('notesDue')
+    const content = (contentEl?.value || '').trim()
+    if (!content) { contentEl?.focus(); return }
+    await ensureMarveenLoaded()
+    // The author is the owner from the page config, as for the board's moves
+    // (kanbanMoveActor). A login session or device key overrides it on the
+    // server with the name of whoever is actually signed in.
+    const body = { assignee, content, created_by: kanbanMoveActor() }
+    if (dueEl?.value) body.due_date = dueEl.value
+    const btn = document.getElementById('notesAddBtn')
+    if (btn) btn.disabled = true
+    try {
+      const r = await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
+      if (contentEl) contentEl.value = ''
+      if (dueEl) dueEl.value = ''
+      showToast(t('notes.toast.added'))
+      loadNotesPage()
+    } catch (err) {
+      showToast(t('notes.toast.error', { msg: String(err.message || err) }))
+    } finally {
+      if (btn) btn.disabled = false
+    }
+  })
+  document.getElementById('notesTbody')?.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-note-done]')
+    if (!btn) return
+    const reason = window.prompt(t('notes.prompt.reason'), '')
+    if (reason === null) return // cancelled
+    btn.disabled = true
+    await ensureMarveenLoaded()
+    try {
+      const r = await fetch(`/api/notes/${encodeURIComponent(btn.dataset.noteDone)}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ by: kanbanMoveActor(), reason: reason.trim() || null }),
+      })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
+      showToast(t('notes.toast.deleted'))
+      loadNotesPage()
+    } catch (err) {
+      btn.disabled = false
+      showToast(t('notes.toast.error', { msg: String(err.message || err) }))
+    }
+  })
+}
 
 async function loadIdeasPage() {
   const statusFilter = document.getElementById('ideaStatusFilter')?.value ?? 'active'
@@ -19377,7 +20586,7 @@ async function openResearchDoc(agent, name) {
 
     // Exclude cards whose entire bar lies outside the window
     cards = cards.filter(c => {
-      const barStart = c.created_at ? c.created_at * 1000 : rangeStart.getTime()
+      const barStart = c.start_date ? c.start_date * 1000 : c.created_at ? c.created_at * 1000 : rangeStart.getTime()
       const barEnd   = c.due_date * 1000
       return barEnd >= rangeStart && barStart <= rangeEnd
     })
@@ -19440,7 +20649,7 @@ async function openResearchDoc(agent, name) {
 
       // Card rows
       for (const card of projCards) {
-        const barStartMs = card.created_at ? card.created_at * 1000 : rangeStart.getTime()
+        const barStartMs = card.start_date ? card.start_date * 1000 : card.created_at ? card.created_at * 1000 : rangeStart.getTime()
         const barEndMs   = card.due_date * 1000
         const isOverdue  = card.status !== 'done' && barEndMs < nowMs
 

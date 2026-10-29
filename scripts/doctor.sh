@@ -467,6 +467,20 @@ done < "$MCP_TMP"
 rm -f "$MCP_TMP"
 [ "$MCP_N" -eq 0 ] && warn "no MCP servers found in .mcp.json or ~/.claude.json"
 
+# --- Spotlight (macOS) ---
+# Report only (SPOTLIGHT1022): a warn here never fails the run. See scripts/lib/spotlight-check.sh.
+if [ "$(uname -s)" = "Darwin" ]; then
+  echo -e "\n${BOLD}Spotlight (macOS)${RESET}"
+  . "$INSTALL_DIR/scripts/lib/spotlight-check.sh"
+  spotlight_check | while IFS='|' read -r level msg; do
+    case "$level" in
+      ok)   ok "$msg" ;;
+      warn) warn "$msg" ;;
+      *)    echo "  - $msg" ;;
+    esac
+  done
+fi
+
 # --- Summary ---
 echo ""
 if [ "$FAIL" -eq 0 ]; then

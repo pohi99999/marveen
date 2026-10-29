@@ -172,3 +172,33 @@ describe('makeLazyBinResolver', () => {
     expect(() => claudeBin()).toThrow(/Required binary not found/)
   })
 })
+
+// FORK x v1.45.0: the one exception to the policy list -- a PATH entry under the OS temp dir (a test's fake bin).
+describe('tryResolveFromPath: a fake bin under the temp dir', () => {
+  it('a PATH entry under tmpdir() holding the binary wins over a known dir, without asking the shell', async () => {
+    const { tmpdir } = await import('node:os')
+    const { realpathSync } = await vi.importActual<typeof import('node:fs')>('node:fs')
+    const fakeDir = join(realpathSync(tmpdir()), 'fake-bin-x')
+    const saved = process.env.PATH
+    process.env.PATH = `${fakeDir}:/usr/bin`
+    try {
+      mockExistsSync.mockImplementation((p: string) => p === join(fakeDir, 'tmux') || p === '/opt/homebrew/bin/tmux')
+      expect(tryResolveFromPath('tmux')).toBe(join(fakeDir, 'tmux'))
+      expect(mockExecSync).not.toHaveBeenCalled()
+    } finally {
+      process.env.PATH = saved
+    }
+  })
+
+  it('a PATH entry OUTSIDE the temp dir does not: the known dir still decides (the 2026-09-07 rule)', () => {
+    const saved = process.env.PATH
+    process.env.PATH = `/opt/custom/bin:/usr/bin`
+    try {
+      mockExistsSync.mockImplementation((p: string) => p === '/opt/custom/bin/tmux' || p === '/opt/homebrew/bin/tmux')
+      mockExecSync.mockReturnValue('/opt/custom/bin/tmux\n')
+      expect(tryResolveFromPath('tmux')).toBe('/opt/homebrew/bin/tmux')
+    } finally {
+      process.env.PATH = saved
+    }
+  })
+})

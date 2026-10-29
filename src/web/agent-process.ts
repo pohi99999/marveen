@@ -26,14 +26,17 @@ import {
   detectsModelConsentDialog,
   detectsFeedbackDraftModal,
   detectsFeedbackOptOutPrompt,
+  feedbackDraftDismissPlan,
   firstRunAcceptKeys,
   stuckInputSignature,
   mcpTrustAcceptKeys,
   devChannelsAcceptKeys,
   detectsBlockingMenu,
+  typedTailEchoed,
+  detectsHeldPeerMessage,
   type FirstRunGateKind,
 } from '../pane-state.js'
-import { scheduleRecoveryBrief } from './restart-recovery-brief.js'
+import { scheduleRecoveryBrief, cancelRecoveryBrief } from './restart-recovery-brief.js'
 import { beginRestart, endRestart } from './restart-lock.js'
 import { cancelRestartWake, scheduleRestartWake, type RestartWakeRequest } from './restart-wake.js'
 import { agentDir, listAgentNames, readAgentModel, resolveAgentModelDetailed, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentRunAsUser, readAgentMemoryIsolation, readAgentStateObserver, readAgentWorksourceChannel, readAgentCustomProvider, readAgentExtraChannels, readFileOr, readJsonObjectForWrite, readAgentEngine } from './agent-config.js'
@@ -43,6 +46,7 @@ import { loadCustomProvider, type CustomProviderDef } from './custom-providers.j
 import { decideOwnOauthToken, ownOauthTokenExport, ownOauthLaunchVerdict } from './agent-oauth-token-file.js'
 import { inheritedAuthUnset } from './inherited-auth-unset.js'
 import { worksourceRootFor } from './worksource-queue.js'
+import { syncBashSandboxSettings } from './bash-sandbox.js'
 import { resolveAgentConfigDir, readClaudePlans, getClaudePlan } from './claude-plans.js'
 import { readClaudePlansState } from './claude-plans-state.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
@@ -55,6 +59,8 @@ import {
   buildSshExec,
   buildRemoteLaunchCommand,
   buildContinueProbeCommand,
+  buildRemoteTranscriptMtimeCommand,
+  parseRemoteTranscriptMtime,
   classifyRunState,
   classifyRunStateFromExit,
   sessionInList,
@@ -91,7 +97,7 @@ import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInher
 import { readEnvFile } from '../env.js'
 import { loadProfileTemplate, profileWantsThinChiefHandoff } from './profiles.js'
 import { resolveAgentSecurityProfile } from './agent-team.js'
-import { enforceStrictPermissionMode, writeAgentSettingsFromProfile, ensureFleetRosterSection, ensureProjectRootInClaudeMd, ensureAutonomySection, ensureSkillsPathTrapSection, ensureSystemDirectiveAuthSection, ensureAgentIdHeaderSection, ensureThinChiefHandoffSection, ensureMemorySearchLabelSection, ensureFleetAuthSection, ensureEvidenceSection, ensureMcpListChannelSection, ensureMessageCloseSection } from './agent-scaffold.js'
+import { enforceStrictPermissionMode, writeAgentSettingsFromProfile, ensureFleetRosterSection, ensureProjectRootInClaudeMd, ensureAutonomySection, ensureSkillsPathTrapSection, ensureSystemDirectiveAuthSection, ensureAgentIdHeaderSection, ensureThinChiefHandoffSection, ensureMemorySearchLabelSection, ensureFleetAuthSection, ensureEvidenceSection, ensureMcpListChannelSection, ensureMessageCloseSection, ensureStrictApiSection, ensureBackgroundCheckpointSection } from './agent-scaffold.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
 import { recordInjectedPrompt } from './injected-prompt-registry.js'
 import { getSecret } from './vault.js'
@@ -735,6 +741,36 @@ export function resolveMainAgentConfigDir(): string | null {
     return null
   }
   return dir
+}
+
+// True when an explicit MAIN_AGENT_CONFIG_DIR shows no login of its own, so
+// treating it as "the operator logged in here" would start the bot as "Not
+// logged in". REPORTED 2026-10-23 (Linux, v1.44): MAIN_AGENT_CONFIG_DIR pointed
+// at the install user's own ~/.claude, which held no .credentials.json; the
+// launcher unset the fleet token for the explicit dir and the main agent sat
+// at "Not logged in" for about 10 hours. On Linux and Windows a /login writes
+// <dir>/.credentials.json. Other auth set up in the dir counts as its own login
+// too, so such a dir keeps its explicit handling: a non-empty primaryApiKey in
+// <dir>/.claude.json, a non-empty apiKeyHelper in <dir>/settings.json, or a
+// non-empty key / provider switch in that settings.json's env block. On macOS the
+// login lives in the Keychain, so a file check proves nothing there and this
+// always answers false (no change).
+export function explicitConfigDirLacksOwnLogin(dir: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform === 'darwin') return false
+  if (existsSync(join(dir, '.credentials.json'))) return false
+  const read = (file: string): Record<string, unknown> => {
+    try {
+      const v: unknown = JSON.parse(readFileSync(join(dir, file), 'utf8'))
+      return v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+    } catch { return {} }
+  }
+  const set = (v: unknown): boolean => typeof v === 'string' && v.trim() !== ''
+  const settings = read('settings.json')
+  const env = settings.env && typeof settings.env === 'object' ? settings.env as Record<string, unknown> : {}
+  const ownAuth = set(read('.claude.json').primaryApiKey) || set(settings.apiKeyHelper)
+    || ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX']
+      .some((k) => set(env[k]))
+  return !ownAuth
 }
 
 // The main agent's CLAUDE_CONFIG_DIR when the rotation side-car
@@ -1991,28 +2027,45 @@ function startRemoteAgentProcess(
   }
 }
 
+/** What a caller can tell the start about itself. */
+export interface StartOpts {
+  fresh?: boolean
+  /** The caller delivers its OWN first prompt to the new session (the context
+   *  guard's resume), so the recovery brief stays out: two prompts for one
+   *  restart was measured in 10 cases. */
+  ownsResume?: boolean
+}
+
 /**
  * Does a start that just happened deserve a recovery brief?
  *
- * Only a FRESH start: a --continue resume still has the conversation, so the
- * agent already knows what it was doing, and a brief there would repeat it.
- * And only a start that actually succeeded -- briefing a session that never
- * came up would type into whatever is on that tmux target next.
+ * Every successful start does, fresh or --continue, unless its caller owns the
+ * first prompt. The first version briefed fresh starts only; the measurement
+ * that followed (7 days, 41 restarts through the reconcile auto-start and the
+ * API restart, both non-fresh) found the agent idle after 32 of them, because a
+ * --continue session still remembers the conversation but nobody hands it a
+ * new turn. The brief itself keeps its own rule -- no facts, no message -- so
+ * an agent that was genuinely idle still hears nothing.
  *
- * Card 3a64403b covered the channel-monitor door. The measurement that
- * followed found three more (context-guard restart, auto-restart in fresh
- * mode, and the dashboard's own restart button), which is why the decision
- * now lives here, at the one place all of them pass through, rather than at
- * each caller.
+ * Two exceptions: a start that failed (briefing a session that never came up
+ * would type into whatever is on that tmux target next), and a caller that owns
+ * the first prompt itself (opts.ownsResume): the context guard (its resume),
+ * the scheduler's auto-start (the scheduled prompt), and every restart that
+ * owes a [RESTART-WAKE] (restartAgentProcess sets it: the API --continue
+ * restart by default, the plan switches, the model fallback).
+ *
+ * The decision lives here, at the one place every door passes through (card
+ * 3a64403b found four of them; the reconcile and API doors made it six),
+ * rather than at each caller.
  */
 export function shouldBriefAfterStart(
-  opts: { fresh?: boolean },
+  opts: StartOpts,
   result: { ok: boolean },
 ): boolean {
-  return opts.fresh === true && result.ok
+  return result.ok && opts.ownsResume !== true
 }
 
-export async function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
+export async function startAgentProcess(name: string, opts: StartOpts = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const dir = agentDir(name)
   if (!existsSync(dir)) return { ok: false, error: 'Agent not found' }
 
@@ -2048,6 +2101,26 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     return { ok: false, error: `oauthTokenFile: ${ownOauth.reason}${ownOauth.detail ? ` (${ownOauth.detail})` : ''}` }
   }
   const ownTokenFile = ownOauth.kind === 'ok' ? ownOauth.path : null
+
+  // BASHSANDBOX1022: an agent on the owner's BASH_SANDBOX_AGENTS list runs its Bash in Claude Code's
+  // sandbox, configured by a --settings file this start writes (see bash-sandbox.ts). Fail closed: a
+  // listed agent that cannot get its file, or runs on a remote host the file cannot follow, is not
+  // started -- starting it unsandboxed would turn the switch into a label.
+  let bashSandboxFlag = ''
+  try {
+    const sandboxFile = syncBashSandboxSettings(name)
+    if (sandboxFile) {
+      if (remote.host && remote.workdir) {
+        logger.error({ name }, 'bash-sandbox: agent NOT started (listed in BASH_SANDBOX_AGENTS, but remote agents cannot be sandboxed)')
+        return { ok: false, error: 'bash-sandbox: a remote agent cannot be sandboxed; take it off BASH_SANDBOX_AGENTS' }
+      }
+      bashSandboxFlag = ` --settings ${shSingleQuote(sandboxFile)}`
+      logger.info({ name, path: sandboxFile }, 'bash-sandbox: agent starts with its Bash sandbox settings')
+    }
+  } catch (err) {
+    logger.error({ err, name }, 'bash-sandbox: agent NOT started (fail-closed, its sandbox settings could not be written)')
+    return { ok: false, error: `bash-sandbox: ${err instanceof Error ? err.message : String(err)}` }
+  }
 
   if (remote.host && remote.workdir) {
     return startRemoteAgentProcess(name, remote.host, remote.workdir, opts)
@@ -2268,6 +2341,9 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     ensureEvidenceSection(name)
     ensureMcpListChannelSection(name)
     ensureMessageCloseSection(name)
+    // #2232: a strict (dontAsk) agent's recipes for the creation-time text, through the helper.
+    ensureStrictApiSection(name)
+    ensureBackgroundCheckpointSection(name)
     // A sub-agent must load ONLY its own channel plugin. The user-scope
     // enabledPlugins would otherwise make EVERY sub-agent spawn a telegram
     // (and slack/discord) poller that falls back to the main agent's bot
@@ -2842,7 +2918,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // FLEETVENV923: the fleet venv's bin/ goes FIRST so its python3 beats the
     // Homebrew one that carries no packages.
     const venvPathPrefix = fleetVenvPathPrefix()
-    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${claudeBin()} ${continueFlag}${skipFlag}${strictMcpFlags}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}`.trimEnd()
+    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${claudeBin()} ${continueFlag}${skipFlag}${strictMcpFlags}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}${bashSandboxFlag}`.trimEnd()
     // The agent's own target: for a per-user agent this is what makes the whole
     // session (and every process inside it) belong to that uid. Passing null here
     // silently started it as the router's user -- measured 2026-08-19: the start
@@ -2990,14 +3066,22 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
       schedulePluginUnlockAfterRespawn(session, provider.type)
     }
 
-    // A fresh session has no memory of what the agent was doing. Every fresh
-    // door passes here -- the channel monitor's watchdog, the context guard,
-    // auto-restart in fresh mode, and the dashboard button -- so the brief is
-    // scheduled once, at the door, instead of at each caller (card 3a64403b).
+    // A fresh session has no memory of what the agent was doing, and a
+    // --continue one gets no new turn on its own. Every door passes here (the
+    // channel monitor's watchdog and reconcile starts, auto-restart, the
+    // dashboard's start / restart / config-change restarts, the reauth healer,
+    // the heartbeat boot start), so the brief is scheduled once, at the door,
+    // instead of at each caller (card 3a64403b); callers that bring their own
+    // first prompt opt out with ownsResume (see shouldBriefAfterStart).
     if (shouldBriefAfterStart(opts, { ok: true })) {
-      scheduleRecoveryBrief(name, session, (target, text) =>
-        sendPromptToSession(target, text, null, { lockMode: 'deliver' }),
-      )
+      // The gate and the send are a pair: the brief goes in only while the pane
+      // is idle, and the send ABORTS if it turned busy in between, so it is never
+      // typed into a running turn (resume-delivery.ts).
+      scheduleRecoveryBrief(name, session, {
+        isReady: (target) => isSessionReadyForPrompt(target),
+        send: (target, text) =>
+          sendPromptToSession(target, text, null, { lockMode: 'deliver', onBusyTimeout: 'abort' }),
+      })
     }
 
     return { ok: true }
@@ -3008,6 +3092,8 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
 }
 
 export async function stopAgentProcess(name: string): Promise<{ ok: boolean; error?: string }> {
+  // A brief still waiting for the old incarnation's pane must not fire into a later one.
+  cancelRecoveryBrief(name)
   const session = agentSessionName(name)
   if (!isAgentRunning(name)) return { ok: false, error: 'Agent is not running' }
 
@@ -3056,7 +3142,7 @@ export function getAgentProcessInfo(name: string): { running: boolean; session?:
 
 export async function restartAgentProcess(
   name: string,
-  opts: { fresh?: boolean; wake?: RestartWakeRequest } = {},
+  opts: StartOpts & { wake?: RestartWakeRequest } = {},
 ): Promise<{ ok: boolean; pid?: number; error?: string }> {
   // Hold the restart slot across BOTH halves. stopAgentProcess waits ~2s for
   // tmux to tear the session down, and for that window isAgentRunning() already
@@ -3078,7 +3164,18 @@ export async function restartAgentProcess(
       const stopResult = await stopAgentProcess(name)
       if (!stopResult.ok) return { ok: false, error: stopResult.error || 'Failed to stop running agent before restart' }
     }
-    const started = await startAgentProcess(name, opts)
+    // One restart, one first prompt: a --continue restart that owes a
+    // [RESTART-WAKE] already gets its turn restarted by the wake, so the start's
+    // own recovery brief is skipped (ownsResume) -- otherwise both land ~25 s
+    // after the restart, two instructions for one interruption. Without a wake
+    // (the auto-restart, reconcile, watchdog doors) the brief stays the one
+    // prompt. Accepted trade-off: if the wake is then not delivered (busy pane,
+    // held send lock, tmux error), no brief follows either. A busy pane was
+    // woken by someone else already; the other cases are logged by
+    // restart-wake.ts, and the wake asks the agent to check its kanban, which
+    // carries the same in-progress facts the brief would have listed.
+    const willWake = !opts.fresh && !!opts.wake
+    const started = await startAgentProcess(name, willWake ? { ...opts, ownsResume: true } : opts)
     // Losing the start race must NEVER read as success: the session that is up
     // is somebody else's, launched with somebody else's options, and a caller
     // that treats this as done (the context guard does) goes on to inject a
@@ -3091,7 +3188,7 @@ export async function restartAgentProcess(
     }
     // RESTARTWAKE927: only a caller that asked for it, only a --continue
     // restart, only one that really started this session (see restart-wake.ts).
-    if (started.ok && !opts.fresh && opts.wake) scheduleRestartWake(name, agentSessionName(name), opts.wake.reason)
+    if (started.ok && willWake && opts.wake) scheduleRestartWake(name, agentSessionName(name), opts.wake.reason)
     return started
   } finally {
     endRestart(name)
@@ -3154,10 +3251,11 @@ export async function dismissResumeSummaryModalIfPresent(session: string, host: 
 // live on agent-samu 2026-08-31: 10 minutes not-ready, 5 queued messages, and
 // a peer's report parked unsubmitted in the prompt.
 //
-// Dismissal takes TWO steps, measured on that same pane: "0" closes the draft,
-// then Claude Code immediately offers "Turn off Claude-drafted feedback? 0 to
-// turn off · Esc to keep". A second "0" there would silently disable feedback
-// drafting for that agent, so the follow-up is answered with Esc (keep) -- and
+// Dismissal: the card is closed with C-u then Down, never a digit (see
+// feedbackDraftDismissPlan for why a typed digit can stick and pile up). Claude
+// Code may then offer "Turn off Claude-drafted feedback? 0 to turn off · Esc to
+// keep". A "0" there would silently disable feedback drafting for that agent,
+// so the follow-up is answered with Esc (keep) -- and
 // only when its own detector fires, never blind: a bare Esc into a prompt box
 // that holds a parked delivery is not a keystroke worth firing on spec.
 // The not-ready-path companion to the pre-flight dismissal above, and the
@@ -3202,11 +3300,26 @@ export async function clearFeedbackModalAndRecheck(session: string, host: string
   }
 }
 
+// Between C-u and Down: in one tmux call Down would reach the TUI before it
+// re-rendered the cleared input.
+const FEEDBACK_KEY_GAP_MS = 200
+
 export async function dismissFeedbackDraftModalIfPresent(session: string, host: string | null = null): Promise<void> {
   try {
     const pane = captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-p'])
     if (!detectsFeedbackDraftModal(pane)) return
-    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '0'], { timeout: 5000 })
+    // The input box is read from the ghost-stripped view: a dim autosuggest in an
+    // empty box must not read as typed text. Detection stays on the plain capture.
+    const plan = feedbackDraftDismissPlan(pane, captureParkedInputView(session, host), session === MAIN_CHANNELS_SESSION)
+    if (plan.act === 'none') return
+    if (plan.act === 'hold') {
+      logger.info({ session, reason: plan.reason }, 'Feedback-draft modal left up: no keystroke is safe on this prompt')
+      return
+    }
+    for (const [i, key] of plan.keys.entries()) {
+      if (i > 0) await delay(FEEDBACK_KEY_GAP_MS)
+      runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), key], { timeout: 5000 })
+    }
     await delay(300)
     const after = captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-p'])
     if (detectsFeedbackOptOutPrompt(after)) {
@@ -3443,10 +3556,13 @@ export async function settleStartupGates(
 // The identity /rename is text followed by Enter. Typed into a dialog, the
 // text is dropped and the Enter CONFIRMS the highlighted option -- which is
 // how it used to answer the development-channels warning by accident (see
-// above). Never into a first-run gate or a blocking menu.
+// above). Never into a first-run gate, a blocking menu or a held peer
+// message: detectsBlockingMenu leaves the held-peer dialog out (so the menu
+// pass never Escapes it), and on that dialog the Enter would confirm the
+// highlighted "Deliver this message to Claude" on the user's behalf.
 export function paneRefusesIdentityCommand(pane: string | null): boolean {
   if (pane == null) return true
-  return detectsFirstRunGate(pane) != null || detectsBlockingMenu(pane)
+  return detectsFirstRunGate(pane) != null || detectsBlockingMenu(pane) || detectsHeldPeerMessage(pane)
 }
 
 // How many times the identity send retries when the pane's send lane is held
@@ -3543,6 +3659,14 @@ export async function scheduleIdentitySetup(session: string, displayName: string
             }
             try {
               for (const cmd of identitySlashCommands(displayName)) {
+                // RENAMEPARK1014: record the command before typing it. When the
+                // TUI swallows this Enter the line parks, and without a record
+                // the stuck-input watcher cannot tell our `/rename` from a human
+                // draft, so it holds (GH #717). Measured: agent-leanpublisher sat
+                // ~15.5h behind a parked `/rename Lean Publisher` (2026-10-14).
+                // With the record the parked scrape matches and the watcher
+                // submits it with a single Enter (reinject-recorded / enter).
+                recordInjectedPrompt(session, cmd)
                 runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), cmd, 'Enter'], { timeout: 5000 })
                 await delay(1000)
               }
@@ -4009,6 +4133,13 @@ export async function sendPromptToSession(
       i = end
       if (i < oneLine.length) await delay(30)
     }
+    // The settle wait below cannot tell a TUI that finished drawing from one
+    // that stopped READING its input (both give identical captures), so first
+    // wait until the end of the prompt is actually on screen. Bounded; on
+    // timeout the Enter goes out as before, and the log says so.
+    if (oneLine.length > CHUNK && !(await waitForTypedEcho(() => capturePane(session, host), oneLine))) {
+      logger.warn({ session, chars: oneLine.length, waitedMs: TYPED_ECHO_MAX_MS }, 'sendPromptToSession: the end of the typed prompt never appeared in the pane; sending Enter anyway (TUI not reading input?)')
+    }
     // A multi-chunk prompt gets its Enter only once the TUI has stopped
     // redrawing. Sent straight after the last chunk, the Enter races the
     // TUI still ingesting the burst and is dropped: measured 2026-09-15
@@ -4195,6 +4326,31 @@ export async function waitForPaneSettle(
   return false
 }
 
+// Upper bound for waitForTypedEcho. The measured stalls (a sub-agent whose
+// TUI stopped reading input mid-prompt) lasted 18.5 s and 24.9 s; past this
+// the Enter goes out as it did before.
+export const TYPED_ECHO_MAX_MS = 30_000
+
+// Resolve true as soon as typedTailEchoed() sees the end of `typed` in a
+// capture, false after `maxMs` without it. Capture, sleep and clock are
+// injectable, like waitForPaneSettle, so the loop is tested without tmux.
+export async function waitForTypedEcho(
+  capture: () => string | null,
+  typed: string,
+  opts: { pollMs?: number; maxMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
+): Promise<boolean> {
+  const pollMs = opts.pollMs ?? 250
+  const maxMs = opts.maxMs ?? TYPED_ECHO_MAX_MS
+  const sleep = opts.sleep ?? delay
+  const now = opts.now ?? Date.now
+  const deadline = now() + maxMs
+  for (;;) {
+    if (typedTailEchoed(capture(), typed)) return true
+    if (now() >= deadline) return false
+    await sleep(pollMs)
+  }
+}
+
 export function capturePane(session: string, host: string | null = null): string | null {
   try {
     // Capture WITH colour, strip a trailing /rename session-title banner, then
@@ -4204,6 +4360,34 @@ export function capturePane(session: string, host: string | null = null): string
     // (a banner otherwise pins detectPaneState 'unknown', blocking scheduler +
     // inter-agent delivery). See stripSessionTitleBanner.
     return stripAllAnsi(stripSessionTitleBanner(captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-e', '-p'])))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * REMOTESAWTURN1022: newest transcript write of a remote agent, as a local-clock
+ * epoch ms, read over the existing ssh path. The local clock is taken before the
+ * ssh call (see parseRemoteTranscriptMtime for why that keeps the estimate
+ * conservative). One bounded call; any failure (host unreachable, timeout, no
+ * transcript, garbage output) returns null and never throws, so the caller treats it
+ * as "no evidence", never as a turn.
+ */
+export function readRemoteTranscriptMtime(
+  host: string,
+  workdir: string,
+  deps: {
+    exec?: (file: string, args: string[], timeoutMs: number) => string
+    now?: () => number
+  } = {},
+): number | null {
+  const now = deps.now ?? Date.now
+  const exec = deps.exec ?? ((file: string, args: string[], timeoutMs: number): string =>
+    execFileSync(file, args, { timeout: timeoutMs, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }))
+  try {
+    const localBeforeMs = now()
+    const inv = buildSshExec(host, buildRemoteTranscriptMtimeCommand(workdir))
+    return parseRemoteTranscriptMtime(exec(inv.file, inv.args, 3000), localBeforeMs)
   } catch {
     return null
   }
@@ -4223,6 +4407,19 @@ export function paneCurrentCommand(session: string, host: string | null = null):
     const out = captureTmux(host, ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_current_command}'])
     const first = out.split('\n').map(line => line.trim()).find(line => line.length > 0)
     return first ?? null
+  } catch {
+    return null
+  }
+}
+
+// capturePane plus the last `historyLines` of scrollback. For readers that need
+// something the dialog has pushed off the screen -- a permission card's header
+// sits above its diff (permission-prompt-alert.ts). NOT for state detection:
+// the detectors are written for the visible pane, and scrollback would feed
+// them footers and spinners that are no longer live.
+export function capturePaneWithHistory(session: string, historyLines = 500, host: string | null = null): string | null {
+  try {
+    return stripAllAnsi(stripSessionTitleBanner(captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-e', '-p', '-S', `-${historyLines}`])))
   } catch {
     return null
   }

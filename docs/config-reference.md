@@ -62,6 +62,8 @@ Ha el szeretnéd hagyni a Beállítások oldalt (másik menüpontra kattintasz, 
 
 Egyes beállítások mellett "Újraindítást igényel" feliratú badge látható -- ha ilyen értéket módosítasz (pl. `DASHBOARD_PUBLIC_URL`, `OLLAMA_URL`, `HEARTBEAT_AGENT_ENABLED`), a változás csak a szerver következő újraindítása után lép életbe. A kanban és heartbeat időablak-beállítások (pl. `KANBAN_WIP_*`, `KANBAN_AGING_*`, `HEARTBEAT_START_HOUR`) azonnal hatnak, újraindítás nélkül.
 
+Az oldalon elmentett érték felülírásként a `store/config-overrides.json`-be kerül. A felülírt sor mellett "felülírva" jelzés és egy **Alapértelmezés** gomb látszik: a gomb megerősítést kér, amelyben kulcsonként látszik a mostani érték, a visszaállás utáni érték és annak forrása (ugyanezt mutatja a fülenkénti **Mind alapértelmezés** gomb is), majd törli a felülírást, és az érték visszaáll az `.env`-ben megadottra, vagy ha ott nincs, a registry alapértékére. Ugyanez API-n: `DELETE /api/settings/<KULCS>`; a `GET /api/settings` soronként megmondja a forrást (`override` / `env` / `default`), és azt is, mivé válna az érték a felülírás nélkül (`resetValue`, `resetSource`).
+
 **Mit állíthatsz be?**
 
 A beállítások három modulba vannak csoportosítva:
@@ -134,6 +136,8 @@ Minden dashboard-szerkeszthető beállítás egy bejegyzésként szerepel a regi
 | `KANBAN_WIP_FULL_COLOR` | color | `#d46b00` | #rrggbb | nem |
 | `KANBAN_WIP_OVER_COLOR` | color | `#c53030` | #rrggbb | nem |
 | `KANBAN_ARCHIVE_DONE_DAYS` | int | 30 | min 1, max 365 | nem |
+| `KANBAN_DISPATCH_SKIP_AGENTS` | string | (üres) | ügynöknevek vesszővel elválasztva, pl. `pm,reviewer` (az itt felsorolt ügynököt a kártya `in_progress`-be húzása nem ébreszti, lásd `kanban.md`) | nem |
+| `KANBAN_CLAIM_LOCK` | boolean | `0` | `0` vagy `1` (kártya-foglalás, lásd `kanban.md`) | nem |
 | `KANBAN_AGING_WARN_H` | int | 24 | min 1, max 8760 | nem |
 | `KANBAN_AGING_CAUTION_H` | int | 72 | min 1, max 8760 | nem |
 | `KANBAN_AGING_CRITICAL_H` | int | 168 | min 1, max 8760 | nem |
@@ -424,6 +428,15 @@ Ezek a sablonok az ágens scaffold során töltődnek ki és kerülnek az `agent
 
 A profil beállítása az ágens `agent-config.json` `profileId` mezőjével történik, és a dashboard "Ágensek" felületén módosítható.
 
+Strict profilnál a Claude Code `dontAsk` módban fut: a parancs-behelyettesítést (`$(cat <token>)`)
+az engedélylista sosem illeszti, ezért egy ilyen ágens a tokenes `curl`-recepteket nem tudja
+futtatni (#2232). A dashboard-API-t a `scripts/marveen-api.sh` segéden éri el, amely maga olvassa
+a tokent, és minden szöveget fájlból vesz (az igéket a `bash scripts/marveen-api.sh --help`
+sorolja fel). A segéd és a `scripts/agent-msg.sh` a `developer-junior.json` engedélylistáján áll,
+és a generált CLAUDE.md-blokkok strict ágensnél ezt a receptet adják; minden más ágensnél a
+`curl`-recept marad változatlanul. A segéd a tokent csak loopback címre, vagy pontosan az install `.env`-jében álló
+`AGENT_API_ORIGIN` / `DASHBOARD_PUBLIC_URL` címre küldi (`MARVEEN_API_BASE`), és csak `.dashboard-token` nevű fájlból olvassa.
+
 ### toolDeny -- ágensenkénti eszköz-tiltás (kontextus-fogantyú)
 
 Az `agent-config.json` opcionális `toolDeny` mezője csupasz Claude Code eszköznevek listája
@@ -444,6 +457,20 @@ el, csak eszköznév; a mező csak BŐVÍTENI tudja a tiltást, szűkíteni nem.
   "toolDeny": ["Artifact", "Workflow", "AskUserQuestion", "ReportFindings", "SendFeedback", "ListAgents", "Skill"]
 }
 ```
+
+---
+
+## Memória: napi napló tükör és dátumszűrő
+
+Nincs hozzá beállítás: mindkettő mindig be van kapcsolva. Részletek: [memory-system.md](memory-system.md).
+
+| Mi | Viselkedés |
+|----|------------|
+| Napló-tükör | Minden `POST /api/daily-log` bejegyzés egy `cold` tier-ű, `episodic` szektorú `memories` sort is létrehoz (`[Napló ÉÉÉÉ-HH-NN ÓÓ:PP] <szöveg>`, kulcsszó `napi-naplo, ÉÉÉÉ-HH-NN`), a kapcsolatot a `daily_log_memory` tábla tartja. A memória-tartalomszűrőn elbukó szöveg a naplóba ettől még bekerül, tükör nélkül (`memory_mirror: "skipped:content-filter"`). |
+| Backfill | `npx tsx scripts/daily-log-backfill-memories.ts [--db <út>] [--apply]`. Alapból szárazon fut és nem ír semmit (csak olvasásra nyitja az adatbázist, migráció nélkül); `--apply` ír, idempotens. |
+| Dátumszűrő | `GET /api/memories?...&date=<kifejezés>` vagy `&since=ÉÉÉÉ-HH-NN&until=ÉÉÉÉ-HH-NN`, telepítési időzóna (`APP_TZ`) szerinti naptári napokra. SQL-ben, a LIMIT előtt, minden keresési ágban. Érvénytelen érték 400. A `X-Memory-Search` fejléc `date=<tól>..<ig>` mezője mutatja a használt tartományt. |
+| Relevancia | A hasonlósági küszöb (`MEMORY_VECTOR_MIN_MARGIN`, `MEMORY_VECTOR_BASELINE_MIN_ROWS`, `MEMORY_VECTOR_SMALL_CORPUS_MIN_SIMILARITY`) a dátumablakba eső jelöltekből számolódik; egy szűk ablak a kis-korpusz padlóra eshet. |
+| Indexek | `memories(agent_id, created_at)`, `memories(category, created_at)` (indításkor, idempotensen). |
 
 ---
 
@@ -510,6 +537,7 @@ A főbb konfigurációs változók a launchd plist-ben (`~/Library/LaunchAgents/
 | `OWNER_NAME` | A tulajdonos neve (pl. "Jónás Gergő") |
 | `BOT_NAME` | A főágens neve (pl. "Jarvis") |
 | `VOICE_TRANSCRIBE_INBOUND` | `1` = a text módú ügynököknél is átirat készül a bejövő hangüzenetről (alapból ki; az ügynökönkénti `voice.transcribeInbound` felülírja). Lásd `voice.md` |
+| `PERMISSION_ALERT_MARKS` | Mikor szóljon a figyelő egy megválaszolatlan engedélykérő dialógusról: vesszővel elválasztott időpontok a dialógus megjelenésétől (alapból `15m,30m,1h,2h,8h,24h`; egy al-ügynök kérdéséről a fő ügynök azonnal üzenetet kap, a gazda az első időponttól; `s`/`m`/`h`/`d`, a puszta szám perc). Az utolsó érték egyben az ismétlési idő; a `0` első értékként azonnali jelzés. Értelmezhetetlen értéknél az alapértelmezés marad, naplózva |
 
 ---
 

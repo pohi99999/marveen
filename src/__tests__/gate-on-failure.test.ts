@@ -103,7 +103,8 @@ describe('the main agent settings (the committed .claude/settings.json)', () => 
 
   it('every security gate entry blocks on failure, with the deadline four seconds inside its timeout', () => {
     const sec = all.filter((x) => x.ev === 'PreToolUse' && x.h.command.includes('governance-kapu (fail-closed)'))
-    expect(sec.length).toBe(14)
+    // 16 since v1.45.0: upstream's two new mail-tool matchers (copy gate + approval gate) on top of the fork's 14
+    expect(sec.length).toBe(16)
     for (const x of sec) {
       expect(x.h.onFailure, x.matcher).toBe(GATE_ON_FAILURE)
       expect(x.h.command, x.matcher).toContain(`timeout -k 1 ${gateDeadlineSec(x.h.timeout)} `)

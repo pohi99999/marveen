@@ -2,15 +2,18 @@ import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
   hybridSearch, backfillEmbeddings, backfillNeedsWarning,
   searchMemories, getMemoriesForChat, getDb, touchMemoriesAccessed,
-  getMemoryById, deleteMemoryById, getMemoryVersions,
-  type Memory, type MemoryRow,
+  getMemoryById, deleteMemoryById, getMemoryVersions, consumeApproval, escapeLike,
+  type Memory, type MemoryRow, type Approval,
 } from '../../db.js'
 import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, OLLAMA_URL, MEMORY_IMPORT_CATEGORIZE_MODEL, APP_TZ, MEMORY_CONTENT_FILTER_STRICT_COMMANDS } from '../../config.js'
 import { createHash } from 'crypto'
+import { readAutonomyLevel } from '../autonomy-level.js'
+import { approvalWindowSeconds, fileServerApproval } from './approvals.js'
 import { logger } from '../../logger.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
 import { detectHomoglyphs, formatHomoglyphWarning } from '../../homoglyph.js'
 import type { HybridSearchTrace } from '../../db.js'
+import { resolveDateFilter } from '../../date-range.js'
 import type { RouteContext } from './types.js'
 
 // Canonical memory categories. Kept in sync with the DB CHECK constraint in
@@ -118,6 +121,39 @@ export const STRICT_COMMAND_PATTERNS = [
 // row within seconds used to lose one edit silently -- last writer wins, and
 // nothing told the loser. updated_at alone cannot serve as the version: it has
 // one-second resolution, so two writes in the same second compare equal.
+// MARVEENGAPS1020 (a): what a data_delete approval is bound to. The memory id
+// and its content version: an edit after the approval makes the anchor differ,
+// and the approval no longer deletes the edited row.
+export function memoryDeleteAnchor(id: number, content: string | null | undefined): string {
+  return createHash('sha256').update(`memory-delete\n${id}\n${memoryVersion(content)}`).digest('hex')
+}
+
+// An open request for the same anchor (pending, or approved, unused and inside
+// the consume window) is answered again instead of filing a second one, so a
+// retrying agent does not flood the owner with requests.
+// Looked up by the anchor in SQL, not by scanning a capped list: with more than
+// 500 data_delete requests on the table, a list scan missed the open one and
+// filed a duplicate (#2090 review).
+function openDeleteApproval(anchor: string): Approval | undefined {
+  const freshAfter = Math.floor(Date.now() / 1000) - approvalWindowSeconds()
+  return getDb().prepare(`
+    SELECT * FROM approvals
+     WHERE category = 'data_delete' AND content_hash = ? AND consumed_at IS NULL
+       AND (status = 'pending' OR (status = 'approved' AND resolved_at >= ?))
+     ORDER BY requested_at DESC LIMIT 1
+  `).get(anchor, freshAfter) as Approval | undefined
+}
+
+// The owner reads this, so the server words it from the row, not the caller.
+function memoryDeleteDescription(row: MemoryRow, caller: string | undefined): string {
+  const snippet = row.content.replace(/\s+/g, ' ').trim().slice(0, 160)
+  return [
+    `Emlék végleges törlése: #${row.id} (gazdája: ${row.agent_id ?? 'ismeretlen'}, tier: ${row.category ?? '-'}, ${row.content.length} karakter).`,
+    `Kezdete: "${snippet}${row.content.length > 160 ? '...' : ''}"`,
+    `Kérte: ${caller || 'ismeretlen hívó'}. A törlés a verziókat is viszi, nem visszaállítható.`,
+  ].join(' ')
+}
+
 export function memoryVersion(content: string | null | undefined): string {
   return createHash('sha256').update(content ?? '').digest('hex').slice(0, 16)
 }
@@ -308,6 +344,22 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       return true
     }
 
+    // Card f90928e3: date= / since= / until= narrow the search to a created_at
+    // window. An unknown expression is a 400 with the accepted forms: a filter
+    // that is silently dropped would answer a wider question than the one asked.
+    // The window goes INTO every search branch below (like `category`), never
+    // after the LIMIT.
+    const dateFilter = resolveDateFilter({
+      date: url.searchParams.get('date'),
+      since: url.searchParams.get('since'),
+      until: url.searchParams.get('until'),
+    })
+    if (!dateFilter.ok) {
+      json(res, { error: dateFilter.error }, 400)
+      return true
+    }
+    const tsRange = dateFilter.filter?.ts
+
     let results: Memory[]
     // Per-row provenance for the keyword branches:
     // 'strict' (the AND pass), 'relaxed' (the OR pass), 'substring' (the LIKE
@@ -324,46 +376,47 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     // relaxed=false while doing it. Every search branch below takes it now.
     const searchCategory = tier || undefined
     if (q && mode === 'hybrid') {
-      results = await hybridSearch(agentId || MAIN_AGENT_ID, q, limit, hybridTrace, searchCategory)
+      results = await hybridSearch(agentId || MAIN_AGENT_ID, q, limit, hybridTrace, searchCategory, tsRange)
     } else if (q && agentId) {
-      results = searchAgentMemories(agentId, q, limit, searchTrace, !strictOnly, searchCategory)
+      results = searchAgentMemories(agentId, q, limit, searchTrace, !strictOnly, searchCategory, tsRange)
       keywordMatchKind = searchTrace.relaxed ? 'relaxed' : 'strict'
       if (results.length === 0) {
         keywordMatchKind = 'substring'
         // Substring fallback. It is NOT a second relaxation: LIKE %q% still
         // requires the query to appear literally, so a query that matches
-        // nothing still returns nothing.
+        // nothing still returns nothing. The query is escaped, so `%` and `_`
+        // in q are literal characters, not wildcards.
         const db2 = getDb()
-        results = (searchCategory
-          ? db2.prepare("SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND category = ? AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?")
-              .all(agentId, searchCategory, `%${q}%`, `%${q}%`, limit)
-          : db2.prepare("SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?")
-              .all(agentId, `%${q}%`, `%${q}%`, limit)) as Memory[]
+        const pattern = `%${escapeLike(q)}%`
+        const dt = tsRange ? ' AND created_at >= ? AND created_at <= ?' : ''
+        results = db2.prepare(`SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared')${searchCategory ? ' AND category = ?' : ''}${dt} AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY accessed_at DESC LIMIT ?`)
+          .all(agentId, ...(searchCategory ? [searchCategory] : []), ...(tsRange ? [tsRange.fromTs, tsRange.toTs] : []), pattern, pattern, limit) as Memory[]
       }
     } else if (q) {
-      results = searchMemories(q, ALLOWED_CHAT_ID, limit, !strictOnly, searchCategory, searchTrace)
+      results = searchMemories(q, ALLOWED_CHAT_ID, limit, !strictOnly, searchCategory, searchTrace, tsRange)
       keywordMatchKind = searchTrace.relaxed ? 'relaxed' : 'strict'
       if (results.length === 0) {
         keywordMatchKind = 'substring'
         const db2 = getDb()
-        results = (searchCategory
-          // MEMKWSEARCH1018: keywords joins the fallback here, as it already
-          // does on the agent-scoped branch above. Without it the two paths
-          // disagree about what a memory IS: fts5 indexes content AND keywords
-          // (see the memories_fts migration), the agent branch searches both,
-          // and this one searched content alone -- so a row findable with
-          // ?agent= was invisible without it, with a header that says
-          // relaxed=false. A zero that looks like a real answer is the whole
-          // cost of this bug, which is why the fix is the parity, not a new mode.
-          ? db2.prepare('SELECT * FROM memories WHERE (content LIKE ? OR keywords LIKE ?) AND category = ? ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, `%${q}%`, searchCategory, limit)
-          : db2.prepare('SELECT * FROM memories WHERE (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, `%${q}%`, limit)) as Memory[]
+        const pattern = `%${escapeLike(q)}%`
+        // MEMKWSEARCH1018: keywords joins the fallback here, as it already
+        // does on the agent-scoped branch above. Without it the two paths
+        // disagree about what a memory IS: fts5 indexes content AND keywords
+        // (see the memories_fts migration), the agent branch searches both,
+        // and this one searched content alone -- so a row findable with
+        // ?agent= was invisible without it, with a header that says
+        // relaxed=false. A zero that looks like a real answer is the whole
+        // cost of this bug, which is why the fix is the parity, not a new mode.
+        const dt = tsRange ? ' AND created_at >= ? AND created_at <= ?' : ''
+        results = db2.prepare(`SELECT * FROM memories WHERE (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')${searchCategory ? ' AND category = ?' : ''}${dt} ORDER BY accessed_at DESC LIMIT ?`)
+          .all(pattern, pattern, ...(searchCategory ? [searchCategory] : []), ...(tsRange ? [tsRange.fromTs, tsRange.toTs] : []), limit) as Memory[]
       }
     } else if (agentId) {
-      // Category goes into the query, not a post-filter: see getAgentMemories.
-      results = getAgentMemories(agentId, limit, tier || undefined, offset)
+      // Category and date window go into the query, not a post-filter: see getAgentMemories.
+      results = getAgentMemories(agentId, limit, tier || undefined, offset, tsRange)
     } else {
       // Category goes into the query here too, not a post-filter: see getMemoriesForChat.
-      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit, offset, tier || undefined)
+      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit, offset, tier || undefined, tsRange)
     }
 
     // Kept as a backstop, not as the mechanism. Since MEMKERESVAK917 every
@@ -386,6 +439,12 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       created_label: new Date(m.created_at * 1000).toLocaleString('hu-HU', { timeZone: APP_TZ }),
       accessed_label: new Date(m.accessed_at * 1000).toLocaleString('hu-HU', { timeZone: APP_TZ }),
     }))
+    // The window actually applied, appended last so a caller matching the
+    // earlier fields keeps working. A side the caller left open stays empty
+    // (`date=2026-10-01..`). The filter never relaxes: no tag means no window.
+    const dateTag = dateFilter.filter
+      ? `; date=${dateFilter.filter.from ?? ''}..${dateFilter.filter.to ?? ''}`
+      : ''
     // The body of this endpoint is a bare array and several callers index into
     // it, so the trace rides a header rather than changing the shape.
     if (q && mode === 'hybrid') {
@@ -395,7 +454,7 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
           ` relaxed=${hybridTrace.ftsRelaxed}; vector-only=${hybridTrace.vectorOnly};` +
           // Appended, not inserted: a caller matching the earlier fields keeps
           // working. Vector-only rows dropped below the similarity floor.
-          ` vector-dropped=${hybridTrace.vectorDropped ?? 0}`,
+          ` vector-dropped=${hybridTrace.vectorDropped ?? 0}` + dateTag,
       )
     } else if (q) {
       // The label the endpoint owed its callers. `relaxed=true` means no row
@@ -403,7 +462,7 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       // caller answering "do we have anything on this" can tell the two apart
       // without asking twice. `strict=true` says the caller demanded a real
       // match, and an empty body then means exactly what it looks like.
-      res.setHeader('X-Memory-Search', `strict=${strictOnly}; relaxed=${searchTrace.relaxed}; hits=${results.length}`)
+      res.setHeader('X-Memory-Search', `strict=${strictOnly}; relaxed=${searchTrace.relaxed}; hits=${results.length}${dateTag}`)
     } else {
       // The listing branches owe a label too. Without one the caller cannot
       // tell "this endpoint does not label its answers" from "this answer was
@@ -417,7 +476,7 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       // body alone cannot see that.
       res.setHeader(
         'X-Memory-Search',
-        `listing=true; hits=${results.length}; truncated=${results.length >= limit}`,
+        `listing=true; hits=${results.length}; truncated=${results.length >= limit}${dateTag}`,
       )
     }
     jsonMaybeGzip(req, res, formatted)
@@ -724,11 +783,57 @@ Respond ONLY with JSON, nothing else:
     const before = getMemoryById(id)
     if (!before) { json(res, { error: 'Memory not found' }, 404); return true }
 
+    // MARVEENGAPS1020 (a): the delete is final (the versions go with the row),
+    // and the autonomy config ships data_delete at level 1, locked. Below level 3
+    // the delete runs only with an approved, unused data_delete approval bound to
+    // THIS memory in THIS content state (the anchor): without one the server files
+    // the request itself and answers 409, so a script never reads it as done.
+    const deleteLevel = readAutonomyLevel('data_delete')
+    let approvedDelete = false
+    if (deleteLevel.level < 3) {
+      const anchor = memoryDeleteAnchor(id, before.content)
+      const approvalId = url.searchParams.get('approval_id')
+      if (!approvalId) {
+        const approval = openDeleteApproval(anchor) ?? fileServerApproval({
+          agent_id: ctx.auth?.agent || 'unknown',
+          category: 'data_delete',
+          action_description: memoryDeleteDescription(before, ctx.auth?.agent),
+          action_payload: JSON.stringify({ memory_id: id, version: memoryVersion(before.content) }),
+          content_hash: anchor,
+        })
+        json(res, {
+          error: 'approval_required',
+          approval_id: approval.id,
+          status: approval.status,
+          level: deleteLevel.level,
+          how_to_proceed: approval.status === 'approved'
+            ? `Jóváhagyva. Ugyanez a kérés ?approval_id=${approval.id} paraméterrel törli; az azonosító egyszer használható.`
+            : `A törlés jóváhagyásra vár (Dashboard -> Jóváhagyások, id: ${approval.id}). Jóváhagyás után ugyanez a kérés ?approval_id=${approval.id} paraméterrel törli; az azonosító egyszer használható, és csak erre az emlékre, ebben a tartalmi állapotban érvényes.`,
+        }, 409)
+        return true
+      }
+      const consumed = consumeApproval({
+        id: approvalId,
+        category: 'data_delete',
+        contentHash: anchor,
+        consumer: 'memory-delete',
+        messageId: null,
+        windowSeconds: approvalWindowSeconds(),
+      })
+      if (!consumed.ok) {
+        logger.warn({ memoryId: id, approvalId, reason: consumed.reason }, 'Memory delete refused: approval not usable')
+        json(res, { error: 'approval_not_usable', reason: consumed.reason }, consumed.reason === 'not_found' ? 404 : 409)
+        return true
+      }
+      approvedDelete = true
+    }
+
     // A delete is a total overwrite, so the same tier scope applies -- but the
     // shrink ratio is meaningless against an empty result: what matters is
     // whether a large, long-lived row disappears. Below the 10th percentile the
     // deletion is not suspicious, exactly as with the edit.
-    if (guardedTier(before) && !confirmOverwrite(url) && before.content.length >= OLD_LEN_FLOOR) {
+    // An owner-approved delete has had the stronger confirmation already.
+    if (!approvedDelete && guardedTier(before) && !confirmOverwrite(url) && before.content.length >= OLD_LEN_FLOOR) {
       const oldLen = before.content.length
       logger.warn({ memoryId: id, oldLen, owner: before.agent_id }, 'Destructive memory delete refused')
       json(res, {

@@ -1,14 +1,16 @@
 import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync, copyFileSync, renameSync } from 'node:fs'
 import { join, extname, dirname } from 'node:path'
 import { homedir, platform, tmpdir } from 'node:os'
-import { execSync, execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { logger } from '../../logger.js'
 import { beginRestart, endRestart } from '../restart-lock.js'
 import { restartOptsFromBody } from '../restart-wake.js'
 import { isModelProfileId, MODEL_PROFILE_IDS } from '../../model-profiles.js'
-import { MAIN_AGENT_ID, currentBotName, PROJECT_ROOT } from '../../config.js'
+import { MAIN_AGENT_ID, currentBotName, PROJECT_ROOT, RESERVED_AGENT_IDS } from '../../config.js'
 import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent, markMessageFailed, countNewerMessagesFromSameSender,
   getAgentToolActivity, getAgentMessageActivity, getAgentCurrentCards } from '../../db.js'
+import { nicknameFor } from '../team-nicknames.js'
 import { deriveAgentStatus, AGENT_STATUS_THRESHOLDS } from '../agent-status.js'
 import type { AgentStatusSignals, AgentStatusRow } from '../agent-status.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-message-wrap.js'
@@ -98,6 +100,9 @@ import {
   getProvider,
   channelStateDir,
   readChannelToken,
+  readChannelEnv,
+  teamsSecretExpiry,
+  TEAMS_SECRET_EXPIRY_KEY,
   checkTelegramTokenBusy,
   generateSlackAppManifest,
   getSlackAppSetupInstructions,
@@ -134,7 +139,7 @@ import { activityState, type ActivityState } from '../pane-liveness.js'
 import { checkAgentPutFields, checkConfigPutFields, AGENT_PUT_WRITABLE_FIELDS } from '../agent-put-fields.js'
 import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
-import { readContextGuardConfig, writeContextGuardConfig, seedContextGuardForNewAgent } from '../context-guard-store.js'
+import { readContextGuardConfig, mergeContextGuardConfig, seedContextGuardForNewAgent } from '../context-guard-store.js'
 import { getContextGuardStatus } from '../context-guard-runner.js'
 import type { AutoRestartConfig } from '../../auto-restart.js'
 import type { ContextGuardConfig } from '../../context-guard.js'
@@ -177,6 +182,42 @@ import { readAgentTranscript, isTranscriptAllowed } from '../agent-transcript.js
 import { configDirFor } from '../main-transcript-root.js'
 import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
 import { isValidModelId, InvalidModelIdError } from '../../model-id.js'
+
+const execFileAsync = promisify(execFile)
+
+// The Slack smoke test runs for up to 60 s: run it off the event loop, and as an
+// argv, so the agent name is a plain argument, never part of a shell command
+// line. stdin is closed at once, as execSync did.
+async function runSlackSmokeTestNow(scriptPath: string, name: string): Promise<{ ok: boolean; output: string }> {
+  try {
+    const pending = execFileAsync('bash', [scriptPath, name], {
+      timeout: 60000,
+      encoding: 'utf-8',
+      env: { ...process.env, SLACK_SMOKE_TEST_ALLOWED: 'true' },
+    })
+    pending.child.stdin?.end()
+    const { stdout, stderr } = await pending
+    // execSync let the script's stderr through to the dashboard's own; keep that
+    // for a passing run (a failing run already returns it in `output`).
+    if (stderr) process.stderr.write(stderr)
+    return { ok: true, output: stdout }
+  } catch (err: unknown) {
+    const execErr = err as { stdout?: string; stderr?: string }
+    return { ok: false, output: (execErr.stdout || '') + (execErr.stderr || '') }
+  }
+}
+
+// One smoke test at a time, as while the call was synchronous: the script
+// passes on ANY new gate.inbound.deliver entry that lands in the agent's
+// audit.jsonl after it started, so a run overlapping another could pass on
+// the other run's delivery.
+let slackSmokeQueue: Promise<unknown> = Promise.resolve()
+
+export function runSlackSmokeTest(scriptPath: string, name: string): Promise<{ ok: boolean; output: string }> {
+  const run = slackSmokeQueue.then(() => runSlackSmokeTestNow(scriptPath, name))
+  slackSmokeQueue = run.catch(() => {})
+  return run
+}
 
 // Which credential kinds may read a transcript. NAMED principals only: a
 // logged-in human, or a key enrolled to that human's own device. Deliberately
@@ -473,6 +514,8 @@ export interface AgentSummary {
   remoteWorkdir: string | null
   session?: string
   hasAvatar: boolean
+  /** Character nickname from store/team-nicknames.json; undefined when unset. */
+  nickname?: string
   autoRestart: AutoRestartConfig
   /** Per-agent context-guard config, carried here for the same reason as
    *  autoRestart: the settings pane renders both from one detail fetch. */
@@ -498,6 +541,8 @@ interface AgentDetail extends AgentSummary {
   mcpJson: string
   skills: { name: string; hasSkillMd: boolean }[]
   hasAvatar: boolean
+  /** Character nickname from store/team-nicknames.json; undefined when unset. */
+  nickname?: string
   hasApiKey: boolean
 }
 
@@ -613,6 +658,7 @@ function getAgentSummary(name: string): AgentSummary {
     remoteWorkdir: remote.workdir,
     session,
     hasAvatar: findAvatarForAgent(name) !== null,
+    nickname: nicknameFor(name),
     autoRestart: readAutoRestartConfig(name),
     contextGuard: readContextGuardConfig(name),
     // GATECTX910: same location the activeModel read above uses. The previous
@@ -656,6 +702,7 @@ function getAgentDetail(name: string): AgentDetail {
     mcpJson,
     skills,
     hasAvatar: findAvatarForAgent(name) !== null,
+    nickname: nicknameFor(name),
     hasApiKey: getSecret(`agent-${name}-api-key`) !== null,
   }
 }
@@ -1111,6 +1158,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // below never sees it: without this, a sub-agent named like the main one
     // is created and shares its id in messages, kanban and memories.
     if (name === MAIN_AGENT_ID) { json(res, { error: 'Name is reserved for the main agent' }, 409); return true }
+    // An id the message layer owns (FLEETRESERVEDNAME1021, with the configured
+    // voice channel id, VOICECHANNELID1022): a sub-agent under it could not
+    // send, or would be framed as something it is not.
+    if (RESERVED_AGENT_IDS.includes(name)) { json(res, { error: 'Name is reserved by the system' }, 409); return true }
     if (existsSync(agentDir(name))) { json(res, { error: 'Agent already exists' }, 409); return true }
 
     scaffoldAgentDir(name)
@@ -1355,18 +1406,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { error: 'SLACK_SMOKE_TEST_ALLOWED=true nincs beállítva az agent .env-jében' }, 403)
       return true
     }
-    try {
-      // Argument array, no shell: the name comes from the URL.
-      const output = execFileSync('bash', [scriptPath, name], {
-        timeout: 60000,
-        encoding: 'utf-8',
-        env: { ...process.env, SLACK_SMOKE_TEST_ALLOWED: 'true' },
-      })
-      json(res, { ok: true, output })
-    } catch (err: unknown) {
-      const execErr = err as { stdout?: string; stderr?: string }
-      json(res, { ok: false, output: (execErr.stdout || '') + (execErr.stderr || '') }, 200)
-    }
+    json(res, await runSlackSmokeTest(scriptPath, name))
     return true
   }
 
@@ -1413,16 +1453,24 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const token = readChannelToken(provider, envPath) || (!isMain && provider === 'telegram' ? parseTelegramToken(name) : null)
     if (!token) { json(res, { error: `${provider} not configured for this agent` }, 404); return true }
     const channelProvider = getProvider(provider)
-    const result = await channelProvider.validateToken(token)
+    const channelEnv = readChannelEnv(envPath, [...channelProvider.envKeys, TEAMS_SECRET_EXPIRY_KEY])
+    const result = channelProvider.validateCredentials
+      ? await channelProvider.validateCredentials(channelEnv)
+      : await channelProvider.validateToken(token)
+    const secretExpiry = provider === 'teams' ? teamsSecretExpiry(channelEnv[TEAMS_SECRET_EXPIRY_KEY]) : undefined
+    if (secretExpiry?.state === 'invalid') {
+      logger.warn({ agent: name, value: secretExpiry.value }, 'Teams secret expiry date is not YYYY-MM-DD; ignored')
+    }
     if (result.ok) {
       json(res, {
         ok: true,
         botName: result.botName,
         ...(result.missingScopes ? { scopes: result.scopes, missingScopes: result.missingScopes } : {}),
+        ...(secretExpiry ? { secretExpiry } : {}),
       })
       return true
     }
-    json(res, { error: result.error }, 400)
+    json(res, { error: result.error, ...(secretExpiry ? { secretExpiry } : {}) }, 400)
     return true
   }
 
@@ -1802,8 +1850,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
   // GET/PUT /api/agents/:name/context-guard -- per-agent context-guard config
   // (kanban #81). Default-off (opt-in): a GET for an agent with no store entry
-  // returns the disabled defaults. PUT normalizes server-side like auto-restart,
-  // and like auto-restart it rejects unknown keys instead of swallowing them.
+  // returns the disabled defaults. PUT MERGES the body over the stored config
+  // (an omitted key keeps its value -- see mergeContextGuardConfig), normalizes
+  // the result, and like auto-restart rejects unknown keys instead of
+  // swallowing them. Unlike auto-restart, it no longer replaces the whole row.
   const contextGuardMatch = path.match(/^\/api\/agents\/([^/]+)\/context-guard$/)
   if (contextGuardMatch && (method === 'GET' || method === 'PUT')) {
     const name = decodeURIComponent(contextGuardMatch[1])
@@ -1821,7 +1871,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       return true
     }
     setStoreWriteActor('dashboard')
-    const saved = writeContextGuardConfig(name, data)
+    const saved = mergeContextGuardConfig(name, data)
     json(res, { ok: true, contextGuard: saved })
     return true
   }
@@ -2710,6 +2760,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
   if (agentMatch && method === 'DELETE') {
     const name = decodeURIComponent(agentMatch[1])
+    // A directory named after the main agent is not a sub-agent: deleting it
+    // here would remove whatever it holds and strip the main agent from every
+    // team's reportsTo/delegatesTo (MAINGHOST1024).
+    if (isMainChannelsAgent(name)) { json(res, { error: 'The main agent cannot be deleted' }, 400); return true }
     const dir = agentDir(name)
     if (!existsSync(dir)) { json(res, { error: 'Agent not found' }, 404); return true }
     // Clear the desired run-state FIRST, before anything yields. Deleting an

@@ -14,7 +14,9 @@ Nothing at all ran on the main agent's own sends -- and the main agent is the on
 that actually writes to customers.
 
 What it checks, all three from standing owner rules in CLAUDE.md:
-  1. Hungarian text that is missing its accents (the incident above).
+  1. Hungarian text that is missing its accents (the incident above). Known limit (KAPUES1018): a text with fewer
+     than 3 distinct HU markers can pass with an accentless 'es'; see the KNOWN LIMIT comment above
+     AMBIGUOUS_TRIGGER.
   2. Em dash (U+2014) -- forbidden in every deliverable.
   3. Owner-specific NAME rules (misspelled surnames etc.) -- loaded from an
      untracked local rules file (GATEPERSIST816), never hardcoded here.
@@ -354,6 +356,103 @@ _WRAPPERS = {
 }
 _HEAD_DEPTH = 8
 
+# MAILGATEUV1020: a project launcher's `run` subcommand in front of the sender --
+# `uv run python .../send.py --to x`, `uv run send.py --to x`, `uv run -m send
+# --to x`, `pipx run send.py --to x`, `poetry run python send.py --to x` -- made
+# the launcher the "program", so the send was not recognised by either copy
+# (measured on develop a6325a49: 26 launcher shapes, all passed; found by the
+# #2081 negative control). The launcher is stepped over like a wrapper, past its
+# subcommand and its own options, and the word after them is judged as the
+# command: `uv run` and `pipx run` take a script path directly, so `send.py`
+# there is the program. `uv run -m X` is `python3 -m X`.
+# name -> (subcommand, short flags taking a value, long flags taking a value,
+# module flags, flag lists measured as complete). uv and pipx: the value flags
+# are read from `uv run --help` (uv 0.10.2) and `pipx run --help` (pipx 1.11.1)
+# on the dev host. The others were not installed there, so their flags are not
+# listed, and every word of their option run that could be the program is
+# judged as one (a word after an option may be its value or the command): an
+# unknown option errs toward auditing, as with _WRAPPERS.
+# Not covered: `uvx` / `uv tool run` (they run an installed package's entry
+# point, not a script path), and a module flag inside a short cluster (`-qm`).
+# Mirrored in email-send-gate.mjs (LAUNCHERS / launcherHeads);
+# send-invocation-cases.json binds the two.
+_UV_RUN_LONG_VAL = (
+    "extra", "no-extra", "group", "no-group", "only-group", "env-file", "with",
+    "with-editable", "with-requirements", "package", "python-platform", "index", "default-index",
+    "index-url", "extra-index-url", "find-links", "index-strategy", "keyring-provider",
+    "upgrade-package", "resolution", "prerelease", "fork-strategy", "exclude-newer",
+    "exclude-newer-package", "no-sources-package", "reinstall-package", "link-mode",
+    "config-setting", "config-settings-package", "no-build-isolation-package", "no-build-package",
+    "no-binary-package", "cache-dir", "refresh-package", "python", "color", "allow-insecure-host",
+    "directory", "project", "config-file",
+)
+_LAUNCHERS = {
+    "uv": ("run", "wifPCp", _UV_RUN_LONG_VAL, ("-m", "--module"), True),
+    "pipx": ("run", "", ("index-url", "pip-args", "python", "spec", "with"), (), True),
+    **{n: ("run", "", (), (), False)
+       for n in ("poetry", "pdm", "hatch", "pipenv", "rye", "conda", "mamba", "micromamba")},
+}
+
+
+def _launcher_heads(toks, spec, _d: int):
+    sub, short_val, long_val, module_flags, complete = spec
+    # The subcommand may follow the launcher's global options (`uv --directory d run`):
+    # every word before it is an option or the value right after one.
+    j = -1
+    for x in range(1, len(toks)):
+        if toks[x] == sub:
+            j = x
+            break
+        if not toks[x].startswith("-") and not (x > 1 and toks[x - 1].startswith("-")):
+            break
+    if j < 0:
+        return [toks]
+    heads = []
+    if not complete:
+        # An unmeasured launcher's options are unknown, so every word in its option
+        # run that could be the program is judged as the program: the word after an
+        # option may be that option's value, or the command (Dani's #2086 review:
+        # `conda run --no-capture-output -n base python send.py` mixes a flag and a
+        # value option, which no single reading of all options fits).
+        for x in range(j + 1, len(toks)):
+            if toks[x] == "--":
+                heads.append(toks[x + 1:])
+                break
+            if toks[x].startswith("-") and len(toks[x]) > 1:
+                continue
+            heads.append(toks[x:])
+            if not (x > j + 1 and toks[x - 1].startswith("-") and len(toks[x - 1]) > 1):
+                break
+        if not heads:
+            heads.append([])
+    else:
+        i, head = j + 1, None
+        while i < len(toks):
+            t = toks[i]
+            if t == "--":
+                i += 1
+                break
+            if t in module_flags:
+                head = ["python3", "-m"] + toks[i + 1:]
+                break
+            if t.startswith("--"):
+                eq = t.find("=")
+                if eq > 0 and t[:eq] in module_flags:
+                    head = ["python3", "-m", t[eq + 1:]] + toks[i + 1:]
+                    break
+                i += 2 if eq < 0 and t[2:] in long_val else 1
+                continue
+            if t.startswith("-") and len(t) > 1:
+                k = next((x for x, ch in enumerate(t[1:], 1) if ch in short_val), -1)
+                i += 2 if k == len(t) - 1 else 1
+                continue
+            break
+        heads.append(head if head is not None else toks[i:])
+    out = []
+    for h in heads:
+        out += _command_heads(h, _d + 1)
+    return out
+
 
 def _command_heads(toks, _d: int = 0):
     """Every token list that can be the real command of this segment, after the
@@ -368,11 +467,14 @@ def _command_heads(toks, _d: int = 0):
         # so it counts as a send (None) -- the bound errs toward auditing, like
         # an unknown flag does. It used to return the wrapper itself, and nine
         # nested wrappers + sendmail was silently skipped (Samu, #1521 review).
-        return [None] if (w in _WRAPPERS or w in ("function", "coproc")) else [toks]
+        return [None] if (w in _WRAPPERS or w in _LAUNCHERS or w in ("function", "coproc")) else [toks]
     if w == "function":
         return _command_heads(toks[2:], _d + 1)
     if w == "coproc":
         return _command_heads(toks[1:], _d + 1) + _command_heads(toks[2:], _d + 1)
+    launcher = _LAUNCHERS.get(w)
+    if launcher is not None:
+        return _launcher_heads(toks, launcher, _d)
     spec = _WRAPPERS.get(w)
     if spec is None:
         return [toks]
@@ -412,10 +514,93 @@ def _segment_is_send(toks, depth: int) -> bool:
 # SUBAGENTMAILGATE1016: the sender was recognised only with the script as the
 # FIRST interpreter argument and the exact --to flag. The boundary and the
 # measured bypasses are written out at pythonHeadSends in email-send-gate.mjs
-# (the JS twin); send-invocation-cases.json binds the two.
+# (the JS twin); send-invocation-cases.json binds the two. MAILGATEVARARGS1020
+# narrowed the undecidable-path branch to the recipient flag (same place).
 _PY_OPT_WITH_ARG = {"-X", "-W", "--check-hash-based-pycs"}
 _RECIPIENT_FLAG = re.compile(r"^--to?(=|$)")
 _UNDECIDABLE_PATH = re.compile(r"[*?[{$]")
+
+
+# FLEETTOFLAG1025 v4 (Merlin 34827, after three RO rounds of tokenizer patches): no tokenizer reading of the recipient value any
+# more. On an UNDECIDABLE program or script the recipient flag is a send, EXCEPT when every --to / --to= value is a KNOWN agent name
+# (the install's agents/ directories and its MAIN_AGENT_ID) AND the WHOLE command line has no `@`, no `~` word other than a `~/` path
+# and no --cc / --bcc. Every other shape is a send (fail-closed): a continuation, a redirection or a future form next to the value
+# simply is not a known agent name, and an address anywhere in the line blocks the exception.
+_FLEET_EXEMPT_BLOCK = re.compile(r"@|(?:^|[\s='\"(])~(?!/)|--b?cc\b")
+_FLEET_TOKEN_BLOCK = re.compile(r"--(?:cc?|bc{0,2})(?:=|\Z)|~(?!/)")   # on the DEQUOTED words: `--c""c`, `--\cc` are `--cc` to the program;
+# (v4.1, Merlin 34962) an argparse abbreviation (--c, --b, --bc) is --cc / --bcc to a default-argparse script: a send
+_AGENT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+KNOWN_AGENTS_OVERRIDE = None   # the shared conformance list sets it (send-invocation-cases.json known_agents); None = the install
+_LINE_EXEMPT_OK = [False]      # set per top-level is_send_invocation call from the WHOLE command line
+
+
+def _tok(t: str) -> str:
+    """a token as the program sees it after a backslash-newline: the glued leading / trailing newlines cut"""
+    return t.strip("\n")
+
+
+def _recipient_flag(t: str) -> bool:
+    """the --to / --t flag on the cut token (RO #56 minor 1: the python `$` also matched before a trailing newline, the JS one not)"""
+    return _RECIPIENT_FLAG.match(_tok(t)) is not None
+
+
+def _known_agents() -> set:
+    """the agent names of THIS install: <root>/agents/* directories and MAIN_AGENT_ID in <root>/.env (root = two levels above
+    this file). Any read error = an empty set, i.e. no exception (fail-closed)."""
+    if KNOWN_AGENTS_OVERRIDE is not None:
+        return set(KNOWN_AGENTS_OVERRIDE)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    names = set()
+    try:
+        d = os.path.join(root, "agents")
+        names |= {n for n in os.listdir(d) if _AGENT_NAME.match(n) and os.path.isdir(os.path.join(d, n))}
+    except OSError:
+        pass   # no agents/ directory: only the main agent can be known
+    try:
+        with open(os.path.join(root, ".env"), encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*MAIN_AGENT_ID\s*=\s*['\"]?([^'\"\s#]+)", line)
+                if m and _AGENT_NAME.match(m.group(1)):
+                    names.add(m.group(1))
+    except OSError:
+        pass   # no .env: the main agent is not known (fail-closed)
+    return names
+
+
+def _line_clean(cmd: str) -> bool:
+    """FLEETTOFLAG1025 v4 (Codex 0dd77c650df7): no address marker in the line -- neither in the raw text (`@`, `~`-word, --cc/--bcc)
+    nor in any DEQUOTED word of any segment, the substitution-flattened form included (`--c""c "$E"` is `--cc` to the program).
+    An unparseable line is not clean (fail-closed)."""
+    if _FLEET_EXEMPT_BLOCK.search(cmd):
+        return False
+    try:
+        words = [t for c in (cmd, flatten_substitutions(cmd)) for seg in _segments_tokens(c) for t in seg]
+    except ValueError:
+        return False
+    return not any("@" in w or _FLEET_TOKEN_BLOCK.match(_tok(w)) for w in words)
+
+
+def _fleet_to_exempt(rest) -> bool:
+    """FLEETTOFLAG1025 v4: True (not a letter) only if the whole line passed the address check and every --to / --t value -- the
+    very next token, or the part after `=` -- is a known agent name. A missing or empty value is not a name."""
+    if not _LINE_EXEMPT_OK[0]:
+        return False
+    vals = []
+    for i, t in enumerate(rest):
+        tt = _tok(t)
+        if tt in ("--to", "--t"):
+            vals.append(_tok(rest[i + 1]) if i + 1 < len(rest) else "")
+        elif tt.startswith(("--to=", "--t=")):
+            vals.append(tt.split("=", 1)[1])
+    if not vals:
+        return False
+    known = _known_agents()
+    return all(v in known for v in vals)
+
+
+def _undecidable_recipient_sends(rest) -> bool:
+    """an undecidable program / script with a recipient flag is a send unless the fleet-agent exception holds"""
+    return any(_recipient_flag(t) for t in rest) and not _fleet_to_exempt(rest)
 
 
 def _python_script_operand(rest):
@@ -437,8 +622,8 @@ def _python_script_operand(rest):
             stdin_redirect = True
             i += 2 if t == "<" else 1
             continue
-        if re.match(r"^\d*>", t):
-            i += 2 if re.match(r"^\d*>>?$", t) else 1
+        if re.match(r"^[0-9]*>", t):   # ASCII digits only, as the JS twin (and bash: a file descriptor is ASCII)
+            i += 2 if re.match(r"^[0-9]*>>?$", t) else 1
             continue
         if t.startswith("-") and len(t) > 1:
             i += 1
@@ -507,15 +692,18 @@ def flatten_substitutions(cmd: str) -> str:
 
 
 def _python_head_sends(rest) -> bool:
-    recipient = any(_RECIPIENT_FLAG.match(t) for t in rest)
+    recipient = any(_recipient_flag(t) for t in rest)
     script, stdin, stdin_redirect = _python_script_operand(rest)
     if script is not None and _SENDPY.match(_basename(script)):
         return recipient
     if script is not None and _UNDECIDABLE_PATH.search(script):
         name = _basename(script)
+        # a literal script name: only a recipient flag makes it a send, with upstream's fleet-agent exception
         if name and not _UNDECIDABLE_PATH.search(name):
-            return recipient
-        return recipient or any(t != script and "$" in t for t in rest)
+            return _undecidable_recipient_sends(rest)
+        # FORK (SENDGATELITERAL1023, kept through v1.45.0): when the NAME is undecidable too, another `$` token
+        # still makes it a send; upstream relaxed this to a documented limit (MAILGATEVARARGS1020).
+        return _undecidable_recipient_sends(rest) or any(t != script and "$" in t for t in rest)
     if stdin or (script is None and stdin_redirect):
         return recipient
     return False
@@ -551,13 +739,16 @@ def _head_is_send(toks, depth: int) -> bool:
         for i, t in enumerate(rest):
             if t == "-m" and i + 1 < len(rest) and rest[i + 1].rsplit(".", 1)[-1] == "send":
                 candidates.append("send.py")
-    if any(_SENDPY.match(c) for c in candidates) and any(_RECIPIENT_FLAG.match(t) for t in rest):
+    if any(_SENDPY.match(c) for c in candidates) and any(_recipient_flag(t) for t in rest):
         return True
     if _PYTHON.match(prog) and _python_head_sends(rest):
         return True
     # an interpreter or program that cannot be resolved statically ($PY, a glob,
     # a substitution) with a recipient flag: what runs is undecidable here
-    if _UNDECIDABLE_PATH.search(toks[0]) and any(_RECIPIENT_FLAG.match(t) for t in rest):
+    # FLEETTOFLAG1025: the address rule -- but a send.py run by it (`$PY scripts/support-mail/send.py --to x`) keeps the bare flag rule
+    script = _python_script_operand(rest)[0]   # the script position (interpreter options, redirections skipped), not a data argument
+    if _UNDECIDABLE_PATH.search(toks[0]) and (_undecidable_recipient_sends(rest) or (
+            script is not None and _SENDPY.match(_basename(script)) and any(_recipient_flag(t) for t in rest))):
         return True
     # graph-mail kimeno alparanccsal (tsx/node runner utan is)
     if any(_GRAPHMAIL.match(_basename(t)) for t in toks) and "send" in rest:
@@ -694,6 +885,9 @@ def _heredoc_program_sends(cmd: str, depth: int = 0) -> bool:
 
 
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
+    # FLEETTOFLAG1025 v4: the fleet-agent exception is decided on the WHOLE line; a wrapper body (depth > 0) can only tighten it.
+    # A module-level flag is enough: the hook is one process per tool call, and the evaluation is single-threaded.
+    _LINE_EXEMPT_OK[0] = (_depth == 0 or _LINE_EXEMPT_OK[0]) and _line_clean(cmd)
     if _heredoc_program_sends(cmd, _depth):
         return True
     try:
@@ -807,6 +1001,149 @@ ACCENTLESS = {
     "kezzel": "kézzel", "peldaul": "például", "izolalt": "izolált",
     "kozben": "közben", "udvozlettel": "üdvözlettel", "oket": "őket",
     "afa": "áfa", "allapot": "állapot", "all": "áll",
+    # EKEZET1018 (2026-10-18): +476 entries. The candidates are accented word forms collected from a live
+    # install's own correctly accented Hungarian customer-facing copy (web pages, ad and post texts), after
+    # stripping code, paths and hyphenated identifiers. The trigger: short accentless messages ('unnepek', 'lakas',
+    # 'haloszoba', 'padlofutes', 'kulcsszef') went through the gate. Each key went through the filters below and a
+    # manual review (three review rounds). LEFT OUT, with the reason:
+    #   automatically: accentless forms of <= 3 letters (meg, kor, kod, var, fel, jo, mar, ...: too many homonyms),
+    #   forms that are also words in correctly accented Hungarian prose (helyen), English words (panorama), and
+    #   everything that was already in the dictionary;
+    #   by manual judgement, because the accentless form is ANOTHER real Hungarian word: mert, mertek, mertem,
+    #   merve, merne, merni, meri (merni = 'dare'), akar, kapna, kapcsolhatok, agyak, aggyal, varja, fele, teli,
+    #   termek, hajra, deli, tora, futott (fut), mentes ('free of'), tartalmat (accusative of tartalom, the same
+    #   class as 'levelet'), tartsatok (imperative), tarolunk (tarol is a verb), and instrumental -nal/-nel forms
+    #   of place names; frequent English / international forms: dont, fore, datum, foto, hatter; proper names and
+    #   place names in general (this dictionary holds no proper names).
+    # Where the accentless form can stand for two correct forms, both are suggested (kornyeken, szoveget, ertek,
+    # meglevo, szallashelyen, ...), and where the spelling rules require two words, that form is named first
+    # (ujepitesu -> 'új építésű', nyitvatartast -> 'nyitva tartást'; AkH12).
+    "ablakaba": "ablakába", "adataibol": "adataiból", "adatfeldolgozokent": "adatfeldolgozóként",
+    "adatkezelesi": "adatkezelési", "adatkezelo": "adatkezelő", "adatkezeloje": "adatkezelője",
+    "adatvedelmi": "adatvédelmi", "adozasi": "adózási", "ajanlat": "ajánlat",
+    "ajanlatot": "ajánlatot", "alakjaban": "alakjában", "alapjan": "alapján", "alapveto": "alapvető",
+    "allitas": "állítás", "allitashoz": "állításhoz", "allithatjatok": "állíthatjátok", "allithato": "állítható",
+    "alvohely": "alvóhely", "alvohelyet": "alvóhelyet / alvóhelyét", "apartmantol": "apartmantól", "atjon": "átjön",
+    "atment": "átment", "atnezve": "átnézve", "atutalas": "átutalás", "autoval": "autóval", "bajtokra": "bájtokra",
+    "bajtra": "bájtra", "bankkartya": "bankkártya",
+    "bankkartyas": "bankkártyás", "barki": "bárki", "barmikor": "bármikor", "beallitasok": "beállítások",
+    "beallitasokban": "beállításokban", "bejutas": "bejutás", "belul": "belül", "berelt": "bérelt", "betu": "betű",
+    "beture": "betűre", "bongeszod": "böngésződ", "bonthato": "bontható", "borvidek": "borvidék",
+    "bringaut": "bringaút", "bringaval": "bringával", "cellaba": "cellába", "cimben": "címben",
+    "csaladoknak": "családoknak", "csuszda": "csúszda", "datuma": "dátuma", "datumkorlat": "dátumkorlát",
+    "datumok": "dátumok", "datumos": "dátumos", "datumot": "dátumot", "datumsor": "dátumsor",
+    "dobozaban": "dobozában", "dohanyzas": "dohányzás", "dontese": "döntése", "dontesi": "döntési", "donto": "döntő",
+    "edeny": "edény", "egesz": "egész", "egeszeben": "egészében", "egyeb": "egyéb", "egyesevel": "egyesével",
+    "egyezest": "egyezést", "egymas": "egymás", "ejes": "éjes", "ejjel": "éjjel", "ejre": "éjre",
+    "ejszaka": "éjszaka", "ejszam": "éjszám", "ejszamot": "éjszámot", "ekezet": "ékezet", "ekezetet": "ékezetet / ékezetét",
+    "ekezettel": "ékezettel", "elemzese": "elemzése", "elemzesehez": "elemzéséhez", "elerhetoseg": "elérhetőség",
+    "elerhetosegek": "elérhetőségek", "elirtuk": "elírtuk", "elkepzelheto": "elképzelhető",
+    "ellenorizheted": "ellenőrizheted", "ellenorizve": "ellenőrizve", "ellenorzesek": "ellenőrzések",
+    "elmeny": "élmény", "elobb": "előbb", "eloirasoknak": "előírásoknak", "elotte": "előtte", "elotti": "előtti",
+    "elsodleges": "elsődleges", "elteres": "eltérés", "elutasitana": "elutasítana", "elutasitasi": "elutasítási",
+    "epitesu": "építésű", "erdekeben": "érdekében", "erheto": "érhető", "erhetok": "érhetők", "erkezes": "érkezés",
+    "erkezessel": "érkezéssel", "erkezik": "érkezik", "ertek": "érték / értek", "ertekeles": "értékelés",
+    "ertekelesek": "értékelések", "eszkozt": "eszközt", "eszkozzel": "eszközzel", "etterem": "étterem",
+    "ettol": "ettől", "evszakban": "évszakban", "felbontason": "felbontáson", "felhasznaloi": "felhasználói",
+    "felnott": "felnőtt", "feltetelek": "feltételek", "felugyeletevel": "felügyeletével", "felul": "felül",
+    "fizetes": "fizetés", "foglalas": "foglalás", "foglalasi": "foglalási", "foglalaskezeles": "foglaláskezelés",
+    "foglalasnal": "foglalásnál", "foglalasra": "foglalásra", "foglalast": "foglalást", "foglalhato": "foglalható",
+    "foglalo": "foglaló", "foglaloig": "foglalóig", "foldszint": "földszint", "foldszinti": "földszinti",
+    "fooldal": "főoldal", "fooldalon": "főoldalon", "fooldalra": "főoldalra", "formatumban": "formátumban",
+    "forras": "forrás", "forrashoz": "forráshoz", "forrasukhoz": "forrásukhoz", "foszezonban": "főszezonban",
+    "fozolap": "főzőlap", "furdoszoba": "fürdőszoba", "futheto": "fűthető", "fuves": "füves", "graphbol": "graphból",
+    "grillezo": "grillező", "grillezohely": "grillezőhely", "gyujtott": "gyűjtött / gyújtott", "hajszarito": "hajszárító",
+    "haloban": "hálóban", "haloszoba": "hálószoba", "haloszobaban": "hálószobában", "haloszobaszam": "hálószobaszám",
+    "haloszobaval": "hálószobával", "halozat": "hálózat", "hany": "hány", "harmas": "hármas", "hasznal": "használ",
+    "hasznalhatjatok": "használhatjátok", "hasznalhatnak": "használhatnak", "hasznalhattok": "használhattok",
+    "hasznaljak": "használják / használjak", "hasznaljuk": "használjuk", "hasznalt": "használt",
+    "hasznalunk": "használunk", "hatalyos": "hatályos", "hatosag": "hatóság", "hazadat": "házadat / hazádat",
+    "helyiseget": "helyiséget / helyiségét", "hetvege": "hétvége", "hetvegek": "hétvégék", "hetvegen": "hétvégén",
+    "hetvegere": "hétvégére", "hirdetesbol": "hirdetésből", "hirdetesek": "hirdetések", "hirdetesen": "hirdetésen / hirdetésén",
+    "hirdetesszovege": "hirdetésszövege", "hofok": "hőfok", "hofokot": "hőfokot", "homerseklet": "hőmérséklet",
+    "homokozo": "homokozó", "honapig": "hónapig", "hoszivattyus": "hőszivattyús", "hoterkepek": "hőtérképek",
+    "hozzajarul": "hozzájárul", "hozzajarulasat": "hozzájárulását", "hutes": "hűtés", "hutest": "hűtést",
+    "hutheto": "hűthető", "idejeig": "idejéig", "idopontot": "időpontot", "iger": "ígér", "inditasa": "indítása",
+    "indulas": "indulás", "informaciok": "információk", "informacioszabadsag": "információszabadság",
+    "irhato": "írható", "irjon": "írjon", "irjuk": "írjuk", "jatszoter": "játszótér", "jatszoteret": "játszóteret / játszóterét",
+    "jogszabalyi": "jogszabályi", "jogszabalyoknak": "jogszabályoknak", "jonnel": "jönnél",
+    "jovahagyas": "jóváhagyás", "jovahagyott": "jóváhagyott", "jutast": "jutást", "kanape": "kanapé",
+    "kanapeagy": "kanapéágy", "karacsony": "karácsony", "kartya": "kártya", "kattintassal": "kattintással",
+    "kauciot": "kauciót", "kavefozo": "kávéfőző", "kedvezmeny": "kedvezmény", "kenyelmes": "kényelmes",
+    "kepek": "képek", "kepen": "képen / képén", "kepernyo": "képernyő", "kepernyoje": "képernyője", "kepre": "képre",
+    "kerdesekkel": "kérdésekkel", "kerekparokat": "kerékpárokat", "kerekpartarolo": "kerékpártároló",
+    "kerekpartaroloban": "kerékpártárolóban", "keri": "kéri", "kertjeben": "kertjében", "kertjet": "kertjét",
+    "kerul": "kerül", "kerunk": "kérünk", "kezeleseben": "kezelésében", "kezeljuk": "kezeljük",
+    "kihuzhato": "kihúzható", "kikotoi": "kikötői", "kilato": "kilátó", "kitetel": "kitétel", "kivul": "kívül",
+    "kockazatos": "kockázatos", "koddal": "kóddal", "kodjai": "kódjai", "kodot": "kódot / ködöt", "koncepcio": "koncepció",
+    "konyhakep": "konyhakép", "konyhas": "konyhás", "konyhaval": "konyhával", "korbekeritve": "körbekerítve",
+    "korben": "körben", "korbol": "körből / korból", "korfajl": "körfájl", "korfajlba": "körfájlba",
+    "kornyeken": "környéken / környékén", "kornyezetben": "környezetben", "korul": "körül",
+    "kotelezettseg": "kötelezettség", "kotelezo": "kötelező", "kotheto": "köthető", "kovess": "kövess",
+    "kozel": "közel", "kozelben": "közelben", "kozelgo": "közelgő", "kozeli": "közeli",
+    "kozremukodik": "közreműködik", "koztarsasag": "köztársaság", "kozti": "közti", "kozvetlen": "közvetlen",
+    "kreativok": "kreatívok", "kulcsszeffel": "kulcsszéffel", "kulonallo": "különálló", "kulonben": "különben",
+    "lakas": "lakás", "lakasban": "lakásban", "lakashoz": "lakáshoz", "lakassal": "lakással", "lakasunk": "lakásunk",
+    "lakhatasi": "lakhatási", "lassuk": "lássuk", "latjuk": "látjuk", "latogato": "látogató",
+    "latogatok": "látogatók / látogatok", "latogatottsag": "látogatottság", "latogatottsagot": "látogatottságot",
+    "legkondicionalt": "légkondicionált", "legrovidebb": "legrövidebb", "leiras": "leírás", "leirast": "leírást",
+    "lejar": "lejár", "lemondas": "lemondás", "lemondasi": "lemondási",
+    "letszam": "létszám", "levo": "lévő / levő", "listaja": "listája", "listajahoz": "listájához", "majustol": "májustól",
+    "masodik": "második", "masodperces": "másodperces", "medencek": "medencék", "medencet": "medencét",
+    "megallitja": "megállítja", "megerkezhettek": "megérkezhettek", "megfelelo": "megfelelő",
+    "megfeleloen": "megfelelően", "megfigyeles": "megfigyelés", "megis": "mégis",
+    "megjelenitesehez": "megjelenítéséhez", "megkeresheto": "megkereshető", "megkulonbozteto": "megkülönböztető",
+    "meglevo": "meglévő / meglevő", "megnezve": "megnézve", "megnyitasa": "megnyitása", "megtalalhato": "megtalálható",
+    "megtekinteseig": "megtekintéséig", "mentese": "mentése", "meretu": "méretű", "merhetoseg": "mérhetőség",
+    "merjuk": "mérjük / merjük", "mezoje": "mezője", "mikrohullamu": "mikrohullámú", "mindharom": "mindhárom",
+    "mindkettoben": "mindkettőben", "molo": "móló", "mosogatogep": "mosogatógép", "mosogep": "mosógép",
+    "mosogeppel": "mosógéppel", "mukodesehez": "működéséhez", "munkaterulet": "munkaterület", "mutans": "mutáns",
+    "mutanson": "mutánson", "nalunk": "nálunk", "napfeny": "napfény", "napjan": "napján", "napozashoz": "napozáshoz",
+    "nappalibol": "nappaliból", "naptar": "naptár", "naptarban": "naptárban", "naptarig": "naptárig",
+    "nehany": "néhány", "nekunk": "nekünk", "nelkuli": "nélküli", "nezd": "nézd", "neztem": "néztem",
+    "nezzetek": "nézzetek / nézzétek", "nyar": "nyár", "nyilik": "nyílik",
+    "nyitvatartast": "nyitva tartást / nyitvatartást", "onallo": "önálló",
+    "orszagbol": "országból", "orzesi": "őrzési", "orzi": "őrzi", "osszel": "ősszel", "oszi": "őszi",
+    "padlofutes": "padlófűtés", "padlofutessel": "padlófűtéssel", "parkolas": "parkolás", "parkolo": "parkoló",
+    "parkoloval": "parkolóval", "paroknak": "pároknak", "partisztasag": "pártisztaság",
+    "partisztasaga": "pártisztasága", "partjan": "partján", "pezsgo": "pezsgő", "pihenes": "pihenés",
+    "piheneshez": "pihenéshez", "pihenesre": "pihenésre", "privat": "privát", "proban": "próbán",
+    "ralatas": "rálátás", "redony": "redőny", "regisztracio": "regisztráció",
+    "rendezvenyek": "rendezvények", "resze": "része", "reszleteket": "részleteket", "rogzitett": "rögzített",
+    "rogzitunk": "rögzítünk", "segitheti": "segítheti", "seta": "séta", "setany": "sétány", "soran": "során",
+    "sotet": "sötét", "sotetitett": "sötétített", "strandfurdo": "strandfürdő", "surgos": "sürgős", "suti": "süti",
+    "sutijei": "sütijei", "sutik": "sütik", "sutiket": "sütiket", "sutikhez": "sütikhez", "sutit": "sütit",
+    "suto": "sütő", "szabaly": "szabály", "szabalyok": "szabályok", "szabalyon": "szabályon", "szallas": "szállás",
+    "szallasdijbol": "szállásdíjból", "szallashelyen": "szálláshelyen / szálláshelyén", "szamjegy": "számjegy",
+    "szamodra": "számodra", "szamozott": "számozott", "szandekosan": "szándékosan", "szazalek": "százalék",
+    "szemelyes": "személyes", "szemelyre": "személyre", "szemenek": "szemének", "szol": "szól",
+    "szolgaltatasa": "szolgáltatása", "szolgaltatast": "szolgáltatást", "szolgaltatunk": "szolgáltatunk",
+    "szoljon": "szóljon", "szomszedban": "szomszédban", "szovegbe": "szövegbe", "szovegben": "szövegben",
+    "szovege": "szövege", "szovegeben": "szövegében", "szovegek": "szövegek", "szoveget": "szöveget / szövegét",
+    "szoveggel": "szöveggel", "szovegmezok": "szövegmezők", "szukseg": "szükség", "szuksegesek": "szükségesek",
+    "tagas": "tágas", "talalhato": "található", "talalsz": "találsz", "tamogatja": "támogatja",
+    "tarolhatjatok": "tárolhatjátok", "tartozkodas": "tartózkodás",
+    "taviranyitos": "távirányítós", "taviranyitoval": "távirányítóval", "tavolsagok": "távolságok",
+    "telefonszam": "telefonszám", "telen": "télen / telén", "terkep": "térkép", "terulet": "terület",
+    "tetel": "tétel", "tietek": "tiétek", "toltodik": "töltődik", "torli": "törli",
+    "torlodnek": "törlődnek", "tortenik": "történik", "tudnivalo": "tudnivaló", "tuzijatek": "tűzijáték",
+    "udvarbol": "udvarból", "ugras": "ugrás", "ugyanigy": "ugyanígy", "ujepitesu": "új építésű / újépítésű",
+    "ujrarender": "újrarender", "unnep": "ünnep", "unnepek": "ünnepek", "unnepi": "ünnepi", "urlapok": "űrlapok",
+    "utja": "útja", "utoirat": "utóirat", "uzemelnek": "üzemelnek", "uzemelteto": "üzemeltető", "valaszd": "válaszd",
+    "valaszolunk": "válaszolunk", "valo": "való", "valtozat": "változat", "valtozatlanul": "változatlanul",
+    "valtozo": "változó", "varnotok": "várnotok", "vasalo": "vasaló", "vegeig": "végéig", "vegleges": "végleges",
+    "velemenyek": "vélemények", "vendegek": "vendégek", "vendegeket": "vendégeket",
+    "vendegertekelesek": "vendégértékelések", "vendeglo": "vendéglő", "veszit": "veszít",
+    "vezerelheto": "vezérelhető", "vezerlopaneleken": "vezérlőpaneleken", "videolejatszast": "videolejátszást",
+    "visszaellenorizhesse": "visszaellenőrizhesse", "visszaigazolas": "visszaigazolás",
+    "visszaolvasasa": "visszaolvasása", "vitorlas": "vitorlás", "vizpartig": "vízpartig", "zaro": "záró",
+    "zart": "zárt", "zuhanyzoval": "zuhanyzóval",
+    # adatvedelem and kornyek are also typical page paths ('az /adatvedelem/ lap'). They stay in the dictionary:
+    # the EKEZETMASZK1018 path mask covers a /path after a space, and in running prose they are still errors.
+    "adatvedelem": "adatvédelem", "kornyek": "környék",
+    # Not from the collected copy, but forms that went through the gate in the measurement above: 'kulcsszef' (the
+    # copy only has 'kulcsszéffel') and 'olcso'. Neither is a real word without its accents.
+    "kulcsszef": "kulcsszéf", "olcso": "olcsó",
 }
 
 # GATEHOMOGLIF816 (2026-08-16, Marveen merese): 33 cirill homoglifa ult a
@@ -1169,9 +1506,40 @@ _TECH_SUFFIXED = r"""
 TECHNICAL = re.compile(_TECH_COMMON + "|" + _TECH_SUFFIXED, re.X)
 NAME_MASK = re.compile(_TECH_COMMON, re.X)
 
+# EKEZETMASZK1018 (2026-10-18): all three review rounds of the EKEZET1018 dictionary extension found the same class:
+# a dictionary word matched in a place that is not Hungarian prose. TECHNICAL does not cover an #anchor, a --flag or a
+# /path that starts after a space (it does cover 'word/word': \b[\w-]*/[\w/-]+ needs a word boundary before the
+# opening '/'). These three branches are a SEPARATE mask that only the accent check uses (hits, ratio, context),
+# applied after TECHNICAL. TECHNICAL is also used by the homoglyph rule (mixed_script_words) and the double-hyphen
+# count, and there the mask would hide a Cyrillic homoglyph inside '#fоglalas' or '--jоvahagyott'. The name-rule
+# mask (NAME_MASK) does not get them either.
+# The path branch does NOT swallow a sentence-final period ('/kapcsolat.'): otherwise the next sentence's capitalised
+# first word would look like a mid-sentence capital, and the accent check would skip it.
+# COPYMASK1019 (2026-10-20, measured on the #2065 corpus check): two more shapes that only carry identifiers, also
+# accent-only for the same reason: a directory with its trailing slash ('kepek/', 'fizetes/*'; a word/word path is
+# already in TECHNICAL) and a key=value pair ('funkcio=ertekeles'). NOT masked, deliberately:
+#   - a QUOTED word or phrase. A quoted single token looked like a literal value ('lakas'), but it is also exactly how
+#     a button label or a value to type is written for a customer ('kattints a "reszletek" gombra'), so a mask would
+#     let accentless customer copy through (Samu, #2085 review). A quoted identifier goes in backticks;
+#   - a bare table or page name in a sentence ('a velemenyek táblán'), which has no shape that tells it from prose:
+#     backticks again.
+_ACCENT_ONLY = r"""
+        (?<![\w&])\#[\w-]+                   # anchor / hashtag (#reszletek): an identifier, not prose
+      | (?<![\w-])--[A-Za-z][\w-]*            # command-line flag (--jovahagyott)
+      | (?<![\w/])/[\w-]+(?:[./][\w-]+)*/?    # a path that starts with / after a space (az /adatvedelem/ lap), no final period
+      | (?<![\w/.-])[\w.-]+/\**(?=[\s,;:.!?)\]'"]|$)   # a directory written with its trailing slash (kepek/, fizetes/*)
+      | (?<![\w.-])[A-Za-z_][\w.-]*=[^\s,;)\]'"]+   # key=value (funkcio=ertekeles), a parameter, not prose
+"""
+ACCENT_MASK = re.compile(_ACCENT_ONLY, re.X)
+
 
 def strip_technical(text: str) -> str:
     return TECHNICAL.sub(" ", text)
+
+
+def strip_for_accent(prose: str) -> str:
+    """The accent check's own ADDITIONAL mask, applied to the strip_technical output (EKEZETMASZK1018)."""
+    return ACCENT_MASK.sub(" ", prose)
 
 
 def strip_for_name(text: str) -> str:
@@ -1193,14 +1561,40 @@ def is_hungarian(text: str) -> bool:
 # vizsgalatra. Az alabbi kizaras CSAK a triggerre vonatkozik: ha a szoveg mas
 # uton magyarnak bizonyult, ezek a talalatok is jelentesre kerulnek -- de egyedul
 # nem ranthatnak be egy angol szoveget az auditba ("the all-new level editor").
+# KNOWN LIMIT (KAPUES1018, 2026-10-18): so a Hungarian text with fewer than 3 DISTINCT HU_MARKERS words (substring
+# matches count), and without any ACCENTLESS word that is NOT listed here, can pass with an accentless "es", whatever
+# its length (the >200-letter ratio branch also runs only once the audit has started). Measured size: of 267
+# Hungarian sentences with one "és" -> "es" mutation, the gate lets 206 through. Measured and pinned case:
+# "Örülünk, hogy jöttök, es nem sietünk." -> exit 0 (2 markers: hogy, nem); with "már" (a 3rd marker) the same text
+# is blocked. A third trigger built on the text's other accented words gave false blocks in three review rounds on
+# non-Hungarian customer text that quotes a Hungarian dish or place name (e.g. Spanish "Probamos pörkölt y
+# kürtőskalács, es delicioso."), so it was rejected: the gate's main value is that it does not wrongly block a
+# customer message. Test: scripts/__tests__/outgoing-copy-gate-kapues1018-hatar.test.py.
 AMBIGUOUS_TRIGGER = {
     "es", "ar", "arak", "ev", "evi", "ot", "uj", "ujat", "het", "ora", "mas",
     "all", "level", "video", "netto",
+    # EKEZET1018: foreign-looking forms that must not pull a non-Hungarian text into the audit on their own; in a
+    # text that is Hungarian by other evidence they are still reported.
+    "privat", "zart", "molo", "seta", "mutans", "kanape",
+}
+
+# EKEZET1018: the NAME class exempts only when CAPITALISED. In lowercase these are frequent Hungarian words (soran,
+# kozel, hany, keri, levo), and in a short accentless message they are exactly the evidence; only the capitalised
+# sentence-start form can be a foreign name ("Soran will ship", "Kozel agreed"). accent_check_tokens() already drops
+# a capitalised word in mid-sentence, so a capitalised token here is always sentence-initial.
+AMBIGUOUS_NAME_TRIGGER = {
+    # sentence-start English words / names (Keri, Iger, Soran) that would pull an English text in on their own
+    "keri", "iger", "soran",
+    # the same class (sentence-start foreign names / brands: Hany, Korben, Kozel, Barki, Levo)
+    "hany", "korben", "kozel", "barki", "levo",
 }
 
 
-def accentless_evidence(words):
-    return {w for w in words if w in ACCENTLESS and w not in AMBIGUOUS_TRIGGER}
+def accentless_evidence(tok_pos, text):
+    """The trigger evidence, from (lowercase form, position) pairs, using the original case in `text`."""
+    return {w for w, p in tok_pos
+            if w in ACCENTLESS and w not in AMBIGUOUS_TRIGGER
+            and not (w in AMBIGUOUS_NAME_TRIGGER and text[p:p + 1].isupper())}
 
 
 # collect_bash_body / collect_mcp_body moved VERBATIM to email_extract.py
@@ -1216,15 +1610,42 @@ def accentless_evidence(words):
 # calls these) fail-open as designed.
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from email_extract import collect_bash_body, collect_mcp_body  # noqa: E402
+    from email_extract import (collect_bash_body, collect_harder_mail_text, collect_mcp_body,  # noqa: E402
+                               classify_mail_tool, is_harder_mail_tool, is_ms365_tool,
+                               ms365_text_checked)
 except Exception as _extract_exc:  # noqa: BLE001 -- deliberate fail-closed stub
     _EXTRACT_ERR = repr(_extract_exc)
 
     def collect_bash_body(cmd: str):
         return ("", f"az email_extract modul nem toltheto be ({_EXTRACT_ERR})")
 
-    def collect_mcp_body(tool_input: dict):
+    def collect_mcp_body(tool_input: dict, tool_name: str = ""):
         return ""
+
+    def collect_harder_mail_text(tool_input: dict):
+        return ("", f"az email_extract modul nem toltheto be ({_EXTRACT_ERR})")
+
+    def is_harder_mail_tool(tool_name):
+        return False
+
+    def is_ms365_tool(tool_name):
+        return False
+
+    def ms365_text_checked(tool_input):
+        return ("", None)
+
+    def classify_mail_tool(tool_name):
+        # Without the shared classifier nothing can be classified precisely.
+        # Crude SUPERSET instead: every outbound name holds one of these words,
+        # so each lands on the unreadable (fail-closed) branch of main();
+        # manage_email keeps its operation test, and plain reads (search /
+        # read / list) still pass.
+        n = str(tool_name or "").lower()
+        if n == "bash":
+            return None
+        if "manage_email" in n:
+            return "manage_email"
+        return "draft" if re.search(r"send|draft|reply|forward", n) else None
 
 
 # --- Telegram reply (GATETG816) ---------------------------------------------
@@ -1369,9 +1790,14 @@ def collect_channel_body(tool_input: dict, unescape_mdv2: bool) -> str:
     # tapped label is what the recipient sees and sends back. A label this gate
     # did not read would be the silent zero above, so every label joins the body;
     # a value that is not a list is read as it is (the loud side).
+    # DCBTN1023: the Discord reply tool's buttons (scripts/patch-discord-plugin.py)
+    # are objects, {label, style}: only the label is shown, so only the label is
+    # read -- the dict's own words (label, style, success) would be ASCII noise in
+    # the accent ratio. An object without a string label is read as it is.
     buttons = tool_input.get("buttons")
     if isinstance(buttons, (list, tuple)):
-        got += [str(b) for b in buttons if str(b).strip()]
+        got += [s for s in (str(b["label"]) if isinstance(b, dict) and isinstance(b.get("label"), str) else str(b)
+                            for b in buttons) if s.strip()]
     elif buttons:
         got.append(str(buttons))
     joined = "\n".join(got)
@@ -1514,14 +1940,17 @@ def audit(text: str):
             f"VEGYES IRASRENDSZERU SZO (homoglifa), {len(mixed)} db: {shown}{more}. "
             "Latin szoba keveredett nem-latin betu: olvasva lathatatlan, de a keresest/grepet neman eltori."
         )
-    tok_pos = accent_check_tokens(prose)
+    # EKEZETMASZK1018: the accent check runs on the text after the ADDITIONAL identifier mask (anchor, flag, /path);
+    # the homoglyph and double-hyphen rules above still see the TECHNICAL-masked prose, unchanged.
+    accent_prose = strip_for_accent(prose)
+    tok_pos = accent_check_tokens(accent_prose)
     words = [w for w, _ in tok_pos]
-    if is_hungarian(plain) or accentless_evidence(words):
+    if is_hungarian(plain) or accentless_evidence(tok_pos, accent_prose):
         hits = sorted({w for w in words if w in ACCENTLESS})
         # Az aranyot is a prozan merjuk: a technikai tokenekben nincs ekezet, tehat
         # egy kodban gazdag, egyebkent helyes level aranyat lefele huznak.
-        letters = sum(1 for ch in prose if ch.isalpha())
-        acc = sum(1 for ch in prose if ch in ACCENTED)
+        letters = sum(1 for ch in accent_prose if ch.isalpha())
+        acc = sum(1 for ch in accent_prose if ch in ACCENTED)
         ratio = (acc / letters) if letters else 0.0
         if hits:
             first_pos = {}
@@ -1529,7 +1958,7 @@ def audit(text: str):
                 if w in ACCENTLESS and w not in first_pos:
                     first_pos[w] = p
             shown = ", ".join(
-                f"{h} -> {ACCENTLESS[h]} ({_hit_context(prose, first_pos[h], len(h))})"
+                f"{h} -> {ACCENTLESS[h]} ({_hit_context(accent_prose, first_pos[h], len(h))})"
                 for h in hits[:12]
             )
             more = f" (+{len(hits) - 12} tovabbi)" if len(hits) > 12 else ""
@@ -1554,13 +1983,23 @@ MANAGE_EMAIL_OUTBOUND_OPS = {"send", "reply", "replyall", "forward"}
 # GMAILCONNECTOR914: the server segment is NOT always exactly "gmail" -- the
 # claude.ai connector is mcp__claude_ai_Gmail__send_message, one underscore
 # before Gmail, and `(^|__)gmail__` never matched it, so its sends fell through
-# to sys.exit(0) with no audit (measured 2026-08-30, 2026-09-08). Anything
-# ending in "gmail__<send-shaped tool>" is a send now, whatever the prefix.
+# to sys.exit(0) with no audit (measured 2026-08-30, 2026-09-08).
+# The names are now classified by the shared suffix classifier
+# (email_extract.classify_mail_tool), a superset of the pattern that stood here:
+# a tool prefix (mcp__gmail__v2_reply_all) or a server without "gmail__" right
+# before the base (mcp__server-gmail-autoauth-mcp__reply_all) no longer moves a
+# send out of the audit. EMAIL_TOOL_RE stays for importers only.
 EMAIL_TOOL_RE = re.compile(
     r"(send_email|create_draft|draft_email|update_draft"
     r"|gmail__(reply|reply_all|send_message|forward)$)",
     re.I,
 )
+# The kinds whose payload carries OUR text and is audited here. send_draft is
+# deliberately NOT one of them: it carries only a draftId, so there is no text
+# of ours in the call (the draft's text was audited when it was written), and
+# an empty payload would turn every send_draft into a permanent fail-closed
+# deny, overruling the approval gate's level decision for it.
+_AUDITED_MAIL_KINDS = ("send_email", "connector_send", "draft")
 
 
 # --- Inter-agent messages: HOMOGLYPH-ONLY (INTERAGENTHOMOGLIF923) -----------
@@ -1830,8 +2269,7 @@ def main():
     if not isinstance(tool_input, dict):
         shape = type(tool_input).__name__
         gated = (re.search(r"telegram.*__reply$", tool, re.I)
-                 or re.search(r"(^|__)manage_email$", tool, re.I)
-                 or EMAIL_TOOL_RE.search(tool)
+                 or classify_mail_tool(tool) is not None
                  or tool == "Bash")
         if not gated:
             sys.exit(0)  # not a send: the net must never widen the gate
@@ -1871,7 +2309,8 @@ def main():
     # while the same text was blocked on the Telegram path. Same class as the
     # email-send-gate's MANAGEOP904 fix: a multiplexer cannot be classified by
     # its name, only by the operation it was asked to perform.
-    if re.search(r"(^|__)manage_email$", tool, re.I):
+    mail_kind = classify_mail_tool(tool)
+    if mail_kind == "manage_email":
         op = str(tool_input.get("operation") or tool_input.get("action") or "").strip().lower()
         if op not in MANAGE_EMAIL_OUTBOUND_OPS:
             sys.exit(0)  # search/read/labels/trash...: no outgoing text of ours
@@ -1881,8 +2320,33 @@ def main():
         if op == "forward" and not str(tool_input.get("body") or "").strip():
             sys.exit(0)
         text, unreadable = collect_mcp_body(tool_input), None
-    elif EMAIL_TOOL_RE.search(tool):
-        text, unreadable = collect_mcp_body(tool_input), None
+    elif mail_kind in _AUDITED_MAIL_KINDS:
+        # MS365MAIL1024: update-mail-message / update-shared-mailbox-message are
+        # drafts that may carry only a flag (isRead) or a changed field, not a
+        # letter -- with no text there is nothing of ours to audit, and the
+        # fail-closed "no inspectable text" branch below would block the read
+        # flag flip for no reason. SECURITY review on MS365MAIL1024, round 2: the
+        # Graph read is chosen by the tool NAME (is_ms365_tool), so a non-Graph
+        # tool with an object body is audited on its flat fields and a Graph
+        # tool without a Graph shape still is; a Graph call is read through
+        # ms365_text_checked, so a case-duplicate key (a "Subject" next to a
+        # "subject") is unreadable here, not "no text"; an update tool skips the
+        # audit only when it is readable AND carries no text.
+        is_update = (str(tool or "").lower().replace("-", "_")
+                     .endswith(("update_mail_message", "update_shared_mailbox_message")))
+        if is_ms365_tool(tool):
+            text, unreadable = ms365_text_checked(tool_input)
+            if is_update and not unreadable and not text:
+                sys.exit(0)
+        else:
+            if is_update and not collect_mcp_body(tool_input, tool):
+                sys.exit(0)
+            if is_harder_mail_tool(tool) and tool_input.get("body_format") not in (None, ""):
+                # HARDERMAILGATES1019 (design 6.3a): a formatted harder-mail letter is
+                # audited on the text the server renders from it, never on raw markup.
+                text, unreadable = collect_harder_mail_text(tool_input)
+            else:
+                text, unreadable = collect_mcp_body(tool_input, tool), None
     elif tool == "Bash":
         cmd = str(tool_input.get("command") or "")
         if not is_send_invocation(cmd):

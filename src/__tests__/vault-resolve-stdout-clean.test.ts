@@ -22,6 +22,8 @@ beforeAll(() => {
   mkdirSync(join(ROOT, 'scripts'), { recursive: true })
   mkdirSync(join(ROOT, 'dist', 'web'), { recursive: true })
   copyFileSync(join(process.cwd(), 'scripts', 'vault-resolve.mjs'), join(ROOT, 'scripts', 'vault-resolve.mjs'))
+  // v1.45.0: vault-resolve.mjs imports its dashboard client (no token file in ROOT -> the local path runs, as before)
+  copyFileSync(join(process.cwd(), 'scripts', 'vault-dashboard-client.mjs'), join(ROOT, 'scripts', 'vault-dashboard-client.mjs'))
   writeFileSync(join(ROOT, 'dist', 'web', 'vault.js'), [
     `const line = '[2026-10-22 16:58:16.060 +0200] WARN (1): Keychain migration failed, keeping file-based key\\n'`,
     `if (process.env.MARVEEN_LOG_STDERR === '1') process.stderr.write(line); else process.stdout.write(line)`,
