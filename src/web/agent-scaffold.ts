@@ -1055,6 +1055,17 @@ export function hasThreadReplyCapability(name: string, capabilities: string[]): 
   return name !== MAIN_AGENT_ID && capabilities.includes(EMAIL_THREAD_REPLY_CAPABILITY)
 }
 
+// MONITORGATE1030 (card 7f941346): the matcher every shell-command gate rides on.
+// The Monitor tool runs its `command` in the same shell as Bash, but a hook bound
+// to `Bash` never fires on it: measured 2026-10-30, a plain-http curl to a
+// reserved .invalid host ran from Monitor while the same Bash call was denied by
+// bash-egress-parser. Only the `*` fleet-freeze gate reached it. The gate scripts
+// judge a Monitor call that carries a `command` exactly as a Bash call, so the
+// matcher and the script move together. Exported: the wiring checks below compare
+// against it, and a check left on the bare 'Bash' string would read every
+// migrated entry as unwired and rewrite it on each start.
+export const SHELL_TOOL_MATCHER = 'Bash|Monitor'
+
 // The matcher is a FULL-match regex against the tool name, and an MCP tool's
 // name is the qualified `mcp__<server>__<tool>` -- so a bare `send_email`
 // alternative never fires for an MCP server (verified live 2026-08-10: a
@@ -1103,7 +1114,7 @@ export function hasThreadReplyCapability(name: string, capabilities: string[]): 
 // Binding: email-gate-matcher-drift.test.ts asserts this matcher fires for
 // every name either classifier gates, and never for the Telegram tools.
 export const EMAIL_GATE_MATCHER =
-  'Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*'
+  `${SHELL_TOOL_MATCHER}|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*`
   + '|.*send_draft.*|.*update_draft.*|.*create_draft.*|.*reply_all.*|.*send_gmail_message.*|.*draft_gmail_message.*'
   + '|.*[Gg][Mm][Aa][Ii][Ll].*send_message.*|.*[Gg][Mm][Aa][Ii][Ll].*reply.*|.*[Gg][Mm][Aa][Ii][Ll].*forward.*'
   + '|.*send[-_]mail.*|.*send[-_]shared[-_]mailbox[-_]mail.*|.*send[-_]shared[-_]mailbox[-_]draft.*|.*send[-_]draft[-_]message.*'
@@ -1506,7 +1517,7 @@ export function bashEgressParserCovers(name: string, settings: Record<string, un
   const wiredIn = (s: Record<string, unknown>, needle: string): boolean => {
     const hooks = s.hooks && typeof s.hooks === 'object' ? s.hooks as Record<string, unknown> : {}
     const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
-    return ptu.some((e) => (e as { matcher?: unknown })?.matcher === 'Bash' && JSON.stringify(e).includes(needle))
+    return ptu.some((e) => (e as { matcher?: unknown })?.matcher === SHELL_TOOL_MATCHER && JSON.stringify(e).includes(needle))
   }
   if (name !== MAIN_AGENT_ID) return wiredIn(settings, 'bash-egress-parser.mjs')
   try {
@@ -1543,10 +1554,10 @@ export function ensureMainScopeBashEgressParser(enabled = bashEgressHostAllowEna
   const others = ptu.filter((e) => !JSON.stringify(e).includes('bash-egress-parser.mjs'))
   if (enabled) {
     const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'bash-egress-parser.mjs'), ['--main-scope'])
-    const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === 'Bash' && hookCommandWired(JSON.stringify(e), command))
+    const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === SHELL_TOOL_MATCHER && hookCommandWired(JSON.stringify(e), command))
     if (wired && others.length === ptu.length - 1) return false
     if (isUnsafeHookCommand(command)) return false
-    hooks.PreToolUse = [...others, { matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 10 }] }]
+    hooks.PreToolUse = [...others, { matcher: SHELL_TOOL_MATCHER, hooks: [{ type: 'command', command, timeout: 10 }] }]
     settings.hooks = hooks
   } else {
     if (others.length === ptu.length) return false
@@ -1570,6 +1581,10 @@ export function agentGetsGovernanceGates(name: string): boolean {
   return name !== MAIN_AGENT_ID
 }
 
+// Exported: ensureGovernanceGateCommands treats any other matcher on the gate as stale.
+export const SELF_PACE_GATE_MATCHER =
+  `ScheduleWakeup|CronCreate|CronDelete|CronList|RemoteTrigger|${SHELL_TOOL_MATCHER}|Write|Edit|NotebookEdit`
+
 // Idempotently wire the self-pace-gate PreToolUse hook (blocks ScheduleWakeup /
 // Cron* / RemoteTrigger + the Bash self-injection routes). Same shape + dedupe
 // discipline as injectEmailSendGate.
@@ -1584,7 +1599,7 @@ export function injectSelfPaceGate(existing: Record<string, unknown>): void {
     // Write|Edit|NotebookEdit are included so the gate actually fires on the
     // native-file route to the self-schedule store (gateDecision blocks a Write
     // to scheduled_tasks.json); a Bash-only matcher would leave that route open.
-    matcher: 'ScheduleWakeup|CronCreate|CronDelete|CronList|RemoteTrigger|Bash|Write|Edit|NotebookEdit',
+    matcher: SELF_PACE_GATE_MATCHER,
     hooks: [securityGateHook(command)],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
@@ -1617,7 +1632,7 @@ export function injectKanbanWriteGate(existing: Record<string, unknown>): void {
   // Registration guard: a /tmp or missing path must never enter shared settings.
   if (isUnsafeHookCommand(command)) return
   const entry = {
-    matcher: 'Bash',
+    matcher: SHELL_TOOL_MATCHER,
     hooks: [{ type: 'command', command, timeout: 10 }],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
@@ -1641,7 +1656,7 @@ export function injectDigestProvenanceGate(existing: Record<string, unknown>): v
   const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'digest-provenance-gate.mjs'))
   if (isUnsafeHookCommand(command)) return
   const entry = {
-    matcher: 'Bash',
+    matcher: SHELL_TOOL_MATCHER,
     hooks: [{ type: 'command', command, timeout: 10 }],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
@@ -1699,7 +1714,7 @@ export function injectBashEgressParser(existing: Record<string, unknown>): void 
   // Registration guard: a /tmp or missing path must never enter shared settings.
   if (isUnsafeHookCommand(command)) return
   const entry = {
-    matcher: 'Bash',
+    matcher: SHELL_TOOL_MATCHER,
     hooks: [securityGateHook(command)],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
@@ -1847,8 +1862,10 @@ export function removeSenderRoleGate(existing: Record<string, unknown>): void {
 // (rm/mv/sudo/...) and the credential reads; the file tools are the second route
 // to the same credential files, which a Bash-only matcher would leave open.
 // Kept byte-identical to the hand-wired entry it replaces (2026-09-08) so the
-// migration below is a normalization, not a behaviour change.
-export const DESTRUCTIVE_GATE_MATCHER = 'Bash|Read|Edit|Write|NotebookEdit'
+// migration below is a normalization, not a behaviour change; Monitor joined it
+// on 2026-10-30 (MONITORGATE1030), and the stale-matcher check migrates the
+// existing entries.
+export const DESTRUCTIVE_GATE_MATCHER = `${SHELL_TOOL_MATCHER}|Read|Edit|Write|NotebookEdit`
 
 // Which agents get the destructive-gate. TWO conditions, both required:
 //
@@ -2007,7 +2024,7 @@ export function injectChildClaudeGuard(existing: Record<string, unknown>): void 
   // Registration guard: a /tmp or missing path must never enter shared settings.
   if (isUnsafeHookCommand(command)) return
   const entry = {
-    matcher: 'Bash',
+    matcher: SHELL_TOOL_MATCHER,
     hooks: [{ type: 'command', command, timeout: 10 }],
   }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
@@ -2033,7 +2050,7 @@ export function ensureChildClaudeGuard(name: string): boolean {
     : {}
   const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []
   const wiredHere = ptu.some((e) => JSON.stringify(e).includes(CHILD_CLAUDE_GUARD_SCRIPT)
-    && (e as { matcher?: unknown })?.matcher === 'Bash')
+    && (e as { matcher?: unknown })?.matcher === SHELL_TOOL_MATCHER)
   if (wiredHere && hookCommandWired(JSON.stringify(ptu), command)) return false
   injectChildClaudeGuard(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -2119,7 +2136,7 @@ export function injectCredentialGate(existing: Record<string, unknown>): void {
 // high-risk shapes (a Bash command that deletes, pushes, uploads or escalates; an MCP tool that
 // sends, deletes or shares) and exits 0 on everything else, so only those cost a review. Never the
 // main agent: the operator authorizes its work directly.
-export const SECOND_REVIEWER_MATCHER = 'Bash|mcp__.*'
+export const SECOND_REVIEWER_MATCHER = `${SHELL_TOOL_MATCHER}|mcp__.*`
 export function agentGetsSecondReviewer(name: string, profile?: ProfileTemplate): boolean {
   if (name === MAIN_AGENT_ID) return false
   const p = profile ?? loadProfileTemplate(resolveAgentSecurityProfile(name))
@@ -2268,9 +2285,9 @@ export function ensureBashEgressParser(name: string): boolean {
   // Wired only when the entry carries the CURRENT command under the Bash
   // matcher: a stale node path or a different matcher is silently
   // non-enforcing, so both fall through to an in-place replace.
-  const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === 'Bash'
+  const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === SHELL_TOOL_MATCHER
     && hookCommandWired(JSON.stringify(e), command))
-  if (wired && gateEntriesBlockOnFailure(ptu, 'bash-egress-parser.mjs', 'Bash')) return false
+  if (wired && gateEntriesBlockOnFailure(ptu, 'bash-egress-parser.mjs', SHELL_TOOL_MATCHER)) return false
   if (isUnsafeHookCommand(command)) return false
   injectBashEgressParser(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -2651,8 +2668,11 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
       || emailGateMatcherStale(ptu)
       || emailGateCommandStale(ptu, emailCmdExpected)
       || !gateEntriesBlockOnFailure(ptu, 'email-send-gate.mjs'))
+  // A pre-MONITORGATE1030 matcher (no Monitor) is wired but blind to Monitor: stale, replaced in place.
+  const paceStale = ptu.some((e) => JSON.stringify(e).includes('self-pace-gate.mjs')
+    && (e as { matcher?: unknown })?.matcher !== SELF_PACE_GATE_MATCHER)
   const needPace = agentGetsGovernanceGates(name)
-    && (!hookCommandWired(ptuJson, paceCmd) || !gateEntriesBlockOnFailure(ptu, 'self-pace-gate.mjs'))
+    && (!hookCommandWired(ptuJson, paceCmd) || paceStale || !gateEntriesBlockOnFailure(ptu, 'self-pace-gate.mjs'))
   // The destructive gate has the same two failure modes, plus a third that is
   // specific to it: it was hand-wired on 2026-09-08, so an install can carry a
   // correct-looking entry this code never wrote. Treat a stale matcher as

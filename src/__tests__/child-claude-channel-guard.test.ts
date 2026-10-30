@@ -260,6 +260,20 @@ describe('child-claude guard: the real hook process', () => {
     expect(r.stdout).toBe('')
   })
 
+  // MONITORGATE1030: Monitor runs its command in the same shell as Bash, so the guard judges it the same way.
+  it('judges a Monitor command like the same Bash command', () => {
+    const monitor = (command: string) => spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify({ tool_name: 'Monitor', tool_input: { command, description: 'd', timeout_ms: 1000 } }),
+      env: { PATH: process.env.PATH ?? '', ...CHANNEL_ENV },
+      encoding: 'utf8',
+    })
+    const denied = monitor('claude -p "hi"')
+    expect(denied.status).toBe(0)
+    expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision).toBe('deny')
+    const isolated = monitor(`TELEGRAM_STATE_DIR=${empty} CLAUDE_CONFIG_DIR=${empty} claude -p x`)
+    expect({ status: isolated.status, stdout: isolated.stdout }).toEqual({ status: 0, stdout: '' })
+  })
+
   it('denies a token-less sub-agent unsetting its state dir', () => {
     const r = run('env -u TELEGRAM_STATE_DIR claude -p x', { ...CHANNEL_ENV, TELEGRAM_STATE_DIR: bare })
     expect(r.status).toBe(0)

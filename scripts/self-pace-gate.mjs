@@ -1681,7 +1681,8 @@ export function gateDecision(toolName, toolInput, opts = {}) {
 }
 
 function decide(toolName, toolInput, opts = {}) {
-  const name = String(toolName ?? '')
+  // MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+  const name = toolName === 'Monitor' && typeof toolInput?.command === 'string' ? 'Bash' : String(toolName ?? '')
   if (SELF_PACE_TOOLS.has(name)) return { deny: true }
   // Native file tools writing the self-schedule store would bypass any Bash regex.
   if (name === 'Write' || name === 'Edit' || name === 'MultiEdit' || name === 'NotebookEdit') {

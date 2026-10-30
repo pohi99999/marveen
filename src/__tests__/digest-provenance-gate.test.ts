@@ -43,6 +43,17 @@ const post = (content: string) =>
 
 const decide = (cmd: string) => gateDecision('Bash', { command: cmd }, deps)
 
+// MONITORGATE1030: Monitor runs its command in the same shell as Bash, so it gets the Bash verdict.
+describe('digest-provenance-gate: Monitor', () => {
+  it('judges a Monitor command exactly like the same Bash command, in both directions', () => {
+    const bad = post('ARCHCARD1 | waiting | eszkalald | regi allapot')
+    const good = post('RIASZTAS: a dashboard nem valaszol, HTTP 000 harom probalkozasra. Azonnali figyelem kell.')
+    expect(gateDecision('Monitor', { command: bad, description: 'd' }, deps).deny).toBe(true)
+    expect(gateDecision('Monitor', { command: good, description: 'd' }, deps).deny).toBe(false)
+    expect(gateDecision('Monitor', { command: good, description: 'd' }, deps).deny).toBe(decide(good).deny)
+  })
+})
+
 describe('digest-provenance-gate: scope (legitimate traffic passes untouched)', () => {
   it('ignores non-Bash tools', () => {
     expect(gateDecision('Read', { file_path: '/x' }, deps).deny).toBe(false)
@@ -160,7 +171,7 @@ describe('digest-provenance-gate: wiring', () => {
     const entries = (settings.hooks as { PreToolUse: unknown[] }).PreToolUse
       .filter((e) => JSON.stringify(e).includes('digest-provenance-gate.mjs'))
     expect(entries).toHaveLength(1)
-    expect(JSON.stringify(entries[0])).toContain('"matcher":"Bash"')
+    expect(JSON.stringify(entries[0])).toContain('"matcher":"Bash|Monitor"')
   })
   it('does not clobber pre-existing PreToolUse entries', () => {
     const settings: Record<string, unknown> = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'other.sh' }] }] } }

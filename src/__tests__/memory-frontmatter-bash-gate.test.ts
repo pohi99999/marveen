@@ -92,6 +92,21 @@ describe('memory-frontmatter-bash-gate: a broken memory file written from Bash i
   })
 })
 
+// MONITORGATE1030: Monitor runs its command in the same shell as Bash, so a memory write from it is
+// judged the same way, in both directions.
+describe('memory-frontmatter-bash-gate: Monitor', () => {
+  const monitor = { tool_name: 'Monitor' }
+  it('a broken memory file written from Monitor -> exit 2, a valid one -> 0', () => {
+    const cmd = `tee ${MEM}/feedback_new.md`
+    expect(run('PreToolUse', cmd, 'toolu_m1', monitor).code).toBe(0)
+    writeFileSync(join(MEM, 'feedback_new.md'), BROKEN)
+    expect(run('PostToolUse', cmd, 'toolu_m1', monitor).code).toBe(2)
+    expect(run('PreToolUse', cmd, 'toolu_m2', monitor).code).toBe(0)
+    writeFileSync(join(MEM, 'feedback_new.md'), GOOD)
+    expect(run('PostToolUse', cmd, 'toolu_m2', monitor).code).toBe(0)
+  })
+})
+
 describe('memory-frontmatter-bash-gate: positive control and scope', () => {
   it('a valid write passes', () => {
     expect(call(`tee ${MEM}/feedback_new.md`, () => writeFileSync(join(MEM, 'feedback_new.md'), GOOD)).code).toBe(0)

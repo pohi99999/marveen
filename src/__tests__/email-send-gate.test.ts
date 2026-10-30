@@ -90,6 +90,16 @@ describe('gateDecision', () => {
     expect(bash('swaks --to a@b.c --server smtp').deny).toBe(true)
   })
 
+  // MONITORGATE1030: Monitor runs its command in the same shell as Bash, so a send from it is a send.
+  it('judges a Monitor command exactly like the same Bash command', () => {
+    for (const command of ['python3 scripts/support-mail/send.py --to x@y.hu', 'echo hi | sendmail user@host', 'git status']) {
+      const bash = gateDecision('Bash', { command }).deny
+      expect({ command, deny: gateDecision('Monitor', { command, description: 'd', timeout_ms: 1000 }).deny }).toEqual({ command, deny: bash })
+    }
+    expect(gateDecision('Monitor', { command: 'echo hi | sendmail user@host', description: 'd' }).deny).toBe(true)
+    expect(gateDecision('Monitor', { command: 'git status', description: 'd' }).deny).toBe(false)
+  })
+
   it('blocks the graph-mail.ts CLI send path (PR #668) and direct sendMail() calls', () => {
     const bash = (command: string) => gateDecision('Bash', { command })
     expect(bash('tsx scripts/graph-mail.ts send --to a@b.hu --subject x --body y').deny).toBe(true)
@@ -427,7 +437,7 @@ describe('injectEmailSendGate', () => {
     injectEmailSendGate(s)
     const hooks = (s.hooks as Record<string, unknown>).PreToolUse as Array<Record<string, unknown>>
     expect(hooks).toHaveLength(1)
-    expect(hooks[0].matcher).toBe('Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*'
+    expect(hooks[0].matcher).toBe('Bash|Monitor|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*'
       + '|.*send_draft.*|.*update_draft.*|.*create_draft.*|.*reply_all.*|.*send_gmail_message.*|.*draft_gmail_message.*'
       + '|.*[Gg][Mm][Aa][Ii][Ll].*send_message.*|.*[Gg][Mm][Aa][Ii][Ll].*reply.*|.*[Gg][Mm][Aa][Ii][Ll].*forward.*'
       + '|.*send[-_]mail.*|.*send[-_]shared[-_]mailbox[-_]mail.*|.*send[-_]shared[-_]mailbox[-_]draft.*|.*send[-_]draft[-_]message.*'

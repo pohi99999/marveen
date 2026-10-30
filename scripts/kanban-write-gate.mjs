@@ -54,7 +54,9 @@ const WRITE_METHOD_RX = /(?:^|\s)(?:-X|--request)[\s=]*["']?(POST|PUT|PATCH|DELE
 const DATA_FLAG_RX = /(?:^|\s)(?:-d|--data(?:-(?:raw|binary|ascii|urlencode))?|--json|-F|--form)\b/
 
 export function gateDecision(toolName, toolInput) {
-  if (toolName !== 'Bash') return { deny: false }
+  // MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+  const shell = toolName === 'Bash' || (toolName === 'Monitor' && typeof toolInput?.command === 'string')
+  if (!shell) return { deny: false }
   const command = toolInput?.command
   if (typeof command !== 'string' || command.trim() === '') return { deny: false }
 

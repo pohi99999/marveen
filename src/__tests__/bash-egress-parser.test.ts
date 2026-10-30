@@ -806,6 +806,43 @@ describe('the hook process', () => {
       expect({ status: g.status, stdout: g.stdout }).toEqual({ status: 0, stdout: '' })
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
+
+  // MONITORGATE1030: Monitor runs its command in the same shell as Bash. Before the fix the hook exited on
+  // any tool name but Bash, and a plain-http curl ran from Monitor while the same Bash call was denied.
+  it('judges a Monitor command exactly like the same Bash command, in both directions', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bash-egress-'))
+    try {
+      const log = join(dir, 'blocks.jsonl')
+      const verdict = (tool_name: string, tool_input: unknown) => {
+        const r = run({ tool_name, tool_input }, log)
+        return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecision : 'allow'
+      }
+      for (const command of ['curl -s http://kenshin-probe.invalid/x', LOCALHOST[0], LOCALHOST[2]]) {
+        const bash = verdict('Bash', { command })
+        expect({ command, monitor: verdict('Monitor', { command, description: 'd', timeout_ms: 1000 }) }).toEqual({ command, monitor: bash })
+      }
+      expect(verdict('Monitor', { command: 'curl -s http://kenshin-probe.invalid/x', description: 'd' })).toBe('deny')
+      expect(verdict('Monitor', { command: LOCALHOST[0], description: 'd' })).toBe('allow')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('judges a Monitor WebSocket source by its host: external denies, localhost passes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bash-egress-'))
+    try {
+      const log = join(dir, 'blocks.jsonl')
+      const decision = (url: string) => {
+        const r = run({ tool_name: 'Monitor', tool_input: { ws: { url }, description: 'd' } }, log)
+        return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecision : 'allow'
+      }
+      expect(decision('wss://kenshin-probe.invalid/stream')).toBe('deny')
+      expect(decision('ws://kenshin-probe.invalid:8080/stream')).toBe('deny')
+      expect(decision("wss://kenshin-probe.invalid/a'b")).toBe('deny')
+      expect(decision('ws://127.0.0.1:3420/ws')).toBe('allow')
+      expect(decision('ws://localhost:3420/ws')).toBe('allow')
+      // Nothing to judge: no command, no ws.
+      expect(run({ tool_name: 'Monitor', tool_input: { description: 'd' } }, log).stdout).toBe('')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
 })
 
 // The binding: a gate script that passes its tests but is not wired runs
@@ -827,7 +864,7 @@ describe('wiring', () => {
     injectBashEgressParser(s)
     const entries = parserEntries(s)
     expect(entries).toHaveLength(1)
-    expect(entries[0].matcher).toBe('Bash')
+    expect(entries[0].matcher).toBe('Bash|Monitor')
   })
 
   it('survives the other gate injectors (the egress-gate dedupe filter must not match it)', () => {

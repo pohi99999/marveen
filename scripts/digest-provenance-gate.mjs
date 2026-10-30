@@ -161,7 +161,9 @@ export const defaultDeps = {
 // ---- gate decision ---------------------------------------------------------
 
 export function gateDecision(toolName, toolInput, deps = defaultDeps) {
-  if (toolName !== 'Bash') return { deny: false }
+  // MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+  const shell = toolName === 'Bash' || (toolName === 'Monitor' && typeof toolInput?.command === 'string')
+  if (!shell) return { deny: false }
   const command = toolInput?.command
   if (typeof command !== 'string' || command.trim() === '') return { deny: false }
   if (!API_MESSAGES_RX.test(command) || !DATA_FLAG_RX.test(command)) return { deny: false }

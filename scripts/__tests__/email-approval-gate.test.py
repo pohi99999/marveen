@@ -176,6 +176,14 @@ with tempfile.TemporaryDirectory() as td:
     check("non-send Bash passes untouched even at level 1", code == 0, f"exit={code}")
     code, _, _ = run_gate(store, {"tool_name": "Read", "tool_input": {"file_path": "/x"}})
     check("non-email tool passes untouched", code == 0, f"exit={code}")
+    # MONITORGATE1030: Monitor runs its command in the same shell as Bash, so it is judged as one.
+    code, _, _ = run_gate(store, {"tool_name": "Monitor", "tool_input": {"description": "d", "command": "ls -la"}})
+    check("Monitor: non-send command passes untouched even at level 1", code == 0, f"exit={code}")
+    mon_send = "gws gmail +send --to a@b.hu --subject 'Monitor targy' --body 'Kedves Ugyfelunk! Torzs.'"
+    code_b, _, _ = run_gate(store, {"tool_name": "Bash", "tool_input": {"command": mon_send}})
+    code_m, _, err_m = run_gate(store, {"tool_name": "Monitor", "tool_input": {"description": "d", "command": mon_send}})
+    check("Monitor: a gws send at level 1 is DENIED, like the same Bash call",
+          code_m == 2 and code_b == 2, f"monitor={code_m} bash={code_b} err={err_m[:120]!r}")
 
     # --- level 1: hard deny --------------------------------------------------
     code, _, err = run_gate(store, mcp_send())
