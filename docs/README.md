@@ -36,18 +36,20 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **57**, egyedi `/api/...` útvonal-literál bennük: **164**
-- Claude Code hookok (`.claude/settings.json`): **8** esemény, **47** bejegyzés, **31** szkript a `scripts/hooks/` alatt
+- Route-modulok (`src/web/routes/*.ts`): **62**, egyedi `/api/...` útvonal-literál bennük: **177**
+- Claude Code hookok (`.claude/settings.json`): **8** esemény, **52** bejegyzés, **34** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **9** -- channel-image, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **53**, ebből a fenti táblázat linkel **16**
+- Dokumentációs lapok a `docs/` alatt: **60**, ebből a fenti táblázat linkel **18**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
 - [MIGRATION](MIGRATION.md)
 - [agens-azonositas-api](agens-azonositas-api.md)
+- [agent-budgets](agent-budgets.md)
 - [agent-state-observer](agent-state-observer.md)
 - [archivalt-kartyak](archivalt-kartyak.md)
+- [bash-sandbox](bash-sandbox.md)
 - [channel-reply-guard](channel-reply-guard.md)
 - [computer-use-access](computer-use-access.md)
 - [config-reference](config-reference.md)
@@ -73,13 +75,16 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [outgoing-copy-gate](outgoing-copy-gate.md)
 - [scheduled-tasks](scheduled-tasks.md)
 - [security-hardening](security-hardening.md)
+- [sender-role-gate](sender-role-gate.md)
 - [skills-git-forras](skills-git-forras.md)
 - [slack-progress-indicator](slack-progress-indicator.md)
 - [telegram-live-progress](telegram-live-progress.md)
 - [telegram-progress-indicator](telegram-progress-indicator.md)
+- [telegram-reaction](telegram-reaction.md)
 - [telegram-reply-enforcement-2026-08-02](telegram-reply-enforcement-2026-08-02.md)
 - [tippek-trukkok](tippek-trukkok.md)
 - [token-usage](token-usage.md)
 - [upstream-ledger](upstream-ledger.md)
+- [uptime-monitor](uptime-monitor.md)
 
 <!-- DOC_STATS_END -->
