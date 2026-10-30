@@ -955,6 +955,9 @@ def main():
         sys.exit(2)
     tool = ev.get('tool_name') or ''
     inp = ev.get('tool_input') or {}
+    # MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+    if tool == 'Monitor' and isinstance(inp, dict) and isinstance(inp.get('command'), str):
+        tool = 'Bash'
     # FAIL-CLOSED a kapu SAJAT hibajara is. A block() SystemExit-tel lep ki, azt a
     # BaseException-kent az "except Exception" nem fogja meg, tehat a valodi blokkolas
     # atmegy. Minden mas kivetel (rekurzio, regex, elgepeles egy kesobbi javitasban)

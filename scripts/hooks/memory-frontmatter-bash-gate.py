@@ -227,7 +227,11 @@ def main():
     except Exception as ex:
         _log('olvashatatlan stdin, atengedve', ex)
         sys.exit(0)
-    if not isinstance(payload, dict) or payload.get('tool_name') != 'Bash':
+    # MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+    ti = payload.get('tool_input') if isinstance(payload, dict) else None
+    shell = isinstance(payload, dict) and (payload.get('tool_name') == 'Bash' or (
+        payload.get('tool_name') == 'Monitor' and isinstance(ti, dict) and isinstance(ti.get('command'), str)))
+    if not shell:
         sys.exit(0)
     ev = payload.get('hook_event_name')
     if _LIB_ERR is not None:

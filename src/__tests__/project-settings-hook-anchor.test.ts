@@ -57,7 +57,7 @@ const EXPECTED: Record<string, string[]> = {
     'ledger-outbound.py @ mcp__plugin_[^_]+_[^_]+__reply', 'tool-log-capture.py',
     'telegram_progress_reply_clear.py @ telegram.*reply', 'slack_progress_reply_clear.py @ slack.*reply',
     // FORK SKILLBASH1010: skill-usage-capture also on Bash
-    'skill-usage-capture.py @ Skill|Read|Bash', 'memory-frontmatter-bash-gate.py @ Bash',
+    'skill-usage-capture.py @ Skill|Read|Bash', 'memory-frontmatter-bash-gate.py @ Bash|Monitor',
     // The persona guard watches the main agent's own CLAUDE.md/SOUL.md and
     // every agents/*/ pair, and it must fire on EVERY tool call: the first
     // version filtered on the Write/Edit file_path and a python3 heredoc
@@ -71,10 +71,10 @@ const EXPECTED: Record<string, string[]> = {
   // A failed tool call fires PostToolUseFailure, never PostToolUse
   // (TOOLLOGVAKSIKER921): without this entry tool_call_log cannot hold a 0.
   // KAPUEGYUT918: a failed Bash call can still have written a memory file.
-  PostToolUseFailure: ['tool-log-capture.py', 'memory-frontmatter-bash-gate.py @ Bash'],
+  PostToolUseFailure: ['tool-log-capture.py', 'memory-frontmatter-bash-gate.py @ Bash|Monitor'],
   PreToolUse: [
     'fleet-freeze-gate.sh @ *', // KILLSWITCH1022: every tool call denied while the fleet is frozen
-    'outgoing-copy-gate.py @ Bash',
+    'outgoing-copy-gate.py @ Bash|Monitor',
     'outgoing-copy-gate.py @ .*send_email.*',
     'outgoing-copy-gate.py @ .*manage_email.*',
     'outgoing-copy-gate.py @ .*[Gg]mail.*__.*',
@@ -84,14 +84,14 @@ const EXPECTED: Record<string, string[]> = {
     'outgoing-copy-gate.py @ mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message',
     // FORK: the marveen-api MCP tools go through the outgoing-copy gate too
     'outgoing-copy-gate.py @ mcp__marveen-api__.*',
-    'email-approval-gate.py @ Bash',
+    'email-approval-gate.py @ Bash|Monitor',
     'email-approval-gate.py @ .*send_email.*',
     'email-approval-gate.py @ .*manage_email.*',
     'email-approval-gate.py @ .*[Gg]mail.*__.*',
     'email-approval-gate.py @ .*draft_email.*',
     'email-approval-gate.py @ .*send_draft.*|.*update_draft.*|.*create_draft.*|.*reply_all.*|.*send_gmail_message.*|.*draft_gmail_message.*|.*[Gg][Mm][Aa][Ii][Ll].*send_message.*|.*[Gg][Mm][Aa][Ii][Ll].*reply.*|.*[Gg][Mm][Aa][Ii][Ll].*forward.*|.*send[-_]mail.*|.*send[-_]shared[-_]mailbox[-_]mail.*|.*send[-_]shared[-_]mailbox[-_]draft.*|.*send[-_]draft[-_]message.*|.*reply[-_]mail[-_]message.*|.*reply[-_]all[-_]mail[-_]message.*|.*forward[-_]mail[-_]message.*|.*reply[-_]shared[-_]mailbox[-_]mail.*|.*reply[-_]all[-_]shared[-_]mailbox[-_]mail.*|.*forward[-_]shared[-_]mailbox[-_]mail.*|.*forward[-_]calendar[-_]event.*|.*reply[-_]to[-_]group[-_]thread.*|.*draft[-_]email.*|.*create[-_]shared[-_]mailbox[-_]draft.*|.*create[-_]reply[-_]draft.*|.*create[-_]reply[-_]all[-_]draft.*|.*create[-_]forward[-_]draft.*|.*create[-_]shared[-_]mailbox[-_]reply[-_]draft.*|.*create[-_]shared[-_]mailbox[-_]reply[-_]all[-_]draft.*|.*create[-_]shared[-_]mailbox[-_]forward[-_]draft.*|.*update[-_]mail[-_]message.*|.*update[-_]shared[-_]mailbox[-_]message.*',
     'channel-image-resize.sh @ Read', 'egress-gate.mjs @ WebFetch', 'memory-frontmatter-gate.py @ Write|Edit|MultiEdit',
-    'memory-frontmatter-bash-gate.py @ Bash',
+    'memory-frontmatter-bash-gate.py @ Bash|Monitor',
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   StopFailure: ['ledger-turn-failure.py'],

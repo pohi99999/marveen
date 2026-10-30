@@ -1291,7 +1291,8 @@ function ledgerLookup() {
 // 'unverified-recipient' is a draft/manage_email address with no recorded
 // source, and everything else is the sub-agent governance block.
 export function gateDecision(toolName, toolInput, isVerified = null, cwd = process.cwd()) {
-  const name = String(toolName ?? '')
+  // MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+  const name = toolName === 'Monitor' && typeof toolInput?.command === 'string' ? 'Bash' : String(toolName ?? '')
   // Lazy: only build the ledger lookup when a call actually carries addresses,
   // so a read-shaped tool call never pays a file read.
   const verify = isVerified ?? (() => {

@@ -2256,6 +2256,9 @@ def main():
 
     tool = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input") or {}
+    # MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+    if tool == "Monitor" and isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
+        tool = "Bash"
     global _HOOK_CWD
     _HOOK_CWD = str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
     # A tool_input that is not a dict crashed every branch on its first .get(),

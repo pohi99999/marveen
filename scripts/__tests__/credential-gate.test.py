@@ -536,6 +536,16 @@ def test_no_value_anywhere():
               for x in log_lines(store) for h in x.get("hits", [])))
 
 
+def test_monitor():
+    # MONITORGATE1030: Monitor runs its command in the same shell as Bash, so it is judged as one.
+    print("Monitor")
+    td, store = make_store()
+    r = gate(store, "Monitor", {"description": "d", **bash_send(td, "ugyfel@example.invalid", LETTER)})
+    check("Monitor: a letter with a credential is denied", r.returncode == 2, r.stderr)
+    r = gate(store, "Monitor", {"description": "d", **bash_send(td, "ugyfel@example.invalid", CLEAN, name="clean.txt")})
+    check("Monitor: a clean letter passes", r.returncode == 0, r.stderr)
+
+
 if __name__ == "__main__":
     os.environ.pop("CREDENTIAL_GATE_STORE", None)
     os.environ["CREDENTIAL_GATE_CONFIG"] = os.path.join(tempfile.mkdtemp(), "none.json")
@@ -550,5 +560,6 @@ if __name__ == "__main__":
     test_whitespace_class()
     test_multi_recipient()
     test_no_value_anywhere()
+    test_monitor()
     print(f"\n{'ALL PASS' if not failed else f'{len(failed)} FAIL'}")
     sys.exit(1 if failed else 0)

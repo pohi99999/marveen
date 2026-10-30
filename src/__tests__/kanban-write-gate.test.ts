@@ -18,6 +18,17 @@ import { MAIN_AGENT_ID, HEARTBEAT_AGENT_ID } from '../config.js'
 
 const bash = (command: string) => gateDecision('Bash', { command })
 
+// MONITORGATE1030: Monitor runs its command in the same shell as Bash, so it gets the Bash verdict.
+describe('kanban-write-gate gateDecision: Monitor', () => {
+  it('judges a Monitor command exactly like the same Bash command, in both directions', () => {
+    const write = `sqlite3 store/claudeclaw.db "UPDATE kanban_cards SET status='done' WHERE id='X'"`
+    const read = 'sqlite3 store/claudeclaw.db "SELECT id FROM kanban_cards"'
+    expect(gateDecision('Monitor', { command: write, description: 'd' }).deny).toBe(true)
+    expect(gateDecision('Monitor', { command: read, description: 'd' }).deny).toBe(bash(read).deny)
+    expect(gateDecision('Monitor', { command: read, description: 'd' }).deny).toBe(false)
+  })
+})
+
 describe('kanban-write-gate gateDecision: SQL writes (known positives)', () => {
   it('denies a direct sqlite3 UPDATE of kanban_cards (the 14:43 incident shape)', () => {
     expect(
@@ -105,7 +116,7 @@ describe('kanban-write-gate wiring', () => {
     const ptu = (settings.hooks as Record<string, unknown[]>).PreToolUse
     const mine = ptu.filter((e) => JSON.stringify(e).includes('kanban-write-gate.mjs'))
     expect(mine.length).toBe(1)
-    expect((mine[0] as { matcher: string }).matcher).toBe('Bash')
+    expect((mine[0] as { matcher: string }).matcher).toBe('Bash|Monitor')
   })
   it('keeps other PreToolUse entries intact', () => {
     const settings: Record<string, unknown> = {

@@ -1207,6 +1207,9 @@ def main():
     tool = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input")
     tool_input = tool_input if isinstance(tool_input, dict) else {}
+    # MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+    if tool == "Monitor" and isinstance(tool_input.get("command"), str):
+        tool = "Bash"
 
     kind = None
     cmd = ""

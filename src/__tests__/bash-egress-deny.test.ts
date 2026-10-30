@@ -234,7 +234,7 @@ describe('mergeBashEgressDeny', () => {
 })
 
 describe('bashEgressParserCovers', () => {
-  const parserEntry = { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "/x/scripts/hooks/bash-egress-parser.mjs"' }] }
+  const parserEntry = { matcher: 'Bash|Monitor', hooks: [{ type: 'command', command: 'node "/x/scripts/hooks/bash-egress-parser.mjs"' }] }
   it('a sub-agent is covered only when its own settings wire the parser under Bash', () => {
     expect(bashEgressParserCovers('agent-a', { hooks: { PreToolUse: [parserEntry] } })).toBe(true)
     expect(bashEgressParserCovers('agent-a', { hooks: { PreToolUse: [{ ...parserEntry, matcher: 'WebFetch' }] } })).toBe(false)
@@ -244,7 +244,7 @@ describe('bashEgressParserCovers', () => {
     const dir = mkdtempSync(join(tmpdir(), 'marveen-egress-'))
     try {
       const p = join(dir, 'settings.json')
-      writeFileSync(p, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node "$CLAUDE_PROJECT_DIR/scripts/hooks/bash-egress-parser.mjs" --main-scope' }] }] } }))
+      writeFileSync(p, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash|Monitor', hooks: [{ type: 'command', command: 'node "$CLAUDE_PROJECT_DIR/scripts/hooks/bash-egress-parser.mjs" --main-scope' }] }] } }))
       expect(bashEgressParserCovers(MAIN_AGENT_ID, {}, p)).toBe(true)
       writeFileSync(p, JSON.stringify({ hooks: { PreToolUse: [parserEntry] } }))
       expect(bashEgressParserCovers(MAIN_AGENT_ID, {}, p)).toBe(false)

@@ -24,6 +24,17 @@ import { spawnSync } from 'node:child_process'
 
 // --- self-pace-gate: blocks the agent from scheduling its own future turns ---
 describe('self-pace-gate gateDecision', () => {
+  // MONITORGATE1030: Monitor runs its command in the same shell as Bash, so it gets the Bash verdict.
+  it('judges a Monitor command exactly like the same Bash command, in both directions', () => {
+    for (const command of ['tmux send-keys -t agent-dev2 Enter', `echo hi | tee ~/.claude/scheduled-tasks/x/SKILL.md`, 'git status', 'ls -la']) {
+      const bash = selfPaceDecision('Bash', { command }).deny
+      expect({ command, deny: selfPaceDecision('Monitor', { command, description: 'd', timeout_ms: 1000 }).deny }).toEqual({ command, deny: bash })
+    }
+    expect(selfPaceDecision('Monitor', { command: 'tmux send-keys -t agent-dev2 Enter', description: 'd' }).deny).toBe(true)
+    expect(selfPaceDecision('Monitor', { command: 'git status', description: 'd' }).deny).toBe(false)
+    // A WebSocket source carries no shell command: nothing here to judge.
+    expect(selfPaceDecision('Monitor', { ws: { url: 'ws://127.0.0.1:3420/ws' }, description: 'd' }).deny).toBe(false)
+  })
   it('denies the ScheduleWakeup runtime tool', () => {
     expect(selfPaceDecision('ScheduleWakeup', { prompt: 'x' }).deny).toBe(true)
   })
@@ -1393,6 +1404,9 @@ describe('readonly-repo-gate: the hook end to end', () => {
 
   it('refuses a write through a symlinked workspace package', () => {
     expect(run({ tool_name: 'Bash', cwd: repo, tool_input: { command: 'rm -rf node_modules/@ws/core/src' } })).toBe('deny')
+    // MONITORGATE1030: the same command from Monitor is the same write.
+    expect(run({ tool_name: 'Monitor', cwd: repo, tool_input: { command: 'rm -rf node_modules/@ws/core/src', description: 'd' } })).toBe('deny')
+    expect(run({ tool_name: 'Monitor', cwd: repo, tool_input: { command: 'ls node_modules/@ws/core/src', description: 'd' } })).toBe('allow')
     expect(run({ tool_name: 'Write', cwd: repo, tool_input: { file_path: join(repo, 'node_modules', '@ws', 'core', 'src', 'a.ts') } })).toBe('deny')
   })
 

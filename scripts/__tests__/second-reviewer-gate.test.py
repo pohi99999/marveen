@@ -99,6 +99,14 @@ reply({"decision": "deny", "reason": "nope"})
 p = run(PUSH)
 check("G3", p.returncode == 2 and "TILTVA" in p.stderr and "nope" in p.stderr, p.stderr)
 
+# MONITORGATE1030: Monitor runs its command in the same shell as Bash, so it is reviewed as one.
+requests.clear()
+p = run({"tool_name": "Monitor", "tool_input": {"description": "d", "command": "ls -la"}})
+check("G3m-allow", p.returncode == 0 and not requests, repr(p.returncode))
+p = run({"tool_name": "Monitor", "tool_input": {"description": "d", "command": "git push origin feature/x"}})
+check("G3m-deny", p.returncode == 2 and "nope" in p.stderr and len(requests) == 1
+      and requests[0]["body"]["tool_name"] == "Bash", p.stderr)
+
 reply({"decision": "ask", "reason": "x", "approval_id": "ap-1"})
 p = run(PUSH)
 check("G4", p.returncode == 2 and "ap-1" in p.stderr, p.stderr)

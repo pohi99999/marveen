@@ -105,6 +105,9 @@ def main():
         stop(UNREADABLE % "nincs tool_name")
     if not isinstance(tool_input, dict):
         tool_input = {}
+    # MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+    if tool_name == "Monitor" and isinstance(tool_input.get("command"), str):
+        tool_name = "Bash"
     if not is_high_risk(tool_name, tool_input):
         sys.exit(0)
 

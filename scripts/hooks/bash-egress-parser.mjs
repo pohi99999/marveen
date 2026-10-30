@@ -1918,6 +1918,21 @@ const GATE_MSG =
   '(10/8, 172.16/12, 192.168/16, *.local) szabadok. Kulso tartalmat ' +
   'a quarantine-reader sub-ugynokon at kerj le; ha ez egy vendor-API hivas vagy jovahagyott letoltes, a hosztot ' +
   'a gazda veheti fel a store/egress-vendor-hosts.json listara.'
+// MONITORGATE1030 (card 7f941346): the Monitor tool runs its `command` in the same shell as Bash, so a
+// Monitor call is judged exactly like a Bash call; before this the hook exited on any tool name but Bash,
+// and a plain-http curl to an external host ran from Monitor while the same Bash call was denied
+// (measured 2026-10-30). Its other source, `ws`, opens a WebSocket with no shell at all: that URL is
+// judged as a curl to the same URL (ws -> http, wss -> https), so localhost stays free and an external
+// host denies like any other fetch. Null: nothing here to judge.
+export function judgedCommand(toolName, toolInput) {
+  if (toolName === 'Bash') return toolInput?.command
+  if (toolName !== 'Monitor') return null
+  if (typeof toolInput?.command === 'string') return toolInput.command
+  const url = toolInput?.ws?.url
+  if (url === undefined || url === null) return null
+  const asHttp = String(url).replace(/^ws(s?):\/\//i, 'http$1://')
+  return `curl '${asHttp.replace(/'/g, `'\\''`)}'`
+}
 function isInvokedDirectly() {
   try { return realpathSync(fileURLToPath(import.meta.url)) === (process.argv[1] ? realpathSync(process.argv[1]) : '') } catch { return false }
 }
@@ -1938,13 +1953,14 @@ if (isInvokedDirectly()) {
   if (process.argv.includes('--main-scope') && !mainScopeAppliesTo()) process.exit(0)
   let payload
   try { payload = JSON.parse(readFileSync(0, 'utf-8')) } catch { process.exit(0) }
-  if (payload?.tool_name !== 'Bash') process.exit(0)
+  const command = judgedCommand(payload?.tool_name, payload?.tool_input)
+  if (command === null || command === undefined) process.exit(0)
   let r
   setHookCwd(payload?.cwd)
   // EGRESSMEASURE1025: the measure-only shape for a measure host passes, logged; anything else is
   // judged below exactly as before. A log failure denies: the owner's condition is that every
   // measurement is on record.
-  const measured = measureOnly(payload?.tool_input?.command, loadMeasureHosts())
+  const measured = measureOnly(command, loadMeasureHosts())
   if (measured) {
     try {
       mkdirSync(dirname(MEASURE_LOG), { recursive: true })
@@ -1952,11 +1968,11 @@ if (isInvokedDirectly()) {
       process.exit(0)
     } catch { /* not on record: fall through to classify(), which denies the measure host */ }
   }
-  try { r = classify(payload?.tool_input?.command, 0, loadVendorHosts(), loadVendorDomains()) } catch (e) {
+  try { r = classify(command, 0, loadVendorHosts(), loadVendorDomains()) } catch (e) {
     // Since curl https:// and wget left the deny list, this hook is the ONLY thing between them and an
     // external host, so an internal error on a command naming either verb denies instead of allowing.
     // Any other command keeps the old fail-open: a parser bug must not stop the fleet's ordinary work.
-    if (!/\b(?:curl|wget)\b/.test(String(payload?.tool_input?.command ?? ''))) { process.stderr.write(`bash-egress-parser: internal error, allowing: ${e?.message}\n`); process.exit(0) }
+    if (!/\b(?:curl|wget)\b/.test(String(command ?? ''))) { process.stderr.write(`bash-egress-parser: internal error, allowing: ${e?.message}\n`); process.exit(0) }
     r = { deny: true, reason: 'internal-error', hosts: [`parser hiba: ${e?.message}`] }
   }
   if (r.deny) {

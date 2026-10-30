@@ -76,7 +76,7 @@ describe('ensureMainScopeBashEgressParser (project-local settings)', () => {
     expect(ensureMainScopeBashEgressParser(true, p)).toBe(true)
     const ptu = read(p).hooks.PreToolUse
     expect(ptu).toHaveLength(1)
-    expect(ptu[0].matcher).toBe('Bash')
+    expect(ptu[0].matcher).toBe('Bash|Monitor')
     expect(ptu[0].hooks[0].command).toContain('bash-egress-parser.mjs" --main-scope')
     expect(ensureMainScopeBashEgressParser(true, p)).toBe(false)
     expect(bashEgressParserCovers(MAIN_AGENT_ID, {}, p)).toBe(true)
