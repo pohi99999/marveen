@@ -2352,6 +2352,37 @@ function scheduleEmbedding(id: number, content: string, keywords: string | undef
   }).catch(() => {})
 }
 
+// MEMEDITEMBED1103: an edit that changes the embedded text drops the row's
+// vector to NULL (updateMemory, see the comment there), and before this
+// nothing regenerated it until a manual POST /api/memories/backfill or a
+// dashboard restart -- measured 2026-11-03: at least 74 edited rows had sat
+// without a vector since 2026-10-25, invisible to the vector branch of
+// hybridSearch. The PUT/PATCH route calls this right after a successful
+// write, so an edited row is re-embedded the same way a new one is
+// (scheduleEmbedding): fire-and-forget, never awaited, no retry. A backend
+// that is down leaves the column NULL for the existing backfill, and
+// generateEmbedding keeps its own warn-once logging.
+//
+// Differences from scheduleEmbedding, both deliberate:
+//  - the row is read back here, so a category-only edit (embedding kept)
+//    costs no backend call at all;
+//  - the write is conditional on the row still holding the text that was
+//    embedded and still being NULL. Two edits in quick succession race their
+//    embeddings; without the condition the slower, OLDER one could land last
+//    and pin a vector describing text that is no longer there -- the very
+//    staleness the NULL was introduced to prevent.
+export function reembedEditedMemory(id: number): void {
+  const row = db.prepare('SELECT content, keywords FROM memories WHERE id = ? AND embedding IS NULL').get(id) as
+    { content: string; keywords: string | null } | undefined
+  if (!row) return
+  generateEmbedding(row.content + (row.keywords ? ' ' + row.keywords : '')).then(emb => {
+    if (!emb) return
+    const r = db.prepare('UPDATE memories SET embedding = ? WHERE id = ? AND embedding IS NULL AND content = ? AND keywords IS ?')
+      .run(JSON.stringify(emb), id, row.content, row.keywords)
+    if (r.changes > 0) forgetCachedEmbedding(id)
+  }).catch(() => {})
+}
+
 // The category filter belongs in SQL, ahead of the LIMIT. Filtering the rows
 // afterwards would answer "the <category> ones among the N most recently
 // accessed memories" instead of "the N most recent <category> memories", so an

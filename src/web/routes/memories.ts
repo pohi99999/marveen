@@ -1,6 +1,6 @@
 import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
-  hybridSearch, backfillEmbeddings, backfillNeedsWarning,
+  hybridSearch, backfillEmbeddings, backfillNeedsWarning, reembedEditedMemory,
   searchMemories, getMemoriesForChat, getDb, touchMemoriesAccessed,
   getMemoryById, deleteMemoryById, getMemoryVersions, consumeApproval, escapeLike,
   type Memory, type MemoryRow, type Approval,
@@ -770,6 +770,11 @@ Respond ONLY with JSON, nothing else:
     // handler), and the success body keeps develop's `version` (MEMVERSION930),
     // which the if_version flow reads back.
     if (updateMemory(id, effectiveContent, newCategory, agent_id, keywords, updated_by)) {
+      // MEMEDITEMBED1103: an edit that changed the embedded text left the row's
+      // vector NULL until a manual backfill or a restart. Re-embed THIS row now,
+      // as POST does for a new one: fire-and-forget (not awaited, cannot fail
+      // or delay this response), no-op when the embedding was kept.
+      reembedEditedMemory(id)
       const version = memoryVersion(effectiveContent)
       json(res, mismatch ? { ok: true, version, owner_mismatch: ownerMismatchPayload(id, mismatch) } : { ok: true, version })
       return true
