@@ -40,11 +40,11 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **62**, egyedi `/api/...` útvonal-literál bennük: **177**
-- Claude Code hookok (`.claude/settings.json`): **8** esemény, **52** bejegyzés, **34** szkript a `scripts/hooks/` alatt
+- Route-modulok (`src/web/routes/*.ts`): **64**, egyedi `/api/...` útvonal-literál bennük: **182**
+- Claude Code hookok (`.claude/settings.json`): **8** esemény, **54** bejegyzés, **36** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
-- Git-hook telepítők (`scripts/install-*-hook.sh`): **9** -- channel-image, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **60**, ebből a fenti táblázat linkel **18**
+- Git-hook telepítők (`scripts/install-*-hook.sh`): **10** -- channel-image, commit-identity, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
+- Dokumentációs lapok a `docs/` alatt: **65**, ebből a fenti táblázat linkel **22**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
@@ -60,6 +60,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [conversation-continuity](conversation-continuity.md)
 - [credential-gate](credential-gate.md)
 - [custom-providers](custom-providers.md)
+- [db-write-gate](db-write-gate.md)
 - [destruktiv-kapu-hamis-pozitiv-meres](destruktiv-kapu-hamis-pozitiv-meres.md)
 - [disk-modal-guards](disk-modal-guards.md)
 - [external-skill-catalog](external-skill-catalog.md)
