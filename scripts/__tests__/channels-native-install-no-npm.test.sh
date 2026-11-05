@@ -237,6 +237,13 @@ setup_npm_host() {
   printf '#!/bin/sh\necho 2.1.265\n' > "$1/stub/claude"
   chmod +x "$1/stub/claude"
 }
+setup_homebrew_cask() {
+  # FORK: /opt/homebrew/bin/claude -> /opt/homebrew/Caskroom/claude-code/<v>/claude, as on the Mac mini
+  mkdir -p "$1/brew/Caskroom/claude-code/2.1.308" "$1/stub"
+  printf '#!/bin/sh\necho 2.1.308\n' > "$1/brew/Caskroom/claude-code/2.1.308/claude"
+  chmod +x "$1/brew/Caskroom/claude-code/2.1.308/claude"
+  ln -s "$1/brew/Caskroom/claude-code/2.1.308/claude" "$1/stub/claude"
+}
 setup_nothing() { :; }
 
 echo "channels.sh native-install guard"
@@ -258,6 +265,12 @@ fi
 run_case setup_npm_host
 if [ "$NPM_CALLS" = "1" ]; then pass "npm host: daily check still calls npm (positive control)"
 else fail "npm host: daily check still calls npm (positive control)" "1 npm call" "$NPM_CALLS"; fi
+
+run_case setup_homebrew_cask
+if [ "$NPM_CALLS" = "0" ]; then pass "FORK: Homebrew cask: npm is NOT called"
+else fail "FORK: Homebrew cask: npm is NOT called" "0 npm calls" "$NPM_CALLS"; fi
+case "$ERR" in *"SKIPPED: Homebrew cask"*) pass "FORK: Homebrew cask: the skip is logged" ;;
+  *) fail "FORK: Homebrew cask: the skip is logged" "a SKIPPED line" "${ERR:-<empty>}" ;; esac
 
 run_case setup_nothing
 if [ "$NPM_CALLS" = "1" ]; then pass "no claude, no native versions: npm self-heal still runs (positive control)"

@@ -869,6 +869,20 @@ claude_realpath() {
   python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null \
     || readlink -f "$1" 2>/dev/null
 }
+# FORK: a Homebrew cask install. It is neither native nor npm: its updates are `brew upgrade --cask claude-code`, and the
+# daily `npm install -g` would collide with the cask's own link in the same prefix (/opt/homebrew/bin/claude; on the Mac
+# mini every channel start logged "claude install FAILED (daily check)"). Should it ever succeed, the host has two installs.
+claude_is_homebrew() {
+  local b t
+  b="$(command -v claude 2>/dev/null)" || return 1
+  [ -n "$b" ] || return 1
+  t="$(claude_realpath "$b")" || return 1
+  case "$t" in
+    */Caskroom/claude-code/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 claude_is_native() {
   local b t root
   b="$(command -v claude 2>/dev/null)" || return 1
@@ -1151,6 +1165,8 @@ elif claude_is_native; then
   elif ! claude_native_autoupdate_on; then
     echo "$(date '+%F %T') claude update SKIPPED: native install, auto-update off (CLAUDE_NATIVE_AUTOUPDATE)" >&2
   fi
+elif claude_is_homebrew; then
+  echo "$(date '+%F %T') claude update SKIPPED: Homebrew cask, brew upgrade --cask claude-code updates it" >&2
 elif [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_UPDATE_STAMP" -mtime -1 2>/dev/null)" ]; then
   # AVX-less hosts are excluded on purpose: their claude is pinned, and
   # "keep it current" is exactly what breaks them.

@@ -49,7 +49,7 @@ const PROBE_TIMEOUT_MS = 25_000
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000
 const RESULT_FILE = join(STORE_DIR, 'cli-update.last-result')
 
-export type InstallMethod = 'npm' | 'official' | 'unknown'
+export type InstallMethod = 'npm' | 'official' | 'homebrew' | 'unknown'
 export type TargetKind = 'latest' | 'avx-safe-pin'
 
 export interface CliOfferInput {
@@ -94,6 +94,8 @@ export function detectInstallMethod(binPath: string | null, resolveReal: (p: str
   let real = binPath
   try { real = resolveReal(binPath) } catch { /* keep the symlink path */ }
   if (real.includes('/node_modules/')) return 'npm'
+  // FORK: a Homebrew cask. The button does not run brew; it names the command, and npm would collide with the cask's link.
+  if (real.includes('/Caskroom/claude-code/')) return 'homebrew'
   // The official installer (claude.ai/install.sh) links ~/.local/bin/claude to
   // a versioned binary under ~/.local/share/claude.
   if (real.includes('/.local/share/claude') || real.includes('/.local/bin/claude')) return 'official'
@@ -180,6 +182,7 @@ export function cliUpdateRunning(): boolean { return running !== null }
 /** The shell command an operator can run by hand when the automatic path cannot (EACCES, unknown method). */
 export function manualInstallCommand(target: string, method: InstallMethod): string {
   if (method === 'official') return `curl -fsSL https://claude.ai/install.sh | bash -s ${target}`
+  if (method === 'homebrew') return 'brew upgrade --cask claude-code'
   return `npm install -g ${CLAUDE_CODE_PACKAGE}@${target}`
 }
 
@@ -244,7 +247,7 @@ export function startCliUpdate(target: string, method: InstallMethod, deps: {
   dirsNotWritable?: () => Promise<boolean | null>
 } = {}): { ok: true } | { ok: false; error: string } {
   if (!VERSION_RE.test(target)) return { ok: false, error: 'target is not a dotted version' }
-  if (method === 'unknown') return { ok: false, error: 'install method unknown' }
+  if (method === 'unknown' || method === 'homebrew') return { ok: false, error: `install method ${method}` }
   if (running) return { ok: false, error: 'a CLI update is already running' }
   const sp = deps.spawnImpl ?? spawn
   const probe = deps.probe ?? ((bin: string) => probeClaudeLaunches(bin))

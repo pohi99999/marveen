@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, mkdtempSync, chmodSync, existsSync, rmSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  decideCliOffer, readAvxSafePin, detectInstallMethod, probeClaudeLaunches, fetchLatestVersion,
+  decideCliOffer, readAvxSafePin, detectInstallMethod, manualInstallCommand, probeClaudeLaunches, fetchLatestVersion,
   resetLatestVersionCache, buildCliUpdateStatus, startCliUpdate, setCliUpdateDepsForTests,
   RUNNING_SESSIONS_NOTE, REGISTRY_LATEST_URL, readCliUpdateResult,
   notWritableMessage, accessState, npmGlobalDirsNotWritable, cliUpdateRunning,
@@ -65,6 +65,14 @@ describe('detectInstallMethod', () => {
     expect(detectInstallMethod('/home/u/.local/bin/claude', () => '/home/u/.local/share/claude/versions/2.1.280')).toBe('official')
     expect(detectInstallMethod('/opt/weird/claude', () => '/opt/weird/claude')).toBe('unknown')
     expect(detectInstallMethod(null)).toBe('unknown')
+  })
+  it('FORK: a Homebrew cask is its own method: the button does not run it, and the manual command is brew, not npm', () => {
+    const bin = '/opt/homebrew/bin/claude'
+    const real = '/opt/homebrew/Caskroom/claude-code/2.1.308/claude'
+    expect(detectInstallMethod(bin, () => real)).toBe('homebrew')
+    expect(manualInstallCommand('2.1.318', 'homebrew')).toBe('brew upgrade --cask claude-code')
+    expect(manualInstallCommand('2.1.318', 'homebrew')).not.toContain('npm')
+    expect(startCliUpdate('2.1.318', 'homebrew')).toEqual({ ok: false, error: 'install method homebrew' })
   })
 })
 

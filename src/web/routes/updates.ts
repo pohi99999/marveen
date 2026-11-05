@@ -152,7 +152,7 @@ export async function tryHandleUpdates(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `not offered: ${status.reason}`, reason: 'not-offered', target: status.target, offer: status.offer }, 409)
       return true
     }
-    if (status.installMethod === 'unknown') {
+    if (status.installMethod === 'unknown' || status.installMethod === 'homebrew') {
       json(res, { error: 'the installed claude was not installed by npm or the official installer; run the manual command instead', reason: 'unknown-method', manualCommand: status.manualCommand }, 400)
       return true
     }
