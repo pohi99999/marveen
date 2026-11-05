@@ -127,7 +127,8 @@ describe('a valid entry is appended after the built-ins and changes nothing else
     expect(cmd.startsWith(MARK)).toBe(true)
     expect(cmd).toContain('command -v python3')
     expect(cmd).toContain(GATE_FAIL_CLOSED_TAG)
-    expect(cmd).toContain('timeout -k 1 118 ')
+    // FORK: the deadline is four seconds inside the timeout (card a62a27ce), not two
+    expect(cmd).toContain('timeout -k 1 116 ')
     expect(cmd).toContain(`"${join(PROJECT_ROOT, gateRel)}"`)
   })
 

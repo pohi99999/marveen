@@ -156,7 +156,7 @@ describe('skill section migration', () => {
     expect(ensureSkillSectionCurrent(MAIN_AGENT_ID)).toBe(false)
   })
 
-  it('M10: generateClaudeMd embeds buildSkillSection(), and the heading lives only there', () => {
+  it('M10: FORK: generateClaudeMd carries the one-tree text, buildSkillSection keeps its own heading', () => {
     // Read the source the way skill-propose-instructions.test.ts does, so the
     // prompt agents are SHIPPED and the section the migration WRITES cannot
     // drift apart.
@@ -165,15 +165,12 @@ describe('skill section migration', () => {
       const m = src.slice(from + 1).search(/\n(function |export )/)
       return src.slice(from, m < 0 ? undefined : from + 1 + m)
     }
-    expect(src).toContain('${buildSkillSection(helper ? name : undefined, tokenPath)}')
+    // FORK (SKILLSGIT914): the prompt keeps the fork's one-tree skill text, so the heading is also a bare line there
     const g = src.indexOf('function generateClaudeMd')
     expect(g).toBeGreaterThan(-1)
-    expect(body(g)).toContain('${buildSkillSection(helper ? name : undefined, tokenPath)}')
-    // the section text lives once, in buildSkillSection's template literal (it opens
-    // with the heading); no line of the file is the bare heading, so no second copy of
-    // the section sits in the prompt -- that would be the drift
+    expect(body(g)).toContain('EGYETLEN fa: a repo-gyökér .claude/skills/')
     expect(src.split('`' + HEADING).length - 1).toBe(1)
-    expect(src.split('\n').filter((l) => l === HEADING)).toHaveLength(0)
+    expect(src.split('\n').filter((l) => l === HEADING)).toHaveLength(1)
     const f = src.indexOf('function buildSkillSection')
     expect(f).toBeGreaterThan(-1)
     expect(body(f)).toContain(HEADING)

@@ -170,7 +170,8 @@ describe('a strict agent gets no recipe its dontAsk mode denies', () => {
     // memory save, daily log, search, hot list, move, schedule list (PR-B: a strict agent can list now), skill
     // proposal, stranger ping
     expect(helperLines(prompt).map((l) => l.split(' ')[2])).toEqual(
-      ['memory-save', 'daily-log', 'memory-search', 'memory-list', 'memory-move', 'schedules-list', 'skill-propose', 'message'],
+      // FORK (SKILLSGIT914): no skill-propose in the prompt, the fork's skills go to the one tree
+      ['memory-save', 'daily-log', 'memory-search', 'memory-list', 'memory-move', 'schedules-list', 'message'],
     )
     expect(prompt).not.toContain('Listázni sem tudsz')
   })
@@ -313,7 +314,8 @@ describe('a non-strict agent gets the helper recipes in the generated blocks', (
     stageAgent('plain-b', null)
     const { prompt } = await creation('plain-b')
     expect(helperLines(prompt).map((l) => l.split(' ')[2])).toEqual(
-      ['memory-save', 'daily-log', 'memory-search', 'memory-list', 'memory-move', 'schedules-list', 'skill-propose', 'message'],
+      // FORK (SKILLSGIT914): no skill-propose in the prompt, the fork's skills go to the one tree
+      ['memory-save', 'daily-log', 'memory-search', 'memory-list', 'memory-move', 'schedules-list', 'message'],
     )
     expect(prompt.split('$(cat ').length - 1).toBe(0)
     expect(prompt).not.toContain('dontAsk')

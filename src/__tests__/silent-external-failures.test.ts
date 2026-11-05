@@ -128,7 +128,7 @@ describe('readJsonObjectForWrite never clobbers an existing config', () => {
     // Seventeen writers in agent-config.ts: upstream's sixteen (writeAgentExtraChannels, AGENTEXTRACH1006, is the 14th;
     // writeAgentPullDelivery, PULLDELIV920, the 15th; writeAgentGromzo, GROMZOAGENTPICK1101, the 16th) plus the FORK's
     // writeAgentEngine (copilot/antigravity engine field); one each in the other four.
-    expect(read('src/web/agent-config.ts').match(/= readJsonObjectForWrite\(configPath\)/g)).toHaveLength(16)
+    expect(read('src/web/agent-config.ts').match(/= readJsonObjectForWrite\(configPath\)/g)).toHaveLength(17)
     expect(read('src/web/agent-team.ts')).toContain('config = readJsonObjectForWrite(configPath)')
     expect(read('src/web/scheduled-tasks-io.ts')).toContain('config = readJsonObjectForWrite(configPath)')
     expect(read('src/web/routes/connectors.ts')).toContain('mcpConfig = readJsonObjectForWrite(mcpPath)')

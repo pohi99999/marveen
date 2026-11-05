@@ -336,7 +336,9 @@ describe('the generated CLAUDE.md text', () => {
       writeFileSync(join(tmpRoot, 'CLAUDE.md'), '# main\n')
       scaffold.ensureSkillsPathTrapSection('host-main')
       const trap = readFileSync(join(tmpRoot, 'CLAUDE.md'), 'utf8')
-      for (const text of [section, trap]) {
+      // FORK (SKILLSGIT914): the path-trap block is the fork's one-tree text and does not name the switch
+      expect(trap).not.toContain('SKILL_QUARANTINE')
+      for (const text of [section]) {
         expect(text).toContain('SKILL_QUARANTINE')
         expect(text).toMatch(/azonnal\s+élesedik/)
         expect(text).toMatch(/jóváhagyásáig\s+karanténban\s+vár/)

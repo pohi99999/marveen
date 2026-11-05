@@ -1432,7 +1432,7 @@ describe('invis: invisible characters (invis1024)', () => {
     expect(text).toContain('MARVEEN-PATCH(cmd920-evid)')
     expect(text).toContain('MARVEEN-PATCH(c67f5f34-kbd)')
     expect(syntaxErrors(text)).toEqual([])
-    expect(readState(state).files[0].patches).toEqual({ d4: 'patched', fwd: 'patched', evid: 'patched', quote: 'patched', silent: 'patched', kbd: 'patched', invis: 'anchor-missing:channel content' })
+    expect(readState(state).files[0].patches).toEqual({ d4: 'patched', fwd: 'patched', evid: 'patched', quote: 'patched', silent: 'patched', kbd: 'patched', apr: 'patched', invis: 'anchor-missing:channel content' })
     const once = readFileSync(server, 'utf-8')
     expect(run(['--state', state]).status).toBe(0)
     expect(readFileSync(server, 'utf-8')).toBe(once)
@@ -1441,7 +1441,7 @@ describe('invis: invisible characters (invis1024)', () => {
   it('the --state JSON names the invis patch like the others', () => {
     const state = join(cache, 'state.json')
     run(['--state', state])
-    expect(readState(state).files[0].patches).toEqual({ d4: 'patched', fwd: 'patched', evid: 'patched', quote: 'patched', silent: 'patched', kbd: 'patched', invis: 'patched' })
+    expect(readState(state).files[0].patches).toEqual({ d4: 'patched', fwd: 'patched', evid: 'patched', quote: 'patched', silent: 'patched', kbd: 'patched', apr: 'patched', invis: 'patched' })
   })
 
   it('system-status measures the invis patch on its own, with this marker', () => {

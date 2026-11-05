@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
+// FORK: the backfill applies the sender allowlist (isAllowedInboundSender), so the fixture's chat has to be the owner's.
+vi.mock('../config.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../config.js')>()), ALLOWED_CHAT_ID: '42' }))
+
 vi.mock('../channel-coordinator/ingest.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../channel-coordinator/ingest.js')>()
   return {

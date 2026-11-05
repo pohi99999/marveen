@@ -52,7 +52,8 @@ describe('web.ts wiring (source pins)', () => {
     expect(ALLOW_SECOND_INSTANCE_SERVICES_KEY).toBe('MARVEEN_ALLOW_SECOND_INSTANCE_SERVICES')
     expect(decision).toBeGreaterThan(-1)
     expect(src.slice(decision, servicesOff)).toContain("allowSecondInstance: process.env[ALLOW_SECOND_INSTANCE_SERVICES_KEY] === '1'")
-    expect(src).toContain("const webOnly = process.env['WEB_ONLY'] === 'true'")
+    // FORK: WEB_ONLY is read through background.off (the standby marker counts too); see the wiring above decision
+    expect(src).toContain('const webOnly = background.off')
     expect(src.slice(decision, servicesOff)).not.toContain('readEnvFile')
     expect(src.slice(decision, servicesOff)).toContain('webOnly')
     expect(servicesOff).toBeGreaterThan(decision)

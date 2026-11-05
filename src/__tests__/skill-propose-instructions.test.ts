@@ -46,14 +46,16 @@ describe('skill propose instructions', () => {
     expect(sec).not.toContain('mkdir -p ~/.claude/skills/')
   })
 
-  it('T5: path-trap block mentions propose in shared and main-agent lines', () => {
+  it('T5: FORK: the path-trap block names the one skill tree instead of propose', () => {
     const src = read('src/web/agent-scaffold.ts')
     const a = src.indexOf('function buildSkillsPathTrapBody')
     expect(a).toBeGreaterThan(-1)
     const rest = src.slice(a + 1)
     const m = rest.search(/\n(function |export )/)
     const body = src.slice(a, m < 0 ? undefined : a + 1 + m)
-    expect(body.split('POST /api/skills/propose').length - 1).toBeGreaterThanOrEqual(2)
+    // FORK (SKILLSGIT914): one tree, the private marveen-skills clone; a skill is committed there, not proposed
+    expect(body).toContain('SKILLSGIT914')
+    expect(body).not.toContain('POST /api/skills/propose')
   })
 
   it('T6: security-hardening doc describes propose', () => {
