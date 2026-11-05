@@ -34,6 +34,11 @@ const logLines = () => existsSync(join(dir, 'guard.log'))
   : []
 
 describe('the five refused shapes, each with the safe form next to it', () => {
+  it('FORK (MONITORGATE1030): a Monitor command is judged like a Bash one', () => {
+    const monitor = (command: string) => run({ tool_name: 'Monitor', tool_input: { command }, session_id: 'm1' })
+    expect(denied(monitor(`echo "${'`'}id${'`'}"`))).toBe(true)
+    expect(allowed(monitor('tail -f /tmp/x.log'))).toBe(true)
+  })
   it('E: a backtick inside double quotes is refused; inside single quotes it is data', () => {
     expect(denied(bash(`echo "see ${BT}id${BT} here"`))).toBe(true)
     expect(allowed(bash(`echo 'see ${BT}id${BT} here'`))).toBe(true)

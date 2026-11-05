@@ -119,12 +119,15 @@ export function parsePollerPidsFromPs(
 // children carry the main agent's needle. Measured 2026-09-18 03:01: 156
 // matches -- tmux server, 8 agent claudes, 4 podman -- reaped after the 03:00
 // channels auto-restart, i.e. a fleet-wide kill and a 6-hour dashboard outage.
-// A poller row's argv (columns after PID TTY STAT TIME) starts with `bun`
+// A poller row's argv starts with `bun`
 // (`bun run --cwd .../plugins/cache/...`, `.../bun server.ts`) or with a
 // `node` whose script lives under plugins/cache/ or plugins/marketplaces/
 // (old builds). The env block follows argv,
 // so it can never satisfy this anchored test.
-const POLLER_ARGV_RE = /^\s*\d+\s+\S+\s+\S+\s+\S+\s+(?:\S*\/)?(?:bun\s|node\s+\S*\/plugins\/(?:cache|marketplaces)\/)/
+// Two row shapes reach this: `<pid> <argv> <env>` from envScan, and `<pid> <tty> <stat> <time> <argv> <env>` from the
+// whole-host `ps axeww`. The optional part must look like real STAT and TIME columns: three loose words would let
+// `sh -c foo bun ...` through, which is the fleet kill this gate exists to prevent.
+const POLLER_ARGV_RE = /^\s*\d+\s+(?:\S+\s+[A-Za-z][A-Za-z<+.]*\s+\d+:\d+(?:[.:]\d+)?\s+)?(?:\S*\/)?(?:bun\s|node\s+\S*\/plugins\/(?:cache|marketplaces)\/)/
 
 // The scan itself is psEwwSnapshot's (below): one env-scan call site (envScan,
 // REAPERENOBUFS1101) for this path and reapChannelOrphans, so neither can drift

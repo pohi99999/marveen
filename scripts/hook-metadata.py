@@ -65,10 +65,10 @@ METADATA_BASENAME = "hooks.metadata.json"
 
 GROUP_KEYS = frozenset({"matcher", "hooks"})
 # Handler keys Claude Code documents (command / prompt / agent / http handlers).
+# FORK: onFailure ('block') is the Claude Code handler key our fail-closed gates carry (card a62a27ce, PR #19).
 HANDLER_KEYS = frozenset({
     "type", "command", "timeout", "statusMessage", "async",
-    "url", "headers", "allowedEnvVars", "prompt", "model",
-})
+    "url", "headers", "allowedEnvVars", "prompt", "model", "onFailure"})
 SIDECAR_KEYS = frozenset({"id", "description", "purpose", "fingerprint", "gate", "hook"})
 KNOWN_EVENTS = frozenset({
     "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest",

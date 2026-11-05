@@ -11,7 +11,7 @@
    checkout's `.git/config`, `.git/packed-refs`, `.git/refs/remotes/`, `.git/hooks/`, and the user's `~/.gitconfig` and
    `~/.config/git/config`;
 4. in the install's main checkout, every git subcommand that changes the tree or the refs except
-   `git fetch [origin]`, exactly `git pull --ff-only origin <branch>`, and `git checkout -- <paths>` /
+   `git fetch [origin|fork|brunella]`, exactly `git pull --ff-only <origin|fork|brunella> <branch>`, and `git checkout -- <paths>` /
    `git restore <paths>` with no ref; everywhere, a write of `refs/remotes/*` and of the config keys that redirect a
    remote or name hooks (`remote.*.url`, `remote.*.pushurl`, `remote.*.fetch`, `core.hooksPath`, `include.path`,
    `includeIf.*`, `url.*.insteadOf`), also through `-c`, `--config-env` and the `GIT_CONFIG_*` environment.

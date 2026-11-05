@@ -266,6 +266,11 @@ const GIT_ROOT_READS = new Set([...['diff', 'log', 'show', 'status', 'blame', 'l
   'rev-list', 'merge-base', 'describe', 'shortlog', 'for-each-ref', 'show-ref', 'name-rev', 'check-ignore', 'count-objects',
   'ls-remote', 'cherry', 'whatchanged', 'version', 'help'])
 const GIT_FETCH_FLAGS = new Set(['-q', '--quiet', '--prune', '-p'])
+// FORK: this install runs from its own fork, so a fast-forward comes from `fork` or `brunella`; origin is the upstream it
+// has diverged from. The same reasoning as origin: pull fetches the ref itself, and the keys that could redirect a remote
+// (remote.*.url, url.*.insteadOf, ...) stay denied for every remote.
+const TRUSTED_REMOTES = new Set(['origin', 'fork', 'brunella'])
+const TRUSTED_TRACKING_RX = /^(?:origin\/|fork\/|brunella\/|remotes\/|refs\/remotes\/)/
 
 // The git words of a segment: the words after any leading assignments and `env`, or null when it is not git.
 function gitWords(words) {
@@ -334,7 +339,7 @@ export function gitDecision(words, ctx) {
   if (sub === 'update-ref' && args.includes('--stdin')) return 'deny'
   if (sub === 'fetch' && args.some((a) => a.startsWith('--refmap'))) return 'deny'
   if (sub === 'branch' && args.some((a) => /^-[A-Za-z]*[fmMcC]|^--(?:force|move|copy)$/.test(a))
-    && args.some((a) => /^(?:origin\/|remotes\/|refs\/remotes\/)/.test(a))) return 'deny'
+    && args.some((a) => TRUSTED_TRACKING_RX.test(a))) return 'deny'
   if (sub === 'config') {
     const plain = args.filter((a) => !a.startsWith('-'))
     const verb = ['set', 'unset', 'get', 'list', 'edit', 'rename-section', 'remove-section'].includes(plain[0]) ? plain.shift() : null
@@ -344,16 +349,16 @@ export function gitDecision(words, ctx) {
       || ['rename-section', 'remove-section'].includes(verb ?? '') || args.some((a) => /^--(?:rename|remove)-section$/.test(a)))) return 'deny'
   }
   if (sub === 'remote' && ['set-url', 'rename', 'remove', 'rm', 'set-branches', 'set-head'].includes(args[0] ?? '')) return 'deny'
-  if (sub === 'remote' && args[0] === 'add' && args.includes('origin')) return 'deny'
+  if (sub === 'remote' && args[0] === 'add' && args.some((a) => TRUSTED_REMOTES.has(a))) return 'deny'
   // the main checkout
   const inRoot = pointsIn || dirUnknown || inRootDir(dir)
   if (!inRoot) return null
   if (configs.length) return 'deny'
   if (GIT_ROOT_READS.has(sub)) return null
-  if (sub === 'fetch') return args.every((a) => GIT_FETCH_FLAGS.has(a)) || (args.filter((a) => !GIT_FETCH_FLAGS.has(a)).join(' ') === 'origin') ? 'allow' : 'deny'
+  if (sub === 'fetch') return args.every((a) => GIT_FETCH_FLAGS.has(a)) || TRUSTED_REMOTES.has(args.filter((a) => !GIT_FETCH_FLAGS.has(a)).join(' ')) ? 'allow' : 'deny'
   if (sub === 'pull') {
     const rest = args.filter((a) => a !== '-q' && a !== '--quiet')
-    return rest.length === 3 && rest[0] === '--ff-only' && rest[1] === 'origin' && /^[A-Za-z0-9._\/-]+$/.test(rest[2]) && !rest[2].startsWith('-') ? 'allow' : 'deny'
+    return rest.length === 3 && rest[0] === '--ff-only' && TRUSTED_REMOTES.has(rest[1]) && /^[A-Za-z0-9._\/-]+$/.test(rest[2]) && !rest[2].startsWith('-') ? 'allow' : 'deny'
   }
   if (sub === 'checkout') {
     const dash = args.indexOf('--')
@@ -374,7 +379,7 @@ export function gitDecision(words, ctx) {
     const names = args.filter((a) => !a.startsWith('-'))
     const head = (() => { try { return readFileSync(join(ctx.root, '.git', 'HEAD'), 'utf-8').trim().replace(/^ref: refs\/heads\//, '') } catch { return null } })()
     const bad = !names.length || args.some((a) => /^-[A-Za-z]*r$|^--remotes$/.test(a))
-      || names.some((n) => /^(?:origin\/|remotes\/|refs\/)/.test(n) || n === head || /[$`\u0000]/.test(n))
+      || names.some((n) => /^(?:origin\/|fork\/|brunella\/|remotes\/|refs\/)/.test(n) || n === head || /[$`\u0000]/.test(n))
     return bad ? 'deny' : null
   }
   if (sub === 'branch') return listing(/^(?:-a|-r|-v|-vv|-l|--list|--all|--remotes|--show-current|--verbose|--no-color|--color|--contains|--no-contains|--merged|--no-merged|--format=.*|--sort=.*)$/, LIST_ARG) ? null : 'deny'
@@ -683,7 +688,7 @@ function decide(toolName, toolInput, opts = {}) {
     const r = fileToolDeny(toolInput, opts)
     return r ? { deny: true, reason: r } : { deny: false }
   }
-  if (name === 'Bash') {
+  if (name === 'Bash' || name === 'Monitor') {
     const command = String(toolInput?.command ?? '')
     if (scheduleSurfaceDeny(command, { surface: 'security', projectRoot: opts.root ?? INSTALL_ROOT })) return { deny: true, reason: 'db' }
     const file = installFileDeny(command, opts)

@@ -225,7 +225,7 @@ def main():
     global STATE
     STATE = _state_path(payload.get("session_id"))
 
-    if payload.get("tool_name") != "Bash":
+    if payload.get("tool_name") not in ("Bash", "Monitor"):
         sys.exit(0)
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):

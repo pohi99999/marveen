@@ -74,7 +74,7 @@ if policy:
     miss = ("governance-kapu: a hook interpretere nem talalhato (python3 nincs a PATH-on). A kapu ezert "
             "BLOKKOL. Javitas: telepitsd a python3-at, vagy inditsd ujra a dashboardot.")
     command = ('command -v python3 >/dev/null 2>&1 || { echo "%s" >&2; exit 2; }; '
-               'if command -v timeout >/dev/null 2>&1; then timeout -k 1 8 %s; else %s; fi; rc=$?; '
+               'if command -v timeout >/dev/null 2>&1; then timeout -k 1 6 %s; else %s; fi; rc=$?; '
                '[ "$rc" = 0 ] || [ "$rc" = 2 ] || { echo "%s" >&2; exit 2; }; exit "$rc"' % (miss, inv, inv, fail))
     data["hooks"] = {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 10}]}]}
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".main-extra-", suffix=".tmp")

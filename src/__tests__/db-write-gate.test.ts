@@ -524,6 +524,51 @@ describe('4. git: the main checkout and the remote it pulls from', () => {
   ])('%s is denied in the install', (_, cmd) => {
     expect(bash(cmd)).toEqual(DENY_GIT)
   })
+  // FORK: this install runs from its own fork, so a fast-forward comes from `fork` or `brunella`; everything that could
+  // redirect such a remote stays denied (Peter 13595).
+  it.each([
+    ['a fetch from the fork', 'git fetch fork'],
+    ['a quiet fetch from brunella', 'git fetch -q brunella'],
+    ['a fast-forward from the fork', 'git pull --ff-only fork main'],
+    ['a quiet fast-forward from brunella', 'git pull -q --ff-only brunella main'],
+  ])('FORK: %s passes in the install', (_, cmd) => {
+    expect(bash(cmd)).toEqual(ALLOW)
+  })
+  it.each([
+    ['a push from the install', 'git push fork main'],
+    ['a merge of the fork', 'git merge --ff-only fork/main'],
+    ['a tag', 'git tag pre-x HEAD'],
+    ['a fetch from an unknown remote', 'git fetch evil'],
+    ['a pull from an unknown remote', 'git pull --ff-only evil main'],
+    ['a pull that is not a fast-forward', 'git pull fork main'],
+    ['a pull with a rebase', 'git pull --rebase fork main'],
+    ['a redirected pull', 'git -c url./tmp/evil.insteadOf=https://github.com pull --ff-only fork main'],
+    ['-c remote.fork.url', 'git -c remote.fork.url=/tmp/evil pull --ff-only fork main'],
+    ['the remote re-pointed', 'git remote set-url fork /tmp/evil'],
+    ['the remote added again', 'git remote add fork /tmp/evil'],
+    ['the config re-pointed', 'git config remote.brunella.url /tmp/evil'],
+    ['a tracking ref rewritten', 'git update-ref refs/remotes/fork/main HEAD'],
+    ['a tracking branch forced', 'git branch -f fork/main HEAD'],
+  ])('FORK: %s is denied in the install', (_, cmd) => {
+    expect(bash(cmd)).toEqual(DENY_GIT)
+  })
+  // The fleet's skill tree is a repo of its own inside the install (SKILLSGIT914). The gate decides by the nearest .git,
+  // so its commits and pushes pass; if this ever changes, the fleet can no longer write a skill.
+  it('FORK: the skills repo inside the install commits and pushes, without a .git it is the install', () => {
+    const skills = join(root, '.claude', 'skills')
+    mkdirSync(skills, { recursive: true })
+    expect(bash(`git -C ${skills} commit -m x`, join(root, 'agents', 'x'))).toEqual(DENY_GIT)
+    mkdirSync(join(skills, '.git'))
+    expect(bash(`git -C ${skills} add -A && git -C ${skills} commit -m x && git -C ${skills} push`, join(root, 'agents', 'x'))).toEqual(ALLOW)
+    expect(bash('git commit -m x', skills)).toEqual(ALLOW)
+    expect(bash(`cd ${skills} && git commit -m x`, join(root, 'agents', 'x'))).toEqual(ALLOW)
+  })
+  it('FORK: a command through Monitor is judged like one through Bash (MONITORGATE1030)', () => {
+    const viaMonitor = (cmd: string) => gateDecision('Monitor', { command: cmd.replace(/@ROOT@/g, root) }, { root, cwd: root })
+    expect(viaMonitor('git merge feature')).toEqual(DENY_GIT)
+    expect(viaMonitor('git status')).toEqual(ALLOW)
+    expect(viaMonitor(`sqlite3 ${root}/store/claudeclaw.db "UPDATE approvals SET status='approved'"`).deny).toBe(true)
+  })
   // APPROVALDBGATE1030 scope (Marveen 60242, Dani 60251, measured through the install's hook: probes/dbgate-git-scope.sh):
   // an own worktree OUTSIDE the install is free, also from an agent's dir inside it, when the target is a literal path;
   // a variable, a substitution or a cd chained with ";" leaves the target unknown, and that is the install.
@@ -777,7 +822,8 @@ describe('wiring', () => {
     const s = JSON.parse(readFileSync(join(REPO, '.claude', 'settings.json'), 'utf-8'))
     const entries = s.hooks.PreToolUse.filter((e: unknown) => JSON.stringify(e).includes('db-write-gate.mjs'))
     expect(entries).toHaveLength(1)
-    expect(entries[0].matcher).toBe('Bash|Write|Edit|MultiEdit|NotebookEdit')
+    expect(entries[0].matcher).toBe('Bash|Monitor|Write|Edit|MultiEdit|NotebookEdit')
+    expect(entries[0].hooks[0].onFailure).toBe('block')
     const cmd = entries[0].hooks[0].command as string
     expect(cmd).toContain('command -v node >/dev/null 2>&1 || {')
     expect(cmd).toContain('node "$CLAUDE_PROJECT_DIR/scripts/hooks/db-write-gate.mjs"')
@@ -790,7 +836,7 @@ describe('wiring', () => {
     const ptu = (s.hooks as { PreToolUse: Array<{ matcher: string, hooks: Array<{ command: string }> }> }).PreToolUse
     expect(ptu).toHaveLength(1)
     expect(ptu[0].matcher).toBe(DB_WRITE_GATE_MATCHER)
-    expect(DB_WRITE_GATE_MATCHER).toBe('Bash|Write|Edit|MultiEdit|NotebookEdit')
+    expect(DB_WRITE_GATE_MATCHER).toBe('Bash|Monitor|Write|Edit|MultiEdit|NotebookEdit')
     expect(ptu[0].hooks[0].command).toContain(join('scripts', 'hooks', 'db-write-gate.mjs'))
   })
   it('the scaffold wires it for every sub-agent and the startup migration repairs it (pinned in source)', () => {

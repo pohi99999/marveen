@@ -1967,14 +1967,14 @@ export function injectSelfPaceGate(existing: Record<string, unknown>): void {
 // database, no write of this install's gate wiring or autonomy levels. Write,
 // Edit, MultiEdit and NotebookEdit are in the matcher: the install-file part is
 // reachable through the native file tools as well as Bash.
-export const DB_WRITE_GATE_MATCHER = 'Bash|Write|Edit|MultiEdit|NotebookEdit'
+export const DB_WRITE_GATE_MATCHER = 'Bash|Monitor|Write|Edit|MultiEdit|NotebookEdit'
 export function injectDbWriteGate(existing: Record<string, unknown>): void {
   const hooks = (existing.hooks && typeof existing.hooks === 'object'
     ? existing.hooks
     : (existing.hooks = {})) as Record<string, unknown>
   const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'db-write-gate.mjs'))
   if (isUnsafeHookCommand(command)) return
-  const entry = { matcher: DB_WRITE_GATE_MATCHER, hooks: [{ type: 'command', command, timeout: 10 }] }
+  const entry = { matcher: DB_WRITE_GATE_MATCHER, hooks: [{ type: 'command', command, timeout: 10, onFailure: GATE_ON_FAILURE }] }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
     ...prev.filter((e) => !JSON.stringify(e).includes('db-write-gate.mjs')),
@@ -3050,7 +3050,8 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
   const dbGateCmd = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'db-write-gate.mjs'))
   const dbGateStale = ptu.some((e) => JSON.stringify(e).includes('db-write-gate.mjs')
     && (e as { matcher?: unknown })?.matcher !== DB_WRITE_GATE_MATCHER)
-  const needDbGate = agentGetsGovernanceGates(name) && (!hookCommandWired(ptuJson, dbGateCmd) || dbGateStale)
+  const needDbGate = agentGetsGovernanceGates(name)
+    && (!hookCommandWired(ptuJson, dbGateCmd) || dbGateStale || !gateEntriesBlockOnFailure(ptu, 'db-write-gate.mjs'))
   // The destructive gate has the same two failure modes, plus a third that is
   // specific to it: it was hand-wired on 2026-09-08, so an install can carry a
   // correct-looking entry this code never wrote. Treat a stale matcher as

@@ -194,6 +194,33 @@ const PS_FLEET_SAMPLE = [
   ' 419345 ?        Ssl    0:40 /usr/bin/node /home/pohi/marveen/dist/index.js HOME=/home/pohi TELEGRAM_STATE_DIR=/home/pohi/marveen/.claude/channels/telegram',
 ].join('\n')
 
+// v1.46.1: envScan rows are `<pid> <argv> <env>`, without TTY STAT TIME. The fork's argv gate has to read them, or no
+// orphan poller is ever found; and it must not take three loose words for those columns, or a shell that merely
+// mentions bun looks like a poller again (the 2026-09-18 fleet kill).
+describe('parsePollerPidsFromPs -- both row shapes of the argv gate', () => {
+  const dir = '/Users/x/ClaudeClaw/.claude/channels/telegram'
+  const env = `TELEGRAM_STATE_DIR=${dir} CLAUDE_PLUGIN_ROOT=/Users/x/.claude/plugins/cache/telegram`
+  const pids = (row: string) => parsePollerPidsFromPs(row, 'TELEGRAM_STATE_DIR', dir)
+  it('envScan rows: a bun or a plugin node poller is found', () => {
+    expect(pids(`70001 bun server.ts ${env}`)).toEqual([70001])
+    expect(pids(`70002 /Users/x/.bun/bin/bun run --cwd /p start ${env}`)).toEqual([70002])
+    expect(pids(`70003 node /Users/x/.claude/plugins/cache/t/server.js ${env}`)).toEqual([70003])
+  })
+  it('the whole-host ps columns still work', () => {
+    expect(pids(`70004 ?? S 0:01.23 bun server.ts ${env}`)).toEqual([70004])
+    expect(pids(`70005 s001 S+ 1:02:03 /opt/bun/bin/bun server.ts ${env}`)).toEqual([70005])
+  })
+  it.each([
+    ['a shell that mentions bun', `70010 sh -c foo bun server.ts ${env}`],
+    ['tmux carrying the needle', `70011 tmux new-session -d bun server.ts ${env}`],
+    ['a plain node job', `70012 node /tmp/job.js ${env}`],
+    ['claude', `70013 claude --channels x ${env}`],
+    ['columns, then not a poller', `70014 ?? S 0:01.23 claude --channels ${env}`],
+  ])('never a poller: %s', (_, row) => {
+    expect(pids(row)).toEqual([])
+  })
+})
+
 describe('parsePollerPidsFromPs -- poller-only gate (33258ff2, fleet kill of 2026-09-18 03:01)', () => {
   const MAIN = '/home/pohi/marveen/.claude/channels/telegram'
   it('reaps exactly the two bun poller rows that carry the main needle', () => {

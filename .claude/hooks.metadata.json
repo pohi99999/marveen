@@ -155,7 +155,7 @@
         "hook": "skill-usage-capture",
         "gate": false,
         "purpose": "PostToolUse hook: log skill usage to the persistent skill_usage table.",
-        "fingerprint": "1543593096a625ed429dde5b1e8e4932cb649b9dc858c450d9fd911ce1f546ee"
+        "fingerprint": "52f3c465d4334051d6700da431010c4d6ed213a503cd61cf4d16bc55e55cf780"
       },
       {
         "index": 7,
@@ -163,7 +163,7 @@
         "hook": "memory-frontmatter-bash-gate",
         "gate": true,
         "purpose": "Memory frontmatter check for memory files written from Bash (after the write).",
-        "fingerprint": "aa6cd306708c96b51c50a7cd351247e2967d164a2cf80ecabf154d5fda126563"
+        "fingerprint": "c64cd7dcd83a22e5b22690fb57528c989d4f39752e36d6066defca1e58c9cb09"
       }
     ],
     "PostToolUseFailure": [
@@ -181,7 +181,7 @@
         "hook": "memory-frontmatter-bash-gate",
         "gate": true,
         "purpose": "Memory frontmatter check for memory files written from Bash (failed tool call).",
-        "fingerprint": "d3bb003fb576cc114d69dfd964372e085797215cfa535295916162f33dc60534"
+        "fingerprint": "4b0ebdadcc4431c17e969954dcf3b600f407977086565d6b4d7ca4a2d1f75525"
       }
     ],
     "PreToolUse": [
@@ -195,118 +195,126 @@
       },
       {
         "index": 1,
-        "id": "pre-tool-use/outgoing-copy-gate",
+        "id": "pre-tool-use/outgoing-copy-gate/bash+monitor",
         "hook": "outgoing-copy-gate",
         "gate": true,
-        "purpose": "Copy QA gate on outgoing email sent from Bash.",
-        "fingerprint": "ff6e53bd1f418b70b823cde7238b0fc3315bb7ad9d0749ac04287408cbf1331b"
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "79f6830da67deb7fef4ba2a91ae63bc25d3f1c88f1edff3d392b4a6d9eb3e774"
       },
       {
         "index": 2,
-        "id": "pre-tool-use/outgoing-copy-gate/send-email",
+        "id": "pre-tool-use/outgoing-copy-gate-2",
         "hook": "outgoing-copy-gate",
         "gate": true,
-        "purpose": "Copy QA gate on outgoing email (send_email tools).",
-        "fingerprint": "c394c746154806770e3163dc1ccde9be76c28e90f412891e308a986b42f3b9ee"
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "a0e1a0a3add48bbe35303ac0b507f58b30059cc805d71a224d78a17f4ba4abf5"
       },
       {
         "index": 3,
-        "id": "pre-tool-use/outgoing-copy-gate/manage-email",
+        "id": "pre-tool-use/outgoing-copy-gate-3",
         "hook": "outgoing-copy-gate",
         "gate": true,
-        "purpose": "Copy QA gate on outgoing email (manage_email tools).",
-        "fingerprint": "21d1eaac63337a66a5a296e9e9bbf560edebf66d75735aefe3b14694fce8977d"
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "23deefadc41df0c23a642e8497de244167a68a17ef99b1380814a8e5b4c13ba6"
       },
       {
         "index": 4,
-        "id": "pre-tool-use/outgoing-copy-gate/gmail",
+        "id": "pre-tool-use/outgoing-copy-gate-4",
         "hook": "outgoing-copy-gate",
         "gate": true,
-        "purpose": "Copy QA gate on outgoing email (Gmail connector tools).",
-        "fingerprint": "931cb2a709989038508ed2375e5bc3f48c570da0b0551c116fbcd019a09abb2f"
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "3a8c674f9bc9f67e794cd4b6357e4c9a49c8d9a859bf17579b362a918efd714b"
       },
       {
         "index": 5,
-        "id": "pre-tool-use/outgoing-copy-gate/draft-email",
+        "id": "pre-tool-use/outgoing-copy-gate-5",
         "hook": "outgoing-copy-gate",
         "gate": true,
-        "purpose": "Copy QA gate on outgoing email drafts (draft_email tools).",
-        "fingerprint": "ef3b4959d9a14558ff871e532b5c5f375aa52aebb2fc4c2e5e715ba5e6814bf2"
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "784b7d9580b81447384b32ba18a02cd069d1c00a00bc4903195bbeac8f5c6c34"
       },
       {
         "index": 6,
-        "id": "pre-tool-use/outgoing-copy-gate/mail-tool-family",
+        "id": "pre-tool-use/outgoing-copy-gate/send-draft+update-draft+create-dra",
         "hook": "outgoing-copy-gate",
         "gate": true,
-        "purpose": "Copy QA gate on outgoing email (send / draft / reply / forward tool family).",
-        "fingerprint": "377931b4032bc5f334e7ef61263cb78cdff5b35276161ba44fb5aec785bbf98b"
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "2981e57a832bdd91752d8ea6f11caaf81033ff919baaa560a67333a8face7488"
       },
       {
         "index": 7,
-        "id": "pre-tool-use/outgoing-copy-gate/telegram-reply",
+        "id": "pre-tool-use/outgoing-copy-gate/reply+edit-message",
         "hook": "outgoing-copy-gate",
         "gate": true,
-        "purpose": "Copy QA gate on outgoing Telegram reply / edit_message text.",
-        "fingerprint": "9958c78989ed7fbf5a0a53e77b70f12fb281caa4ce2832c70469b84ab6b6399e"
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "6685ccb33f3ce10ca7a34f1022a5bf7d5b85dc8da30885a27379aa24a810bd6e"
       },
       {
         "index": 8,
-        "id": "pre-tool-use/outgoing-copy-gate/discord-reply",
+        "id": "pre-tool-use/outgoing-copy-gate-6",
         "hook": "outgoing-copy-gate",
         "gate": true,
-        "purpose": "Copy QA gate on outgoing Discord reply / edit_message text.",
-        "fingerprint": "9381080810f59fe04a00a6cdef7767029e5c14bf91d88a7c4ad260ecd95dc939"
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "6b8f93eab8071c141e169ca7a3547f3e5ad297a36f20334d9540fb05024657c4"
       },
       {
         "index": 9,
+        "id": "pre-tool-use/outgoing-copy-gate/mcp-marveen-api",
+        "hook": "outgoing-copy-gate",
+        "gate": true,
+        "purpose": "PreToolUse gate on the MAIN agent's outbound email: Hungarian copy QA.",
+        "fingerprint": "505273f02a8bad385295a7920b0c98f23abd09f0a771c870fdb2b5995c2b60c6"
+      },
+      {
+        "index": 10,
         "id": "pre-tool-use/email-approval-gate",
         "hook": "email-approval-gate",
         "gate": true,
         "purpose": "Level-aware approval gate on outgoing email sent from Bash (EMAILKAPU901).",
-        "fingerprint": "aaab71739fefaa88c806cee84a890a0d2178c12e878e571ebed65f4aaaa54fff"
+        "fingerprint": "847f70d406e516ca6747f61bf3edfe8ad3974da130a57b5c4ce4ee418b08c224"
       },
       {
-        "index": 10,
+        "index": 11,
         "id": "pre-tool-use/email-approval-gate/send-email",
         "hook": "email-approval-gate",
         "gate": true,
         "purpose": "Level-aware approval gate on outgoing email (send_email tools).",
-        "fingerprint": "49e7869da6fb49a6da8992d56e1f1f55426292308ab7b5138d6253b340f83abe"
+        "fingerprint": "7b48a5fbaaf6723b0d311ae33d0a6dc18dba41d287f8a7ed85f0f9d913d68f76"
       },
       {
-        "index": 11,
+        "index": 12,
         "id": "pre-tool-use/email-approval-gate/manage-email",
         "hook": "email-approval-gate",
         "gate": true,
         "purpose": "Level-aware approval gate on outgoing email (manage_email tools).",
-        "fingerprint": "7115e2df1f4c3102095bdc55d92260a6dfa6cfe7b70d63c02997549ce9aeb491"
+        "fingerprint": "351fdca3de6c4c2590c68ad214be00d2fc519a5f3eb2d372c6829a828ace60aa"
       },
       {
-        "index": 12,
+        "index": 13,
         "id": "pre-tool-use/email-approval-gate/gmail",
         "hook": "email-approval-gate",
         "gate": true,
         "purpose": "Level-aware approval gate on outgoing email (Gmail connector tools).",
-        "fingerprint": "e8b9cbbb3265c886ec5a0ae834b99c83e8bb6552f34afc83a024d798dc9b6358"
+        "fingerprint": "0a3f970e0772b812fec55bff36b3b36ced2f2b956e400e8fbe9cb311f9b51fc0"
       },
       {
-        "index": 13,
+        "index": 14,
         "id": "pre-tool-use/email-approval-gate/draft-email",
         "hook": "email-approval-gate",
         "gate": true,
         "purpose": "Level-aware approval gate on outgoing email drafts (draft_email tools).",
-        "fingerprint": "b6744bc9efbe73b58e9d993024e5381b88dc301de9eeb53ea1bc6a20c63caf04"
+        "fingerprint": "b87a697c80a57a1f258672d3868483499a3a28009272d76aabc7c515e2b2f080"
       },
       {
-        "index": 14,
+        "index": 15,
         "id": "pre-tool-use/email-approval-gate/mail-tool-family",
         "hook": "email-approval-gate",
         "gate": true,
         "purpose": "Level-aware approval gate on outgoing email (send / draft / reply / forward tool family).",
-        "fingerprint": "72a23ba7706a44b6d2ab90ee1643f7abfbd01a70adcb01128f07f32ada1cb21f"
+        "fingerprint": "ca725129eaa6e598a0f5307482dd1466d17d95f7177c99a65230bca45026535e"
       },
       {
-        "index": 15,
+        "index": 16,
         "id": "pre-tool-use/channel-image-resize",
         "hook": "channel-image-resize",
         "gate": false,
@@ -314,15 +322,15 @@
         "fingerprint": "6470bb700bcc630a5566246b081d408a8816d9e2380bd7a34569cd1a76afefb6"
       },
       {
-        "index": 16,
+        "index": 17,
         "id": "pre-tool-use/egress-gate",
         "hook": "egress-gate",
         "gate": true,
         "purpose": "PreToolUse hook: WebFetch egress allowlist enforcement.",
-        "fingerprint": "94368f91e67d77d3cef978d63541bd2dcb5824dd82d2cc90404763644b622b87"
+        "fingerprint": "24b0a36c8f05e58f6b697fee247c17574adf997842fe6bc8745e4db9d8c7c769"
       },
       {
-        "index": 17,
+        "index": 18,
         "id": "pre-tool-use/memory-frontmatter-gate",
         "hook": "memory-frontmatter-gate",
         "gate": true,
@@ -330,28 +338,28 @@
         "fingerprint": "bb10f94bf97b6bfd4aaba6dfada4ca01a7f62b2987ea5fa23852905457d4b611"
       },
       {
-        "index": 18,
+        "index": 19,
         "id": "pre-tool-use/memory-frontmatter-bash-gate",
         "hook": "memory-frontmatter-bash-gate",
         "gate": true,
         "purpose": "Memory frontmatter check for memory files written from Bash (before the write).",
-        "fingerprint": "c43f4eb6a848f6abe80c053115250eb63529c59d8119f69463af15c904b6e55b"
+        "fingerprint": "074272a9232717d560aa81cb170a68df4bd97385f458a944727cd8b8da73bf80"
       },
       {
-        "index": 19,
+        "index": 20,
         "id": "pre-tool-use/db-write-gate",
         "hook": "db-write-gate",
         "gate": true,
         "purpose": "PreToolUse gate: agent writes to the dashboard's SECURITY surface (APPROVALDBGATE1030), for EVERY agent, the main agent included.",
-        "fingerprint": "ccb220ffc34e4c03f9b8267c0aee515a0a618a9ebd8e4650feb9e8c5c31be04e"
+        "fingerprint": "21f27378a55ab8e4f69469ac802974f7fd499084bb69aa1a5ebab062715c51d1"
       },
       {
-        "index": 20,
+        "index": 21,
         "id": "pre-tool-use/shell-rescan-guard",
         "hook": "shell-rescan-guard",
         "gate": true,
         "purpose": "PreToolUse gate: refuse a Bash command whose own TEXT will be re-scanned by the shell, because that is how prose becomes an executed command.",
-        "fingerprint": "dc80b8d05304d0e0c3e7015a34afe77f9b56f9f8c464800d65ac6b26f4f046b9"
+        "fingerprint": "0ba68284707802259a3200b48ff23676349a49884d40935c2f64c525499c062f"
       }
     ],
     "Stop": [
