@@ -20,6 +20,7 @@ import { reactionRoute, reactionsOn, dashboardOnlyLine, postReactionPrompt, star
 import { sendTelegramMessage, editTelegramMessageText, answerTelegramCallbackQuery } from '../telegram.js'
 import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, checkOwnerCallback, OWNER_RESOLVER, isButtonOnlyCategory, type OwnerDecision, type OwnerDecisionVia } from '../telegram-approval.js'
 import { mayIssueCredentials, mayActAsOwner, OWNER_SESSION_REQUIRED } from './auth.js'
+import { supersededApprovals, supersededResolver, SUPERSEDED_NOTE } from '../approval-supersede.js'
 import type { RouteContext } from './types.js'
 
 // Kanban 80d0e3c6: APPROVING is the owner's decision, so the two routes that make a row approved
@@ -199,6 +200,23 @@ export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDec
     }
   }
   return r
+}
+
+// A new request closes the older open one on the same subject, so the owner never has two live buttons for one decision.
+// A late press on the old button gets "already resolved"; the agent polling it sees rejected and who replaced it.
+function closeSupersededApprovals(next: Approval, explicitId: string | null): void {
+  const pending = listApprovals({ agent_id: next.agent_id, status: 'pending', limit: 500 })
+  for (const old of supersededApprovals(next, pending, explicitId)) {
+    if (!resolveApproval(old.id, 'rejected', supersededResolver(next.id))) continue
+    logger.info({ id: old.id, supersededBy: next.id }, 'Approval closed: a newer request replaced it')
+    if (TELEGRAM_BOT_TOKEN && old.telegram_message_id != null) {
+      const ownerChat = resolveOwnerChatId()
+      if (ownerChat) {
+        void editTelegramMessageText(TELEGRAM_BOT_TOKEN, ownerChat, old.telegram_message_id, `${buildOwnerApprovalText(old)}\n\n${SUPERSEDED_NOTE}`)
+          .catch((err) => logger.warn({ err, id: old.id }, 'superseded approval: notification rewrite failed (the row is closed)'))
+      }
+    }
+  }
 }
 
 // The nonce of a button-only approval is what a forged decision would need, so no GET serves it.
@@ -520,7 +538,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
 
   // POST /api/approvals -- create new approval request
   if (path === '/api/approvals' && method === 'POST') {
-    let body: { agent_id?: unknown; category?: unknown; action_description?: unknown; action_payload?: unknown; timeout_seconds?: unknown; content_hash?: unknown; owner_approved_message_id?: unknown; for_agent?: unknown }
+    let body: { supersedes?: unknown; agent_id?: unknown; category?: unknown; action_description?: unknown; action_payload?: unknown; timeout_seconds?: unknown; content_hash?: unknown; owner_approved_message_id?: unknown; for_agent?: unknown }
     try {
       body = JSON.parse((await readBody(req)).toString())
     } catch {
@@ -643,6 +661,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       approval = getApproval(id) ?? approval
     }
 
+    closeSupersededApprovals(approval, typeof body.supersedes === 'string' ? body.supersedes : null)
     notifyOwner(approval, chatApprovedMessageId)
     notifyMainAgent(approval)
     logger.info({ id, agent_id, category, chatApprovedMessageId, forAgent }, chatApprovedMessageId != null ? 'Approval created as already approved in chat' : 'Approval request created')
