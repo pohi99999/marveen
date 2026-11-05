@@ -45,8 +45,17 @@ export function inboundIsAudio(kind: string | null | undefined, fileId: string |
   return AUDIO_KINDS.has(String(kind ?? '').trim().toLowerCase())
 }
 
+// Shell-quote a path as one single-quoted word.
+function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
 // Build a ready-to-run TTS directive block injected after the STT transcript.
-// Returns null if the dashboard token cannot be read.
+// Returns null if the dashboard token file is missing, unreadable or empty.
+//
+// VOICETOKENLEAK1101: the directive is prompt text, so it lands in the agent's
+// pane and in its transcript. It must carry only a REFERENCE to the token file,
+// read by the shell when the command runs, never the token value itself.
 export function buildTtsDirective(opts: {
   chatId: string
   stateDir: string
@@ -55,11 +64,9 @@ export function buildTtsDirective(opts: {
   try {
     const tokenPath = join(STORE_DIR, '.dashboard-token')
     if (!existsSync(tokenPath)) return null
-    // The directive is prompt text: it lands in transcripts, compaction
-    // summaries and exports. Never embed the token value itself -- the shell
-    // reads it from the 0600 file when the command runs.
+    // Checked, not embedded: an empty or unreadable token file still means "no directive".
     if (!readFileSync(tokenPath, 'utf-8').trim()) return null
-    const tokenRef = `$(cat '${tokenPath.replace(/'/g, "'\\''")}')`
+    const tokenRef = `$(cat ${shellSingleQuote(tokenPath)})`
     const { chatId, stateDir, voiceModel } = opts
     // Escape stateDir for embedding in a jq string argument
     const escapedStateDir = stateDir.replace(/'/g, "'\\''")
