@@ -36,7 +36,11 @@ import credential_lib as cl  # noqa: E402
 VAL = "Xk29proba"
 VAL2 = "Kiskert2099z"
 SHARED = "KozosPr0ba"
-ALL_VALUES = (VAL, VAL2, SHARED, "TitkosProba7", "4821", "Kert!proba", "probaUrlJelszo9")
+# The PIN is all digits: ten of them, so it does not turn up by chance inside a hex key or an
+# HMAC digest in the gate's files, and as a Unix time it is far from now (the year 2161), so no
+# timestamp written there matches it either (a 4-digit PIN did, now and then).
+PIN = "6038274915"
+ALL_VALUES = (VAL, VAL2, SHARED, "TitkosProba7", PIN, "Kert!proba", "probaUrlJelszo9")
 NOW_S = "CAST(strftime('%s','now') AS INTEGER)"
 
 failed = []
@@ -190,11 +194,11 @@ def test_detector():
         "A jelszava a következő: titkosproba": 1,                        # bare word after a colon
         "Belépési adatok: admin / " + VAL2: 1,                           # user / password pair
         "Wi-Fi kulcs: \"Kert!proba\"": 1,
-        "PIN-kód: 4821": 1,
+        "PIN-kód: " + PIN: 1,
         "JELSZO: " + VAL: 1,                                             # unaccented, upper-case key
         "jelszo " + VAL: 1,
         "> jelszó: " + VAL: 1,                                           # a quoted earlier mail goes out too
-        "jelszó: " + VAL + ", PIN: 4821": 2,
+        "jelszó: " + VAL + ", PIN: " + PIN: 2,
         "https://user:probaUrlJelszo9@example.invalid/x": 1,
         "https://example.invalid/login?password=" + VAL + "&next=1": 1,
         "<p>jelszó: <b>" + VAL + "</b></p>": 1,                          # HTML body
@@ -316,6 +320,13 @@ def test_scope_and_drafts():
     check("a manage_email search (no letter body) passes", r.returncode == 0, r.stderr)
     r = gate(store, "mcp__claude_ai_Gmail__reply", {"messageId": "m-1", "body": LETTER})
     check("a connector reply is anchored to its messageId and denied", r.returncode == 2, r.stderr)
+    # A tool prefix (the vendored Gmail MCP prepends one verbatim) or a server
+    # whose segment is not exactly "gmail" left reply_all out of scope: the
+    # credential went out unread.
+    for name in ("mcp__gmail__v2_reply_all", "mcp__server-gmail-autoauth-mcp__reply_all",
+                 "mcp__claude_ai_Gmail__work-reply"):
+        r = gate(store, name, {"messageId": "m-2", "body": LETTER})
+        check(f"{name} with a credential is in scope and denied", r.returncode == 2, r.stderr)
     check("a Bash call that is not a send passes", gate(store, "Bash", {"command": "ls -la"}).returncode == 0)
     check("a tool that cannot carry a letter passes", gate(store, "Read", {"file_path": "/x"}).returncode == 0)
     r = gate(store, "mcp__mail__create_draft", {"subject": "x", "body": LETTER})
@@ -507,16 +518,16 @@ def test_multi_recipient():
 
 def test_no_value_anywhere():
     print("(5) the value is never written")
-    leaks = []
-    for out in outputs:
-        leaks += [v for v in ALL_VALUES if v in out and v != "4821"]
-    check("no value in any stdout or stderr of the gate and the CLI", not leaks, repr(sorted(set(leaks))))
     td, store = make_store()
-    for body in (LETTER, "Jelszó: " + VAL2 + "\nPIN: 4821\n"):
+    for body in (LETTER, "Jelszó: " + VAL2 + "\nPIN: " + PIN + "\n"):
         r = gate(store, "Bash", bash_send(td, "ugyfel@example.invalid", body))
         cli(store, "ack", "--anchor", anchor_of(r), "--by", "teszt", "--reason", "sajat egyedi adat (proba)")
         gate(store, "Bash", bash_send(td, "ugyfel@example.invalid", body))
     cli(store, "shared-add", "--note", "proba", stdin=SHARED)
+    leaks = []
+    for out in outputs:
+        leaks += [v for v in ALL_VALUES if v in out]
+    check("no value in any stdout or stderr of the gate and the CLI", not leaks, repr(sorted(set(leaks))))
     files = {}
     for name in os.listdir(store):
         if name.startswith("credential-gate") and not name.endswith(".lock"):
@@ -527,6 +538,16 @@ def test_no_value_anywhere():
     check("the log shows length and an 8-hex fingerprint prefix",
           all(set(h) == {"keyword", "line", "length", "fp8"} and len(h["fp8"]) == 8
               for x in log_lines(store) for h in x.get("hits", [])))
+
+
+def test_monitor():
+    # MONITORGATE1030: Monitor runs its command in the same shell as Bash, so it is judged as one.
+    print("Monitor")
+    td, store = make_store()
+    r = gate(store, "Monitor", {"description": "d", **bash_send(td, "ugyfel@example.invalid", LETTER)})
+    check("Monitor: a letter with a credential is denied", r.returncode == 2, r.stderr)
+    r = gate(store, "Monitor", {"description": "d", **bash_send(td, "ugyfel@example.invalid", CLEAN, name="clean.txt")})
+    check("Monitor: a clean letter passes", r.returncode == 0, r.stderr)
 
 
 if __name__ == "__main__":
@@ -543,5 +564,6 @@ if __name__ == "__main__":
     test_whitespace_class()
     test_multi_recipient()
     test_no_value_anywhere()
+    test_monitor()
     print(f"\n{'ALL PASS' if not failed else f'{len(failed)} FAIL'}")
     sys.exit(1 if failed else 0)

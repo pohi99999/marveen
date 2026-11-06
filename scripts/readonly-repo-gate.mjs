@@ -336,7 +336,8 @@ if (isInvokedDirectly()) {
     if (underRoot(target, cwd) && !isArtifactTarget(target, cwd)) deny(GATE_MSG(`${tool} -> ${target}`))
   }
 
-  if (tool === 'Bash') {
+  // MONITORGATE1030: Monitor runs its `command` in the same shell as Bash, so it is judged as one.
+  if (tool === 'Bash' || (tool === 'Monitor' && typeof input.command === 'string')) {
     const v = bashViolation(input.command, payload?.cwd)
     if (v) deny(GATE_MSG(v))
   }

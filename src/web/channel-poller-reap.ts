@@ -23,7 +23,7 @@
 //      environment when invoked with `e`; we grep that.
 
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { channelStateDir } from '../channel-provider.js'
@@ -40,7 +40,28 @@ import { shQuote } from './ssh-tmux.js'
 // is gone -- so the old form was blind to the very thing this scan exists to
 // find (card PSEWWMACOSBLIND1007). `x` adds the tty-less processes; procps on
 // Linux accepts the same BSD-style `axeww`.
+// REAPERENOBUFS1101: the reaper no longer runs this whole-host form (envScan below reads only the processes a
+// poller can be); it stays as the tty-inclusive form's name for scripts/channels.sh's boot pass, which streams it
+// through awk with no buffer limit.
 export const PS_ENV_SCAN_CMD = '/bin/ps axeww'
+
+/**
+ * TESTENVLEAK1101: what a failed execSync (ps, tmux) may put in a log line. Never the error object itself: execSync's error carries
+ * the child's whole stdout, and for the env scan that is every process's environment, tokens included (measured
+ * 2026-11-01: dashboard.log held an 8.4 MB `err.stdout` from an ENOBUFS scan, every ~11 minutes). Only the kind of
+ * failure and how much output there was.
+ */
+export function execFailure(err: unknown): { code: string | null; signal: string | null; status: number | null; stdoutBytes: number } {
+  const e = (err ?? {}) as { code?: unknown; signal?: unknown; status?: unknown; stdout?: unknown }
+  const out = e.stdout
+  const stdoutBytes = typeof out === 'string' ? Buffer.byteLength(out) : Buffer.isBuffer(out) ? out.length : 0
+  return {
+    code: typeof e.code === 'string' ? e.code : null,
+    signal: typeof e.signal === 'string' ? e.signal : null,
+    status: typeof e.status === 'number' ? e.status : null,
+    stdoutBytes,
+  }
+}
 
 const STATE_ENV_VAR: Record<ChannelProviderType, string> = {
   telegram: 'TELEGRAM_STATE_DIR',
@@ -98,15 +119,19 @@ export function parsePollerPidsFromPs(
 // children carry the main agent's needle. Measured 2026-09-18 03:01: 156
 // matches -- tmux server, 8 agent claudes, 4 podman -- reaped after the 03:00
 // channels auto-restart, i.e. a fleet-wide kill and a 6-hour dashboard outage.
-// A poller row's argv (columns after PID TTY STAT TIME) starts with `bun`
+// A poller row's argv starts with `bun`
 // (`bun run --cwd .../plugins/cache/...`, `.../bun server.ts`) or with a
 // `node` whose script lives under plugins/cache/ or plugins/marketplaces/
 // (old builds). The env block follows argv,
 // so it can never satisfy this anchored test.
-const POLLER_ARGV_RE = /^\s*\d+\s+\S+\s+\S+\s+\S+\s+(?:\S*\/)?(?:bun\s|node\s+\S*\/plugins\/(?:cache|marketplaces)\/)/
+// Two row shapes reach this: `<pid> <argv> <env>` from envScan, and `<pid> <tty> <stat> <time> <argv> <env>` from the
+// whole-host `ps axeww`. The optional part must look like real STAT and TIME columns: three loose words would let
+// `sh -c foo bun ...` through, which is the fleet kill this gate exists to prevent.
+const POLLER_ARGV_RE = /^\s*\d+\s+(?:\S+\s+[A-Za-z][A-Za-z<+.]*\s+\d+:\d+(?:[.:]\d+)?\s+)?(?:\S*\/)?(?:bun\s|node\s+\S*\/plugins\/(?:cache|marketplaces)\/)/
 
-// The scan itself is psEwwSnapshot's (below): one PS_ENV_SCAN_CMD call site for
-// this path and reapChannelOrphans, so neither can drift back to a blind form.
+// The scan itself is psEwwSnapshot's (below): one env-scan call site (envScan,
+// REAPERENOBUFS1101) for this path and reapChannelOrphans, so neither can drift
+// back to a blind form.
 function listPollerPidsByStateDir(envVar: string, chanDir: string): number[] {
   return parsePollerPidsFromPs(psEwwSnapshot(chanDir), envVar, chanDir)
 }
@@ -126,6 +151,17 @@ function listPollerPidsByStateDir(envVar: string, chanDir: string): number[] {
 // honoured only while it names a process with the plugin marker: the pid space
 // wraps, and a stale bot.pid can name a pid the kernel has since given to an
 // unrelated process.
+//
+// The plugin marker alone does not cover one recycled-pid shape: the pid now
+// belongs to ANOTHER agent's live poller of the same provider (same plugin
+// root, so the marker matches). The launchers export the state-dir variable
+// for the sessions they start (the sub-agent fence points every provider at
+// the agent's own dir), so that poller carries `<envVar>=<its own dir>`, and
+// the plugin writes bot.pid into the dir that variable names (its built-in
+// default only when the variable is unset). A bot.pid holder whose state-dir
+// value is some other dir is therefore never this agent's poller:
+// selectReapablePollers spares it ('other-state-dir'). A holder with no
+// state-dir value at all (a plugin on its default dir) is judged as before.
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
@@ -139,8 +175,12 @@ function pluginRootRegex(pluginRootNeedle: string): RegExp {
 // The rows of ONE channel state dir: the state-dir literal `<envVar>=<chanDir>`
 // ending on whitespace or end of line (so `/x/telegram` does not also match
 // `/x/telegram-old`), and, when `rootRe` is given, that anchor too.
+function stateDirLiteralRe(envVar: string, chanDir: string): RegExp {
+  return new RegExp(`(?:^|\\s)${escapeRe(envVar)}=${escapeRe(chanDir)}(?:\\s|$)`)
+}
+
 function stateDirRowPids(psEwwOutput: string, envVar: string, chanDir: string, rootRe?: RegExp): number[] {
-  const dirRe = new RegExp(`(?:^|\\s)${escapeRe(envVar)}=${escapeRe(chanDir)}(?:\\s|$)`)
+  const dirRe = stateDirLiteralRe(envVar, chanDir)
   const out: number[] = []
   for (const line of psEwwOutput.split('\n')) {
     if (!dirRe.test(line) || (rootRe && !rootRe.test(line))) continue
@@ -169,6 +209,27 @@ export function parseStateDirPollerPids(
 }
 
 /**
+ * Does `pid`, in the same env-scan snapshot, carry `<envVar>=` but NOT the
+ * anchored literal `<envVar>=<chanDir>`? Then it runs for another state dir
+ * (see "Plugin-process markers" above). "Own" is decided by the same anchored
+ * match the env scan uses (stateDirLiteralRe), not by reading the value up to
+ * the first whitespace: a state dir with a space in its path (an install under
+ * `/Users/a/My Projects/...`) is found by the env scan, so it must be own here
+ * too, or every own orphan would be spared and never reaped. false when the pid
+ * is not in the snapshot or carries no such variable. Exported for testability.
+ */
+export function carriesOtherStateDir(psEwwOutput: string, pid: number, envVar: string, chanDir: string): boolean {
+  const ownRe = stateDirLiteralRe(envVar, chanDir)
+  const varRe = new RegExp(`(?:^|\\s)${escapeRe(envVar)}=`)
+  for (const line of psEwwOutput.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s/)
+    if (!m || parseInt(m[1]!, 10) !== pid) continue
+    return varRe.test(line) && !ownRe.test(line)
+  }
+  return false
+}
+
+/**
  * Is `pid`, in the same env-scan snapshot, a plugin process of the provider
  * (CLAUDE_PLUGIN_ROOT anchor present)? bot.pid is only trusted through this
  * check. Exported for testability.
@@ -182,15 +243,122 @@ export function isPluginPollerPid(psEwwOutput: string, pid: number, pluginRootNe
   return false
 }
 
-// One env-scan snapshot (PS_ENV_SCAN_CMD, so tty-less processes are listed on
-// macOS too); empty on failure (no candidate then, so nothing is reaped).
-function psEwwSnapshot(chanDir: string): string {
-  try {
-    return execSync(PS_ENV_SCAN_CMD, { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
-  } catch (err) {
-    logger.warn({ err, chanDir }, 'channel-poller-reap: ps scan failed')
-    return ''
+/**
+ * This state dir's live-poller candidates for the channel liveness probe
+ * (FORKFA161A5921): the same two markers the reaper trusts (the anchored
+ * `<envVar>=<chanDir>` literal AND the provider's CLAUDE_PLUGIN_ROOT), in one
+ * env-scan snapshot. The long-lived poller is `bun server.ts`, an argv with no
+ * provider slug, so once its `bun run --cwd .../<provider>/<ver>` wrapper is
+ * gone only its environment still says whose poller it is.
+ */
+export function stateDirPluginPollerPids(provider: ChannelProviderType, chanDir: string, psEww: string = psEwwSnapshot(chanDir)): number[] {
+  return parseStateDirPollerPids(psEww, STATE_ENV_VAR[provider], chanDir, PLUGIN_ROOT_NEEDLE[provider])
+}
+
+// ---------------------------------------------------------------------------
+// REAPERENOBUFS1101: the env scan reads only the processes a poller can be.
+//
+// The whole-host `ps axeww` (PS_ENV_SCAN_CMD) printed every process's environment.
+// Measured 2026-11-01 on the host: 17.5 MB, 4039 rows, 2.3 s. That is over the
+// 8 MB buffer, so execSync threw ENOBUFS, the scan came back empty, and nothing
+// was reaped; it also held the dashboard's event loop for ~2 s every round.
+// A poller is always a JS runtime (POLLER_RUNTIMES; selectReapablePollers spares
+// everything else anyway), and its argv (`bun server.ts`) carries no provider
+// slug, so only the environment says whose it is. So the scan first lists the
+// processes by name only, then reads the environment of the runtime ones plus
+// the bot.pid holder. Measured the same minute: the name list 0.76 MB in 0.47 s,
+// the environment of the 193 runtime processes 0.53 MB in 0.24 s.
+//
+// macOS: `ps -axo pid=,comm=` and `ps eww -o pid,command -p <pids>` (measured:
+// a list where some pids have exited still prints the live ones with exit 0;
+// one where all have exited prints the header only, exit 1: an empty scan).
+// Linux: /proc/<pid>/comm, cmdline and environ, so the row does not depend on how
+// a procps build mixes BSD `e` with -o (not measurable on the macOS host).
+// A row is `<pid> <command> <env k=v ...>`, as the parsers above expect.
+
+const ENV_SCAN_MAX_BUFFER = 16 * 1024 * 1024
+
+/** The pids of the JS-runtime processes in a `ps -axo pid=,comm=` listing (comm may be a full path). Exported for testability. */
+export function runtimePidsFromComm(listing: string): number[] {
+  const pids: number[] = []
+  for (const line of listing.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(.+?)\s*$/)
+    if (!m) continue
+    if (!POLLER_RUNTIMES.has(m[2]!.split('/').pop() ?? '')) continue
+    const pid = parseInt(m[1]!, 10)
+    if (pid > 1) pids.push(pid)
   }
+  return pids
+}
+
+export interface EnvScanDeps {
+  /** /proc is there (Linux): read the rows from it instead of ps. */
+  useProc: boolean
+  /** Runs /bin/ps with these arguments and returns its stdout; throws as execFileSync does. */
+  ps: (args: readonly string[]) => string
+  /** /proc: the numeric entries, and one file of one pid (comm, cmdline, environ); null when gone. */
+  procPids: () => number[]
+  procRead: (pid: number, file: 'comm' | 'cmdline' | 'environ') => string | null
+}
+
+const defaultEnvScanDeps: EnvScanDeps = {
+  useProc: existsSync('/proc/self'),
+  ps: (args) => execFileSync('/bin/ps', [...args], { timeout: 5000, encoding: 'utf-8', maxBuffer: ENV_SCAN_MAX_BUFFER }),
+  procPids: () => readdirSync('/proc').filter((d) => /^\d+$/.test(d)).map(Number),
+  procRead: (pid, file) => {
+    try { return readFileSync(`/proc/${pid}/${file}`, 'utf-8') } catch { return null }
+  },
+}
+
+/**
+ * The narrowed env scan: one row per JS-runtime process, plus each of [extraPids] (the bot.pid holder, whatever it runs),
+ * `<pid> <command> <environment>`. Throws when the listing or the ps read fails (the caller logs and reaps nothing).
+ * Exported for testability.
+ */
+export function envScan(extraPids: readonly number[] = [], deps: EnvScanDeps = defaultEnvScanDeps): string {
+  const extra = extraPids.filter((p) => Number.isInteger(p) && p > 1)
+  if (deps.useProc) {
+    const runtime = deps.procPids().filter((pid) => POLLER_RUNTIMES.has((deps.procRead(pid, 'comm') ?? '').trim()))
+    const rows: string[] = []
+    for (const pid of [...new Set([...runtime, ...extra])]) {
+      const cmdline = deps.procRead(pid, 'cmdline')
+      const environ = deps.procRead(pid, 'environ')
+      if (cmdline === null || environ === null) continue // gone, or not ours to read
+      rows.push(`${pid} ${cmdline.split('\0').filter(Boolean).join(' ')} ${environ.split('\0').filter(Boolean).join(' ')}`)
+    }
+    return rows.join('\n')
+  }
+  const pids = [...new Set([...runtimePidsFromComm(deps.ps(['-axo', 'pid=,comm='])), ...extra])]
+  if (pids.length === 0) return ''
+  try {
+    return deps.ps(['eww', '-o', 'pid,command', '-p', pids.join(',')])
+  } catch (err) {
+    // Every listed pid exited between the two calls: ps prints the header and exits 1. An empty scan, not a failure.
+    const e = err as { status?: unknown; stdout?: unknown }
+    if (e.status === 1 && typeof e.stdout === 'string' && !/^\s*\d+\s/m.test(e.stdout)) return e.stdout
+    throw err
+  }
+}
+
+/** Env-scan failures in a row (this process): logged at error level, so a blind reaper is never quiet. */
+let envScanFailuresInARow = 0
+
+function envScanOrEmpty(where: Record<string, unknown>, extraPids: readonly number[] = []): string | null {
+  try {
+    const out = envScan(extraPids)
+    envScanFailuresInARow = 0
+    return out
+  } catch (err) {
+    logger.error({ ...execFailure(err), ...where, failuresInARow: ++envScanFailuresInARow }, 'channel-poller-reap: env scan FAILED, nothing is reaped this round (REAPERENOBUFS1101)')
+    return null
+  }
+}
+
+// One env-scan snapshot for a channel dir (the bot.pid holder included); empty on
+// failure (no candidate then, so nothing is reaped), and the failure is loud.
+function psEwwSnapshot(chanDir: string): string {
+  const botPid = readBotPid(chanDir)
+  return envScanOrEmpty({ chanDir }, botPid !== null ? [botPid] : []) ?? ''
 }
 
 function readBotPid(chanDir: string): number | null {
@@ -534,7 +702,7 @@ function logNotKilled(where: Record<string, unknown>, o: KillOutcomes): void {
 // every attempt taking the bridge down for the next 4-6 minutes.
 //
 // So the candidate list is now a SUPERSET of the pollers and must be filtered.
-// Three independent guards, because the expensive failure is killing the
+// Independent guards, because the expensive failure is killing the
 // session and the cheap failure is leaving one orphan for the next sweep:
 //   1. pane        -- the pid IS a live tmux pane pid. Never killable here:
 //                     that is an agent session, not a poller.
@@ -551,6 +719,12 @@ function logNotKilled(where: Record<string, unknown>, o: KillOutcomes): void {
 //                     so a poller shipped as a compiled binary is still reaped
 //                     through that path. The gap this leaves is narrow and
 //                     named: a NON-JS orphan whose pid is no longer in bot.pid.
+//   5. other-state-dir -- the candidate carries this provider's state-dir
+//                     variable with ANOTHER dir as its value. Only a bot.pid
+//                     holder can be one (env-scan hits carry this dir by
+//                     construction): a recycled pid that now belongs to another
+//                     agent's live poller of the same provider. Killing it takes
+//                     that agent's channel down; see "Plugin-process markers".
 //
 // The candidates reach this selection already narrowed to plugin processes
 // (cf075d41, "Plugin-process markers" above): an env-scan hit needs the
@@ -569,19 +743,21 @@ function argv0Base(command: string): string {
 
 export interface PollerSelection {
   reap: number[]
-  spared: { pid: number; reason: 'pane' | 'pane-ancestor' | 'claude' | 'not-a-runtime' | 'gone' }[]
+  spared: { pid: number; reason: 'pane' | 'pane-ancestor' | 'claude' | 'not-a-runtime' | 'other-state-dir' | 'gone' }[]
 }
 
 /**
  * Pure: split reap candidates into "actually a poller" and "spared, with a
  * reason". `fromBotPid` is exempt from the runtime check (see guard 4 above).
- * Exported for testability -- no ps, no tmux, no kill.
+ * `otherStateDir` holds the candidates that carry another state dir (guard 5;
+ * carriesOtherStateDir). Exported for testability -- no ps, no tmux, no kill.
  */
 export function selectReapablePollers(
   candidates: number[],
   procs: ProcRow[],
   panePids: Set<number>,
   fromBotPid: number | null,
+  otherStateDir: Set<number> = new Set(),
 ): PollerSelection {
   const byPid = new Map<number, ProcRow>()
   for (const p of procs) byPid.set(p.pid, p)
@@ -596,6 +772,7 @@ export function selectReapablePollers(
     if (panePids.has(pid)) { spared.push({ pid, reason: 'pane' }); continue }
     if (paneAncestors.has(pid)) { spared.push({ pid, reason: 'pane-ancestor' }); continue }
     if (argv0Base(row.command) === 'claude') { spared.push({ pid, reason: 'claude' }); continue }
+    if (otherStateDir.has(pid)) { spared.push({ pid, reason: 'other-state-dir' }); continue }
     if (pid !== fromBotPid && !POLLER_RUNTIMES.has(argv0Base(row.command))) {
       spared.push({ pid, reason: 'not-a-runtime' }); continue
     }
@@ -684,7 +861,8 @@ export function reapChannelOrphans(
       'channel-poller-reap: could not resolve live tmux panes, refusing to reap (fail-safe)')
     return { reaped: [], source: { fromBotPid, fromEnvScan }, skippedLivePane: [], skippedOtherUid: [], skippedUnknownOwner: [], killOutcome: noKills(), skippedNotPlugin }
   }
-  const selection = selectReapablePollers(candidates, procs, panePids, fromBotPid)
+  const otherStateDir = new Set(candidates.filter((pid) => carriesOtherStateDir(psEww, pid, envVar, chanDir)))
+  const selection = selectReapablePollers(candidates, procs, panePids, fromBotPid, otherStateDir)
   // A candidate that IS a live pane leader is the exact 08a02137 signature;
   // surfaced separately (warn below) from the other spare reasons.
   const skippedLivePane = selection.spared.filter((s) => s.reason === 'pane').map((s) => s.pid)
@@ -799,12 +977,23 @@ function isClaudeBinary(command: string): boolean {
  * to any live tmux pane (orphans). `livePanePids` is the set of pane pids from
  * `tmux list-panes -a`. `channelNeedle` optionally restricts to one plugin
  * (e.g. 'plugin:telegram@...'); when omitted, every channel plugin is in scope.
+ *
+ * `ownTmuxServerPid` keeps the scan to THIS install. `livePanePids` lists only
+ * the panes of our own tmux server, so the live session of another install on
+ * the same host (its own tmux server, same uid) looks detached from here. When
+ * the argument is given, a claude with a tmux server other than ours among its
+ * ancestors is spared: another install's live session always sits under its own
+ * server, while an orphan sits under ours or, once its server died, under pid 1.
+ * `null` (our server could not be resolved) treats every tmux ancestor as
+ * foreign, so only the orphans that no tmux server holds any more are found.
+ * Omitted, the scan is host-wide as before.
  * Exported for testability.
  */
 export function findOrphanChannelClaudes(
   procs: ProcRow[],
   livePanePids: Set<number>,
   channelNeedle?: string,
+  ownTmuxServerPid?: number | null,
 ): number[] {
   const byPid = new Map<number, ProcRow>()
   for (const p of procs) byPid.set(p.pid, p)
@@ -823,12 +1012,28 @@ export function findOrphanChannelClaudes(
     return false
   }
 
+  // Walks the whole parent chain (to pid 1), not a fixed number of hops: a
+  // sub-agent's claude sits under a shell under its server.
+  const underForeignTmuxServer = (pid: number): boolean => {
+    let cur = byPid.get(pid)?.ppid
+    const seen = new Set<number>([pid])
+    while (cur !== undefined && cur > 1 && !seen.has(cur)) {
+      seen.add(cur)
+      const row = byPid.get(cur)
+      if (!row) return false
+      if (argv0Base(row.command) === 'tmux' && row.pid !== ownTmuxServerPid) return true
+      cur = row.ppid
+    }
+    return false
+  }
+
   const orphans: number[] = []
   for (const p of procs) {
     if (!p.command.includes('--channels')) continue
     if (!isClaudeBinary(p.command)) continue
     if (channelNeedle && !p.command.includes(channelNeedle)) continue
     if (attachedToLivePane(p.pid)) continue
+    if (ownTmuxServerPid !== undefined && underForeignTmuxServer(p.pid)) continue
     orphans.push(p.pid)
   }
   return orphans
@@ -845,7 +1050,7 @@ function snapshotProcs(): ProcRow[] {
     }
     return rows
   } catch (err) {
-    logger.warn({ err }, 'channel-poller-reap: ps -axww snapshot failed')
+    logger.warn(execFailure(err), 'channel-poller-reap: ps -axww snapshot failed')
     return []
   }
 }
@@ -857,7 +1062,7 @@ function tmuxServerPid(tmuxPath: string): number | null {
     const n = parseInt(out.trim().split('\n')[0] ?? '', 10)
     return Number.isFinite(n) && n > 1 ? n : null
   } catch (err) {
-    logger.warn({ err }, 'channel-poller-reap: tmux display-message failed')
+    logger.warn(execFailure(err), 'channel-poller-reap: tmux display-message failed')
     return null
   }
 }
@@ -872,7 +1077,7 @@ function livePanePids(tmuxPath: string): Set<number> {
     }
     return s
   } catch (err) {
-    logger.warn({ err }, 'channel-poller-reap: tmux list-panes failed')
+    logger.warn(execFailure(err), 'channel-poller-reap: tmux list-panes failed')
     return new Set()
   }
 }
@@ -892,7 +1097,8 @@ function killBunChildren(claudePid: number, uid: number | null, seams: ReapSeams
  * it never kills the active session or a live sibling agent -- only truly
  * detached leftovers. Kills each orphan's bun poller children first, then the
  * claude (SIGTERM, ~300ms grace, SIGKILL stragglers). Signals only processes of
- * the dashboard's own uid (35ea0375). Returns the pids actually killed.
+ * the dashboard's own uid (35ea0375), and never a claude that sits under another
+ * install's tmux server (findOrphanChannelClaudes). Returns the pids actually killed.
  *
  * tmuxPath defaults to a bare `tmux` (resolved on PATH); callers that already
  * hold an absolute path should pass it.
@@ -907,7 +1113,10 @@ export function reapDetachedChannelClaudes(opts: { channelNeedle?: string; tmuxP
     logger.warn('channel-poller-reap: no live panes resolved, skipping detached-claude reap (fail-safe)')
     return []
   }
-  const detached = findOrphanChannelClaudes(procs, live, opts.channelNeedle)
+  // Another install's live session is not ours to reap (see findOrphanChannelClaudes).
+  // An unresolved server (null) spares every claude under any tmux server.
+  const server = opts.tmuxServerPid ? opts.tmuxServerPid() : tmuxServerPid(tmuxPath)
+  const detached = findOrphanChannelClaudes(procs, live, opts.channelNeedle, server)
   const where = { channelNeedle: opts.channelNeedle ?? '(all)' }
   // cf075d41: the orphan test looks UP from the claude (is it or an ancestor a
   // live pane?), so a detached `claude --channels` that sits ABOVE a live pane
@@ -1084,13 +1293,9 @@ export function reapForeignMainPollers(opts: {
   const legit = mainSessionPanePids(opts.mainSession, tmuxPath)
   if (legit.size === 0) return [] // fail-safe: cannot distinguish legit from thief
 
-  let psEww: string
-  try {
-    psEww = execSync(PS_ENV_SCAN_CMD, { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
-  } catch (err) {
-    logger.warn({ err }, 'channel-poller-reap: ps env scan failed (foreign-main reap skipped)')
-    return []
-  }
+  // REAPERENOBUFS1101: the narrowed scan (envScan); a failure is logged loud and nothing is reaped.
+  const psEww = envScanOrEmpty({ provider: opts.provider, mainSession: opts.mainSession, reaper: 'foreign-main' })
+  if (psEww === null) return []
   const candidates = parseMainDirPollerPids(psEww, PLUGIN_ROOT_NEEDLE[opts.provider], STATE_ENV_VAR[opts.provider])
   if (candidates.length === 0) return []
 

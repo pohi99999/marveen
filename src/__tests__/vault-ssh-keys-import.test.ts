@@ -4,17 +4,18 @@
 // and returns 201, then fails later when something actually reads the stored
 // key: an OpenSSH parser rejects a PEM without its closing newline. The gate
 // here therefore checks the STORED value, not the response status.
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterAll } from 'vitest'
 import type http from 'node:http'
 import { Readable } from 'node:stream'
 import { execFileSync } from 'node:child_process'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { RouteContext } from '../web/routes/types.js'
 
 const tmpRoot = mkdtempSync(join(tmpdir(), 'vault-ssh-keys-import-'))
+afterAll(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
 mkdirSync(join(tmpRoot, 'store'), { recursive: true })
 
 vi.mock('../config.js', async (orig) => {

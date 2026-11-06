@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { logger } from '../logger.js'
 import { INITIAL_GUARD_STATE, type GuardState, type HandoffStaleness } from '../context-guard.js'
+import type { HeavyJobNote } from './heavy-job-hold.js'
 
 // The context-guard's "restarted, resume prompt
 // still owed" state used to live ONLY in the runner's in-memory guardStates
@@ -36,12 +38,32 @@ export interface PendingResume {
   handoffStaleMinutes: HandoffStaleness
   /** The decision reason, for the log line only. */
   reason: string
+  /** Heavy-job gate jobs this restart concerned: which ended before
+   *  it and which it stopped. Absent when there were none. */
+  heavyJobs?: HeavyJobNote
 }
 
 export type PendingResumeMap = Record<string, PendingResume>
 
 function isStaleness(v: unknown): v is HandoffStaleness {
   return v === null || v === 'unknown' || (typeof v === 'number' && Number.isFinite(v))
+}
+
+/** A malformed note is dropped (the resume then simply does not mention it). */
+export function parseHeavyJobNote(v: unknown): HeavyJobNote | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  const o = v as Record<string, unknown>
+  if (typeof o.heldMinutes !== 'number' || !Number.isFinite(o.heldMinutes)) return null
+  const label = (x: unknown): string | null => (typeof x === 'string' && x.length > 0 ? x.slice(0, 100) : null)
+  const ended = Array.isArray(o.ended) ? o.ended.map(label).filter((x): x is string => x !== null) : []
+  const killed: HeavyJobNote['killed'] = []
+  for (const k of Array.isArray(o.killed) ? o.killed : []) {
+    if (!k || typeof k !== 'object') continue
+    const kk = k as Record<string, unknown>
+    const l = label(kk.label)
+    if (l && (kk.state === 'running' || kk.state === 'queued')) killed.push({ label: l, state: kk.state })
+  }
+  return { heldMinutes: o.heldMinutes, ended, killed }
 }
 
 /** Parse the file contents defensively: a malformed entry is dropped, never thrown. */
@@ -52,19 +74,35 @@ export function parsePendingResumes(raw: unknown): PendingResumeMap {
     if (!v || typeof v !== 'object') continue
     const e = v as Record<string, unknown>
     if (typeof e.restartedAtMs !== 'number' || !Number.isFinite(e.restartedAtMs)) continue
+    const heavy = parseHeavyJobNote(e.heavyJobs)
     out[name] = {
       restartedAtMs: e.restartedAtMs,
       handoffStaleMinutes: isStaleness(e.handoffStaleMinutes) ? e.handoffStaleMinutes : null,
       reason: typeof e.reason === 'string' ? e.reason : '',
+      ...(heavy ? { heavyJobs: heavy } : {}),
     }
   }
   return out
 }
 
+// A missing file is the normal "nothing owed" state and stays silent. Any other
+// failure (an unreadable file, corrupt JSON) still answers {} -- the caller must
+// keep running -- but says so: those resume obligations are lost, and the next
+// write overwrites the file. Every read error used to be swallowed without a trace.
 export function readPendingResumes(path: string = PENDING_RESUME_PATH): PendingResumeMap {
+  let text: string
   try {
-    return parsePendingResumes(JSON.parse(readFileSync(path, 'utf-8')))
-  } catch {
+    text = readFileSync(path, 'utf-8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      logger.warn({ path, code: (err as NodeJS.ErrnoException).code, error: (err as Error).message }, 'context-guard: pending-resume file unreadable, treating it as empty (its resume obligations are lost)')
+    }
+    return {}
+  }
+  try {
+    return parsePendingResumes(JSON.parse(text))
+  } catch (err) {
+    logger.warn({ path, error: (err as Error).message }, 'context-guard: pending-resume file is not valid JSON, treating it as empty (its resume obligations are lost)')
     return {}
   }
 }

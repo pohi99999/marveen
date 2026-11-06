@@ -19,6 +19,17 @@ const h = vi.hoisted(() => ({
   insertRetry: vi.fn(),
 }))
 
+// v1.45.0: the runner fires only registry-matched tasks; the gate is covered by schedule-source-registry.test.ts,
+// here it is a passthrough (the same mock schedule-run-now-direct.test.ts uses).
+vi.mock('../web/schedule-registry.js', () => ({
+  filterRegisteredTasks: <T,>(tasks: T[]) => tasks,
+  backfillScheduledTaskRegistryOnce: () => ({ ran: false, registered: [] }),
+  verifyScheduledTask: () => ({ ok: true }),
+  describeVerdict: () => '',
+  registerScheduledTask: () => 'test-hash',
+  unregisterScheduledTask: () => true,
+}))
+
 vi.mock('../web/scheduled-tasks-io.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../web/scheduled-tasks-io.js')>()),
   listScheduledTasks: () => h.tasks,

@@ -4,11 +4,12 @@ usage-quota-gate.py -- weekly Max-quota EMERGENCY GATE (card 6d9de12c, 2026-09-1
 
 Runs right after scripts/usage-collect.py (same command task, usage-collect-hourly).
 Reads store/usage-latest.json (never calls the provider itself), and when the
-Claude seven_day window's used_percent reaches a threshold (70, then 80, then
+Claude seven_day window's used_percent reaches a threshold (70, then 85, then
 90) it sends ONCE per threshold per window (the seven_day_opus window has its
-own 70/80/90 steps, inter-agent only). The 70 step is an early warning only:
-no model switch (the switch line is 80, owner decision 2026-09-22), its text
-says so, and it is not sent in a run where 80 or 90 fires too (card c394dc95):
+own 70/80/90 steps, inter-agent only, informational). The 70 step is an early
+warning only: no model switch (the switch line is 85, owner decision 2026-10-26,
+Telegram 10968; it was 80 from 2026-09-22), its text says so, and it is not sent
+in a run where 85 or 90 fires too (card c394dc95):
   - an inter-agent message to the main agent, prefixed [KVOTA], via the
     dashboard API (bearer from store/.dashboard-token). The API accepts only
     registered agent ids as `from`, so the note is sent from the main agent
@@ -41,8 +42,12 @@ STORE = os.path.join(ROOT, "store")
 SNAPSHOT_PATH = os.path.join(STORE, "usage-latest.json")
 STATE_PATH = os.path.join(STORE, "usage-alert-state.json")
 # 70 = early weekly warning (card c394dc95, owner GO 2026-10-08): it fires once per
-# window like the others, but it only informs -- the switch rule starts at 80.
-THRESHOLDS = (70, 80, 90)
+# window like the others, but it only informs -- the switch rule starts at SWITCH_LINE.
+# The switch line moved from 80 to 85 (owner, Telegram 10968, 2026-10-26). The state key
+# follows the number (claude_seven_day_threshold_85), so a window that already fired 80
+# under the old line fires the 85 step once more, which is the new switch message.
+SWITCH_LINE = 85
+THRESHOLDS = (70, SWITCH_LINE, 90)
 EARLY_WARNING = 70
 WINDOW = "seven_day"
 # The per-model weekly window has its own ceiling: on 2026-09-28 it reached 97%
@@ -108,8 +113,8 @@ def time_to_reset(resets_at, now=None):
 
 def seven_day_sends(to_fire):
     """Which of the fired seven_day thresholds get a message. The 70 early warning
-    says "no switch now"; in a run where 80 or 90 fires too (a jump past 80 between
-    two hourly reads, or a reset found above 80) that text would contradict the
+    says "no switch now"; in a run where 85 or 90 fires too (a jump past 85 between
+    two hourly reads, or a reset found above 85) that text would contradict the
     switch rule, so only the higher ones are sent. decide() has already recorded
     70 as fired, so it does not come back later in the same window."""
     if EARLY_WARNING in to_fire and any(t > EARLY_WARNING for t in to_fire):
@@ -166,13 +171,13 @@ def message_text(t, snapshot, now=None):
         return (
             f"[KVOTA] Korai jelzes: a heti Max-keret {sd.get('used_percent')}% (kuszob {t}%), "
             f"{time_to_reset(sd.get('resets_at'), now)} van a resetig ({fmt_reset(sd.get('resets_at'))}). "
-            f"Most nincs atallas (az atallasi hatar 80%), a marveen figyeli az utemet. "
+            f"Most nincs atallas (az atallasi hatar {SWITCH_LINE}%), a marveen figyeli az utemet. "
             f"5 oras: {fh.get('used_percent')}%, Fable-heti: {op.get('used_percent')}%."
         )
     return (
         f"[KVOTA] Heti Max-keret {sd.get('used_percent')}% (kuszob {t}%). "
         f"Reset: {fmt_reset(sd.get('resets_at'))}. 5 oras: {fh.get('used_percent')}%, Fable-heti: {op.get('used_percent')}%. "
-        + ("Atallasi szabaly 80%: aura, zeph, irisz, stratega, nyomozo, lumen, Kenshin, marveen -> Sonnet 5 (a Fable nem kulon keret). Visszaallas a reset utan." if t < 90
+        + (f"Atallasi szabaly {SWITCH_LINE}%: aura, zeph, irisz, stratega, nyomozo, lumen, Kenshin, marveen -> Sonnet 5.5 (a Fable nem kulon keret). Visszaallas a reset utan." if t < 90
            else "90%: nem surgos feladatok szuneteltetese a resetig. Visszaallas a reset utan.")
     )
 
@@ -233,11 +238,16 @@ def self_test():
     check(f == [70], "70%: fires 70 only")
     f, s = decide(snap(75, r1), s)
     check(f == [], "75%: 70 does not repeat")
-    # 80 crossed: fires 80 once, not 90 (70 already fired does not hold it back)
-    f, s = decide(snap(81, r1), s)
-    check(f == [80], "81%: fires 80 only")
+    # the old switch line (80) and just under the new one (85) stay silent
+    f, s = decide(snap(80, r1), s)
+    check(f == [], "80%: nothing fires (the switch line is 85, not 80)")
+    f, s = decide(snap(84.9, r1), s)
+    check(f == [], "84.9%: nothing fires")
+    # 85 crossed: fires 85 once, not 90 (70 already fired does not hold it back)
     f, s = decide(snap(85, r1), s)
-    check(f == [], "85% again: 80 does not repeat")
+    check(f == [85], "85%: fires 85 only")
+    f, s = decide(snap(88, r1), s)
+    check(f == [], "88% again: 85 does not repeat")
     # 90 crossed: fires 90 once
     f, s = decide(snap(90, r1), s)
     check(f == [90], "90%: fires 90 only")
@@ -245,32 +255,42 @@ def self_test():
     check(f == [], "97%: neither repeats")
     # window reset: resets_at changes -> re-armed, high usage fires both again
     f, s = decide(snap(92, r1 + 7 * 86400), s)
-    check(sorted(f) == [70, 80, 90], "after reset at 92%: all three fire again")
-    check(seven_day_sends(f) == [80, 90], "after reset at 92%: the 70 text is not sent next to 80/90")
+    check(sorted(f) == [70, 85, 90], "after reset at 92%: all three fire again")
+    check(seven_day_sends(f) == [85, 90], "after reset at 92%: the 70 text is not sent next to 85/90")
     # reset with low usage: re-armed but silent
     f, s = decide(snap(30, r1 + 14 * 86400), s)
-    check(f == [] and s["claude_seven_day_threshold_80"] == {}, "after reset at 30%: silent and re-armed")
+    check(f == [] and s["claude_seven_day_threshold_85"] == {}, "after reset at 30%: silent and re-armed")
     # sub-second jitter on resets_at (measured 2026-09-15) must not look like a new
     # window: same reset, three slightly different floats -> fires once, not thrice
     r2 = r1 + 21 * 86400
-    f, s = decide(snap(81, r2 + 0.204469), {})
-    check(f == [70, 80], "jitter: first hourly read at 81% fires 70 and 80")
-    f, s = decide(snap(82, r2 + 0.940767), s)
+    f, s = decide(snap(86, r2 + 0.204469), {})
+    check(f == [70, 85], "jitter: first hourly read at 86% fires 70 and 85")
+    f, s = decide(snap(87, r2 + 0.940767), s)
     check(f == [], "jitter: next hourly read, different fractional resets_at, does not refire")
-    f, s = decide(snap(83, r2 + 0.263748), s)
+    f, s = decide(snap(88, r2 + 0.263748), s)
     check(f == [], "jitter: a third differing fractional resets_at still does not refire")
     # a real rollover (~7 days later) still re-arms despite similar jitter
     f, s = decide(snap(85, r2 + 7 * 86400 + 0.5), s)
-    check(f == [70, 80], "jitter: a genuine reset 7 days later still re-arms")
+    check(f == [70, 85], "jitter: a genuine reset 7 days later still re-arms")
+    # the 80 -> 85 move: a state file written under the old line keeps its 80 key, and
+    # that key neither fires nor holds the 85 step back; a window that already fired 70
+    # stays quiet until 85 (the live state on 2026-10-27: 70 fired, 80 never armed)
+    old = {"claude_seven_day_threshold_70": {"fired_for_reset": r1}, "claude_seven_day_threshold_80": {}}
+    f, s = decide(snap(80, r1), old)
+    check(f == [] and s["claude_seven_day_threshold_80"] == {}, "old state at 80%: nothing fires, old 80 key kept untouched")
+    f, s = decide(snap(85, r1), s)
+    check(f == [85], "old state at 85%: the 85 step fires once")
     # missing data never fires and never crashes
     f, s = decide({}, s)
     check(f == [], "empty snapshot: nothing")
     # message text has no em dash (outgoing copy rule) and carries the reset
-    m = message_text(80, snap(81, r1))
+    m = message_text(85, snap(85, r1))
     check("—" not in m and "[KVOTA]" in m and "Reset:" in m, "message text: [KVOTA] prefix, reset, no em dash")
+    check("kuszob 85%" in m and "Atallasi szabaly 85%" in m and "80" not in m, "85 text: names the 85 line, no 80 anywhere")
     m = message_text(70, snap(70, r1), now=r1 - 2.3 * 86400)
     check("Korai jelzes" in m and "nincs atallas" in m and "2,3 nap" in m and "Sonnet" not in m and "—" not in m,
           "70 text: early warning, no switch rule, time to reset, no em dash")
+    check("atallasi hatar 85%" in m and "80" not in m, "70 text: names the 85 switch line, no 80 anywhere")
     # Opus window: its own 70/80/90 thresholds and state keys, independent of seven_day
     osnap = lambda used, opus, reset: {"claude": {"windows": {"seven_day": {"used_percent": used, "resets_at": reset}, "seven_day_opus": {"used_percent": opus, "resets_at": reset}}}}
     f, s = decide(osnap(40, 69, r1), {}, OPUS_THRESHOLDS, OPUS_WINDOW)

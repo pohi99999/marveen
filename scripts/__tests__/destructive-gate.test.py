@@ -267,6 +267,13 @@ check("artalmatlan parancsra exit 0",
 check("tiltott parancsra exit 2",
       _hook_exit(json.dumps({"tool_name": "Bash",
                              "tool_input": {"command": RM + " -rf /tmp/x"}})) == 2)
+# MONITORGATE1030: a Monitor ugyanabban a shellben futtatja a command-jat, mint a Bash.
+check("Monitor: artalmatlan parancsra exit 0",
+      _hook_exit(json.dumps({"tool_name": "Monitor",
+                             "tool_input": {"description": "d", "command": "ls -la"}})) == 0)
+check("Monitor: tiltott parancsra exit 2",
+      _hook_exit(json.dumps({"tool_name": "Monitor",
+                             "tool_input": {"description": "d", "command": RM + " -rf /tmp/x"}})) == 2)
 # A LENYEG: ha maga a kapu hasal el, az NEM lehet csendes atengedes. A block() SystemExit-tel
 # lep ki, azt az "except Exception" nem fogja meg -- tehat a valodi blokkolas atmegy, es
 # csak a VARATLAN kivetel valt ki fail-closed viselkedest.

@@ -106,6 +106,16 @@ for name, cmd, want in CASES:
         failed.append(name)
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}: exit={got} want={want}")
 
+# MONITORGATE1030: Monitor runs its command in the same shell as Bash, so every case above is judged
+# the same way when it arrives as a Monitor call, in both directions.
+for name, cmd, want in CASES:
+    payload = json.dumps({"tool_name": "Monitor", "tool_input": {"description": "d", "timeout_ms": 1000, "command": cmd}})
+    got = subprocess.run([sys.executable, GATE], input=payload.encode(), capture_output=True).returncode
+    ok = got == want
+    if not ok:
+        failed.append("Monitor: " + name)
+    print(f"  [{'PASS' if ok else 'FAIL'}] Monitor: {name}: exit={got} want={want}")
+
 print()
 if failed:
     print(f"{len(failed)} FAILED: {failed}", file=sys.stderr)

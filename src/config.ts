@@ -1,12 +1,13 @@
 import { CronExpressionParser } from 'cron-parser'
 import { hostname, homedir } from 'node:os'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readEnvFile } from './env.js'
 import { parseLabelPalette } from './css-color.js'
 import { resolveFleetVenvDir } from './fleet-venv.js'
 import { DISTRIBUTION_DEFAULT_AGENT_MODEL } from './config-registry.js'
+import { FIXED_RESERVED_AGENT_IDS } from './web/sanitize.js'
 import { getProviderType, getChannelToken, getChannelChatId, type ChannelProviderType } from './channel-provider.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -260,6 +261,16 @@ export function currentOwnerName(): string {
   return o || OWNER_NAME
 }
 
+// MAIN_AGENT_RECIPIENT_LEDGER=1 in .env: the verified-recipient ledger applies
+// to the main agent too -- its approval gate and the project's own senders
+// check every recipient against store/verified-recipients.json. Off by default.
+// Read per call from .env only (never process.env), the way the Python side
+// reads it, so the generated CLAUDE.md text and the gate cannot disagree.
+export function mainAgentRecipientLedgerEnabled(): boolean {
+  const v = (readEnvFile(['MAIN_AGENT_RECIPIENT_LEDGER'])['MAIN_AGENT_RECIPIENT_LEDGER'] ?? '').trim().toLowerCase()
+  return ['1', 'true', 'yes', 'on'].includes(v)
+}
+
 // Pure derivation of the OS service id from a brand slug and the agent id:
 // the brand slug names the service units when it differs from the agent id,
 // otherwise the agent id is used. Mirrors the installer's SERVICE_ID choice so
@@ -293,6 +304,75 @@ export const MAIN_AGENT_ID = env['MAIN_AGENT_ID'] ?? 'marveen'
 // heartbeat-agent-scaffold) so agent-scaffold can key gates on it without an
 // import cycle: heartbeat-agent-scaffold already imports agent-scaffold.
 export const HEARTBEAT_AGENT_ID = 'heartbeat'
+
+// The voice channel's sender id (VOICECHANNELID1022): the external voice relay
+// posts the owner's dictation under it (HANGCSATORNA918). Unset keeps 'hanna'.
+// It must be a canonical agent id (lowercase a-z, 0-9, single inner dashes, at
+// most 50 characters), because the route compares the sanitized sender to it
+// exactly, and it must not name another sender (a system id, a SYSTEM_SENDER_IDS
+// entry, the main agent, a sub-agent directory, the owner's sanitized name):
+// that sender's messages would be framed as the voice channel. A rejected value
+// falls back to 'hanna', which goes through the same checks; if 'hanna' collides
+// too, the voice lane is off (null). routes/messages.ts logs
+// VOICE_CHANNEL_ID_INVALID and VOICE_CHANNEL_DISABLED_BY.
+export const DEFAULT_VOICE_CHANNEL_ID = 'hanna'
+const VOICE_CHANNEL_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+export interface VoiceChannelTakenIds {
+  mainAgentId: string
+  ownerName: string
+  /** SYSTEM_SENDER_IDS as configured (comma-separated). */
+  systemSenderIds: string
+  isSubAgent: (id: string) => boolean
+}
+export interface VoiceChannelResolution {
+  /** The voice channel id in effect; null when the voice lane is off. */
+  id: string | null
+  /** A configured value that was rejected. */
+  invalid?: string
+  /** Why the default could not be used either (the lane is then off). */
+  disabledBy?: string
+}
+export function resolveVoiceChannelId(raw: string | undefined, taken: VoiceChannelTakenIds): VoiceChannelResolution {
+  // Owner and system sender ids as routes/messages.ts compares them
+  // (sanitizeAgentIdent, inlined: config.ts keeps its imports to leaf modules).
+  const ident = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '')
+  const systemSenders = parseSystemSenderIds(taken.systemSenderIds, ident)
+  const collision = (id: string): string | undefined => {
+    if (FIXED_RESERVED_AGENT_IDS.includes(id)) return 'a system id'
+    if (systemSenders.has(id)) return 'a SYSTEM_SENDER_IDS entry'
+    if (id === taken.mainAgentId) return 'the main agent id'
+    if (id === ident(taken.ownerName)) return "the owner's name"
+    if (taken.isSubAgent(id)) return 'a sub-agent'
+    return undefined
+  }
+  const v = (raw ?? '').trim()
+  let invalid: string | undefined
+  if (v) {
+    if (v.length <= 50 && VOICE_CHANNEL_ID_RE.test(v) && !collision(v)) return { id: v }
+    invalid = v
+  }
+  const disabledBy = collision(DEFAULT_VOICE_CHANNEL_ID)
+  if (disabledBy) return { id: null, invalid, disabledBy }
+  return invalid === undefined ? { id: DEFAULT_VOICE_CHANNEL_ID } : { id: DEFAULT_VOICE_CHANNEL_ID, invalid }
+}
+const voiceChannel = resolveVoiceChannelId(env['VOICE_CHANNEL_ID'], {
+  mainAgentId: MAIN_AGENT_ID,
+  ownerName: OWNER_NAME,
+  systemSenderIds: SYSTEM_SENDER_IDS,
+  // A DIRECTORY, like the agent listing: a stray file under agents/ is not a sub-agent.
+  isSubAgent: (id) => {
+    try { return statSync(join(PROJECT_ROOT, 'agents', id)).isDirectory() } catch { return false }
+  },
+})
+export const VOICE_CHANNEL_ID: string | null = voiceChannel.id
+export const VOICE_CHANNEL_ID_INVALID = voiceChannel.invalid
+export const VOICE_CHANNEL_DISABLED_BY = voiceChannel.disabledBy
+
+// The full reserved-id list (FLEETRESERVEDNAME1021): the fixed ids from
+// web/sanitize.ts plus the voice channel id in effect (none when the lane is
+// off). No main agent or sub-agent may take one of these.
+export const RESERVED_AGENT_IDS: readonly string[] =
+  VOICE_CHANNEL_ID === null ? FIXED_RESERVED_AGENT_IDS : [...FIXED_RESERVED_AGENT_IDS, VOICE_CHANNEL_ID]
 
 // Identifier the OS service manager uses for the main agent's units (launchd
 // label com.<id>.channels / com.<id>.dashboard, systemd <id>-channels, etc.).
@@ -503,6 +583,29 @@ export const HEARTBEAT_START_HOUR = parseInt(env['HEARTBEAT_START_HOUR'] ?? '9',
 // above, since the heartbeat has to run on exactly one host).
 export const HEARTBEAT_AGENT_ENABLED =
   ['1', 'true', 'yes', 'on'].includes((cfg('HEARTBEAT_AGENT_ENABLED') ?? '').trim().toLowerCase())
+
+// When the monitor messages the owner about an unanswered tool-permission
+// prompt: a comma-separated list of ages ("10m,30m,1h,1d"; s/m/h/d, a bare
+// number is minutes). The last value is also the repeat period. Empty = the
+// shipped default; parsed (and a malformed value rejected whole) in
+// web/permission-prompt-alert.ts. PERMFLOOD1012.
+export const PERMISSION_ALERT_MARKS = (cfg('PERMISSION_ALERT_MARKS') ?? '').trim()
+
+// Routine (self-healing) recovery alerts on the owner's channel (DEFAULT ON).
+// web/routine-alert.ts reports the fleet's own recoveries -- "the main session
+// got stuck, I restarted it", "the session disappeared, respawning". They exist
+// because a SILENT wedge cost a morning (2026-07-30), but they are also the
+// fleet's normal operating noise, and an install may want them off the channel
+// without losing the record. The default must stay ON: an install that never
+// touches this key keeps the exact behaviour it had before the switch existed.
+// Only an explicit off value silences them, and even then the occurrence is
+// still logged (dashboard.log) -- this gate turns a message into a log line, it
+// never drops the fact. The REAL failure alerts are a different function
+// (sendAlert in web/channel-monitor.ts, e.g. "the automatic restart did NOT
+// succeed") and always go out, whatever this is set to.
+// Boot-time const (like SUBAGENT_INBOX_TEE): takes effect on dashboard restart.
+export const NOTIFY_ROUTINE_ALERTS =
+  !['0', 'false', 'no', 'off'].includes((cfg('NOTIFY_ROUTINE_ALERTS') ?? '1').trim().toLowerCase())
 
 // Sub-agent Telegram inbox delivery-path tee (opt-in, DEFAULT OFF).
 // When enabled, a telegram sub-agent loads the channel plugin via a per-agent

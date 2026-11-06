@@ -18,10 +18,19 @@
 //      that then spins on the first prompt).
 //   4. Running sessions keep the OLD binary until their next start; the result
 //      carries that note so the UI says it.
+//   5. Before an npm install the global npm dirs are measured (`npm prefix -g`,
+//      then W_OK on the package's scope dir <prefix>/lib/node_modules/@anthropic-ai
+//      and on <prefix>/bin). If either one exists and is not writable, the
+//      install would fail with EACCES (measured with npm 12.2.0: an update renames
+//      the old package dir and the old bin link aside, even with --no-bin-links;
+//      a read-only lib/node_modules alone does not stop it), so the manual sudo
+//      command is the result at once and nothing is spawned. A dir that does not
+//      exist yet, a prefix that cannot be measured, or a measurement that throws:
+//      the install runs as before.
 import { execFile, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { PROJECT_ROOT, STORE_DIR } from '../config.js'
 import { logger } from '../logger.js'
 import { tryResolveFromPath } from '../platform.js'
@@ -40,7 +49,7 @@ const PROBE_TIMEOUT_MS = 25_000
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000
 const RESULT_FILE = join(STORE_DIR, 'cli-update.last-result')
 
-export type InstallMethod = 'npm' | 'official' | 'unknown'
+export type InstallMethod = 'npm' | 'official' | 'homebrew' | 'unknown'
 export type TargetKind = 'latest' | 'avx-safe-pin'
 
 export interface CliOfferInput {
@@ -85,6 +94,8 @@ export function detectInstallMethod(binPath: string | null, resolveReal: (p: str
   let real = binPath
   try { real = resolveReal(binPath) } catch { /* keep the symlink path */ }
   if (real.includes('/node_modules/')) return 'npm'
+  // FORK: a Homebrew cask. The button does not run brew; it names the command, and npm would collide with the cask's link.
+  if (real.includes('/Caskroom/claude-code/')) return 'homebrew'
   // The official installer (claude.ai/install.sh) links ~/.local/bin/claude to
   // a versioned binary under ~/.local/share/claude.
   if (real.includes('/.local/share/claude') || real.includes('/.local/bin/claude')) return 'official'
@@ -171,7 +182,54 @@ export function cliUpdateRunning(): boolean { return running !== null }
 /** The shell command an operator can run by hand when the automatic path cannot (EACCES, unknown method). */
 export function manualInstallCommand(target: string, method: InstallMethod): string {
   if (method === 'official') return `curl -fsSL https://claude.ai/install.sh | bash -s ${target}`
+  if (method === 'homebrew') return 'brew upgrade --cask claude-code'
   return `npm install -g ${CLAUDE_CODE_PACKAGE}@${target}`
+}
+
+/** The result text when npm cannot write the global dirs (rule 5, and npm's own EACCES). */
+export function notWritableMessage(target: string, method: InstallMethod): string {
+  return `the global install dir is not writable; run by hand: sudo ${manualInstallCommand(target, method)}`
+}
+
+/** How a global npm dir answers W_OK: a path that does not exist (ENOENT, ENOTDIR) is 'missing', any other failure 'not-writable'. */
+export type DirAccess = 'writable' | 'not-writable' | 'missing'
+
+export function accessState(path: string): DirAccess {
+  try {
+    accessSync(path, constants.W_OK)
+    return 'writable'
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'not-writable'
+  }
+}
+
+/** `npm prefix -g`, or null when it fails or does not print an absolute path. The timeout is a parameter so a test can use a short one. */
+export function readNpmGlobalPrefix(timeoutMs: number = REGISTRY_TIMEOUT_MS): Promise<string | null> {
+  return new Promise((done) => {
+    execFile('npm', ['prefix', '-g'], { timeout: timeoutMs, killSignal: 'SIGKILL' }, (err, stdout) => {
+      const p = err ? '' : String(stdout).trim()
+      done(p && isAbsolute(p) ? p : null)
+    })
+  })
+}
+
+/**
+ * Rule 5: true when the package's scope dir or <prefix>/bin exists and is not writable, false when both are
+ * writable, null when the prefix cannot be measured or a dir is missing and none is not-writable (npm creates it).
+ */
+export async function npmGlobalDirsNotWritable(deps: {
+  npmPrefix?: () => Promise<string | null>
+  access?: (path: string) => DirAccess
+} = {}): Promise<boolean | null> {
+  const prefix = await (deps.npmPrefix ?? readNpmGlobalPrefix)()
+  if (!prefix) return null
+  const access = deps.access ?? accessState
+  const scope = access(dirname(join(prefix, 'lib', 'node_modules', CLAUDE_CODE_PACKAGE)))
+  const bin = access(join(prefix, 'bin'))
+  if (scope === 'not-writable' || bin === 'not-writable') return true
+  if (scope === 'missing' || bin === 'missing') return null
+  return false
 }
 
 /**
@@ -179,64 +237,87 @@ export function manualInstallCommand(target: string, method: InstallMethod): str
  * the source of truth for the UI; the running flag guards double clicks.
  * Verification after the install is the real launch probe, then a fresh
  * `--version` only for DISPLAY of what is now installed.
+ * An npm install first measures the global dirs (rule 5); the official install starts at once, as before.
  */
 export function startCliUpdate(target: string, method: InstallMethod, deps: {
   spawnImpl?: typeof spawn
   probe?: (bin: string) => Promise<LaunchProbeResult>
   measure?: () => Promise<{ version: string | null }>
   resolveBin?: () => string | null
+  dirsNotWritable?: () => Promise<boolean | null>
 } = {}): { ok: true } | { ok: false; error: string } {
   if (!VERSION_RE.test(target)) return { ok: false, error: 'target is not a dotted version' }
-  if (method === 'unknown') return { ok: false, error: 'install method unknown' }
+  if (method === 'unknown' || method === 'homebrew') return { ok: false, error: `install method ${method}` }
   if (running) return { ok: false, error: 'a CLI update is already running' }
   const sp = deps.spawnImpl ?? spawn
   const probe = deps.probe ?? ((bin: string) => probeClaudeLaunches(bin))
   const measure = deps.measure ?? (() => measureClaudeCliVersion({ fresh: true }))
   const resolveBin = deps.resolveBin ?? (() => tryResolveFromPath('claude'))
+  const dirsNotWritable = deps.dirsNotWritable ?? (process.platform === 'win32' ? async () => null : () => npmGlobalDirsNotWritable())
   const job: CliUpdateJobResult = { status: 'running', target, method, startedAt: Date.now() }
   running = job
   writeResult(job)
   const cmd = method === 'npm'
     ? ['npm', ['install', '-g', `${CLAUDE_CODE_PACKAGE}@${target}`]] as const
     : ['bash', ['-c', `curl -fsSL https://claude.ai/install.sh | bash -s '${target}'`]] as const
-  let stderrTail = ''
-  let child: ReturnType<typeof spawn>
-  try {
-    child = sp(cmd[0], [...cmd[1]], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, DISABLE_AUTOUPDATER: '1' } })
-  } catch (err) {
-    running = null
-    const failed: CliUpdateJobResult = { ...job, status: 'failed', finishedAt: Date.now(), message: `could not start ${cmd[0]}: ${(err as Error).message}` }
-    writeResult(failed)
-    return { ok: false, error: failed.message! }
-  }
-  child.stderr?.on('data', (d: Buffer) => { stderrTail = (stderrTail + d.toString()).slice(-600) })
-  const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* gone */ } }, INSTALL_TIMEOUT_MS)
-  const settle = async (installExit: number | null) => {
-    clearTimeout(timer)
-    let result: CliUpdateJobResult
-    if (installExit !== 0) {
-      const eacces = /EACCES|permission denied/i.test(stderrTail)
-      result = {
-        ...job, status: 'failed', finishedAt: Date.now(), installExit,
-        message: eacces
-          ? `the global install dir is not writable; run by hand: sudo ${manualInstallCommand(target, method)}`
-          : `install exited ${installExit ?? 'by signal'}: ${stderrTail.trim().slice(-300) || 'no stderr'}`,
-      }
-    } else {
-      const bin = resolveBin()
-      const pr = bin ? await probe(bin) : { ok: false, exitCode: null, signal: 'NO_BINARY', durationMs: 0 }
-      const installedAfter = (await measure()).version
-      result = pr.ok
-        ? { ...job, status: 'done', finishedAt: Date.now(), installExit, installedAfter, probe: pr, note: RUNNING_SESSIONS_NOTE }
-        : { ...job, status: 'failed', finishedAt: Date.now(), installExit, installedAfter, probe: pr,
-            message: `installed, but the new claude does not launch (probe exit ${pr.exitCode ?? pr.signal}); a running session is unaffected until its next start` }
+  const launch = (): { ok: true } | { ok: false; error: string } => {
+    let stderrTail = ''
+    let child: ReturnType<typeof spawn>
+    try {
+      child = sp(cmd[0], [...cmd[1]], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, DISABLE_AUTOUPDATER: '1' } })
+    } catch (err) {
+      running = null
+      const failed: CliUpdateJobResult = { ...job, status: 'failed', finishedAt: Date.now(), message: `could not start ${cmd[0]}: ${(err as Error).message}` }
+      writeResult(failed)
+      return { ok: false, error: failed.message! }
     }
-    running = null
-    writeResult(result)
-    logger.info({ result }, 'cli-update finished')
+    child.stderr?.on('data', (d: Buffer) => { stderrTail = (stderrTail + d.toString()).slice(-600) })
+    const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* gone */ } }, INSTALL_TIMEOUT_MS)
+    const settle = async (installExit: number | null) => {
+      clearTimeout(timer)
+      let result: CliUpdateJobResult
+      if (installExit !== 0) {
+        const eacces = /EACCES|permission denied/i.test(stderrTail)
+        result = {
+          ...job, status: 'failed', finishedAt: Date.now(), installExit,
+          message: eacces
+            ? notWritableMessage(target, method)
+            : `install exited ${installExit ?? 'by signal'}: ${stderrTail.trim().slice(-300) || 'no stderr'}`,
+        }
+      } else {
+        const bin = resolveBin()
+        const pr = bin ? await probe(bin) : { ok: false, exitCode: null, signal: 'NO_BINARY', durationMs: 0 }
+        const installedAfter = (await measure()).version
+        result = pr.ok
+          ? { ...job, status: 'done', finishedAt: Date.now(), installExit, installedAfter, probe: pr, note: RUNNING_SESSIONS_NOTE }
+          : { ...job, status: 'failed', finishedAt: Date.now(), installExit, installedAfter, probe: pr,
+              message: `installed, but the new claude does not launch (probe exit ${pr.exitCode ?? pr.signal}); a running session is unaffected until its next start` }
+      }
+      running = null
+      writeResult(result)
+      logger.info({ result }, 'cli-update finished')
+    }
+    child.on('error', (err) => { stderrTail += String(err.message); void settle(null) })
+    child.on('exit', (code) => { void settle(code) })
+    return { ok: true }
   }
-  child.on('error', (err) => { stderrTail += String(err.message); void settle(null) })
-  child.on('exit', (code) => { void settle(code) })
+  if (method !== 'npm') return launch()
+  void (async () => {
+    let notWritable: boolean | null = null
+    try {
+      notWritable = await dirsNotWritable()
+    } catch (err) {
+      logger.warn({ err }, 'cli-update preflight failed; installing as before')
+    }
+    if (notWritable === true) {
+      running = null
+      const failed: CliUpdateJobResult = { ...job, status: 'failed', finishedAt: Date.now(), message: notWritableMessage(target, method) }
+      writeResult(failed)
+      logger.info({ result: failed }, 'cli-update finished')
+      return
+    }
+    launch()
+  })()
   return { ok: true }
 }
 

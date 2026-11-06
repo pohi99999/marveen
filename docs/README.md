@@ -21,11 +21,17 @@ Minden lap két szemszögből mutatja be a funkciót:
 | [Printing-press CLI-k](printing-press-cli.md) | API nélküli oldalakhoz is agent-natív CLI generálás |
 | [Skool CLI](skool-cli.md) | Közösségi platform kezelése parancssorból (API nélkül) |
 | [connectors.hu](connectors-hu.md) | Üzleti API-átjáró (NAV, Billingo, Wise, fal.ai) MCP-n |
+| [Egy Google-jóváhagyás minden fogyasztónak](google-consent.md) | Egy telefonos jóváhagyás, egy refresh token a Gmail/Calendar/Drive MCP-knek és az API-szkripteknek, mindegyik a saját fájlformátumában; scope-hiány és 7 napos "Testing" token hangos jelzése ([EN](en/google-consent.md)) |
 | [Vault & titkosítás](vault.md) | Titkosított titok-tár (AES-256-GCM) OS-kulcstárral |
 | [Belépés-visszaút & vészreset](dashboard-auth-recovery.md) | Elfelejtett jelszó, kizárás, `security:reset` pánikgomb -- HTTP-független break-glass CLI |
 | [Dream-engine](dream-engine.md) | Éjszakai tudás-konszolidáció + reggeli prioritás-javaslatok |
 | [Proaktív hírszerző (intel registry)](intel-registry.md) | Óránkénti gyűjtő + napi brief közös SQLite tény-registry-vel, dedup + tény-életciklus |
 | [Háttér-feladatok](background-tasks.md) | Leválasztott, hosszú feladatok futtatása + értesítés |
+| [Piros gomb: a flotta fagyasztása](fleet-freeze.md) | Egy mozdulattal leállítható flotta: eszközhívás-tiltás, álló háttér-ciklusok, feloldás csak a gazdának |
+| [Meta Graph olvasó](meta-graph-olvasas.md) | Csak olvasó Facebook/Instagram Graph-hívások egy paranccsal: kizárólag GET, a token a store-ból, közös hívásszám-szünet ([EN](en/meta-graph-read.md)) |
+| [Hook-metaadatok és env-kapcsolók](hook-metaadatok.md) | Oldalfájl a settings.json hookjai mellett: a CI megfogja a csendes hook-átírást, átrendezést és a hiányzó szkriptet; naplózó hook env-ből kikapcsolható, kapu soha ([EN](en/hook-metadata.md)) |
+| [Nehéz-feladat kapu](heavy-job-gate.md) | Egyszerre egy nehéz feladat (render, teljes tesztsor, build) érkezési sorrendben, memória-padló és saját cgroup-memóriakeret; opt-in, csak Linuxon |
+| [macOS: Spotlight és a System Data](macos-spotlight.md) | Ha a „System Data” nő: a Spotlight-index a sok napló/jsonl/sqlite írástól; ellenőrzés, javítás a Keresési adatvédelem listával |
 
 *A dokumentáció él; javításokat/bővítéseket szívesen fogadunk.*
 
@@ -34,29 +40,34 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **56**, egyedi `/api/...` útvonal-literál bennük: **163**
-- Claude Code hookok (`.claude/settings.json`): **8** esemény, **47** bejegyzés, **31** szkript a `scripts/hooks/` alatt
+- Route-modulok (`src/web/routes/*.ts`): **64**, egyedi `/api/...` útvonal-literál bennük: **182**
+- Claude Code hookok (`.claude/settings.json`): **8** esemény, **54** bejegyzés, **36** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
-- Git-hook telepítők (`scripts/install-*-hook.sh`): **9** -- channel-image, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **51**, ebből a fenti táblázat linkel **16**
+- Git-hook telepítők (`scripts/install-*-hook.sh`): **10** -- channel-image, commit-identity, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
+- Dokumentációs lapok a `docs/` alatt: **65**, ebből a fenti táblázat linkel **22**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
 - [MIGRATION](MIGRATION.md)
 - [agens-azonositas-api](agens-azonositas-api.md)
+- [agent-budgets](agent-budgets.md)
 - [agent-state-observer](agent-state-observer.md)
 - [archivalt-kartyak](archivalt-kartyak.md)
+- [bash-sandbox](bash-sandbox.md)
 - [channel-reply-guard](channel-reply-guard.md)
+- [computer-use-access](computer-use-access.md)
 - [config-reference](config-reference.md)
 - [conversation-continuity](conversation-continuity.md)
 - [credential-gate](credential-gate.md)
 - [custom-providers](custom-providers.md)
+- [db-write-gate](db-write-gate.md)
 - [destruktiv-kapu-hamis-pozitiv-meres](destruktiv-kapu-hamis-pozitiv-meres.md)
 - [disk-modal-guards](disk-modal-guards.md)
 - [external-skill-catalog](external-skill-catalog.md)
 - [flotta-migracio](flotta-migracio.md)
 - [google-calendar-drive-service-account](google-calendar-drive-service-account.md)
 - [google-docs](google-docs.md)
+- [http-probe](http-probe.md)
 - [ideabox](ideabox.md)
 - [inter-agent-send-reliability](inter-agent-send-reliability.md)
 - [kutatas](kutatas.md)
@@ -69,13 +80,16 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [outgoing-copy-gate](outgoing-copy-gate.md)
 - [scheduled-tasks](scheduled-tasks.md)
 - [security-hardening](security-hardening.md)
+- [sender-role-gate](sender-role-gate.md)
 - [skills-git-forras](skills-git-forras.md)
 - [slack-progress-indicator](slack-progress-indicator.md)
 - [telegram-live-progress](telegram-live-progress.md)
 - [telegram-progress-indicator](telegram-progress-indicator.md)
+- [telegram-reaction](telegram-reaction.md)
 - [telegram-reply-enforcement-2026-08-02](telegram-reply-enforcement-2026-08-02.md)
 - [tippek-trukkok](tippek-trukkok.md)
 - [token-usage](token-usage.md)
 - [upstream-ledger](upstream-ledger.md)
+- [uptime-monitor](uptime-monitor.md)
 
 <!-- DOC_STATS_END -->

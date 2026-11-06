@@ -19,7 +19,7 @@ function sandbox(standby: boolean): { root: string; calls: string; bin: string }
   dirs.push(root)
   mkdirSync(join(root, 'scripts'), { recursive: true })
   mkdirSync(join(root, 'store'), { recursive: true })
-  for (const f of ['channels.sh', 'start.sh']) copyFileSync(join(ROOT, 'scripts', f), join(root, 'scripts', f))
+  for (const f of ['channels.sh', 'start.sh', 'launchd-unit.sh']) copyFileSync(join(ROOT, 'scripts', f), join(root, 'scripts', f))
   if (standby) writeFileSync(join(root, 'store', '.standby'), '')
   const bin = join(root, 'bin')
   mkdirSync(bin)

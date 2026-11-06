@@ -52,7 +52,7 @@ describe('outgoing-copy-gate: marveen-api MCP tools', () => {
   it('the hook is wired to the marveen-api tools in the project settings', () => {
     const s = JSON.parse(readFileSync(join(ROOT, '.claude', 'settings.json'), 'utf-8'))
     const pre = s.hooks.PreToolUse as { matcher: string; hooks: { command: string }[] }[]
-    const hit = pre.find((h) => new RegExp(`^(?:${h.matcher})$`).test('mcp__marveen-api__send_message') && h.hooks.some((x) => x.command.includes('outgoing-copy-gate.py')))
+    const hit = pre.find((h) => (h.matcher === '*' ? true : new RegExp(`^(?:${h.matcher})$`).test('mcp__marveen-api__send_message')) && h.hooks.some((x) => x.command.includes('outgoing-copy-gate.py')))
     expect(hit).toBeTruthy()
   })
 })

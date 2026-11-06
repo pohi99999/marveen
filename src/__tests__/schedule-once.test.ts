@@ -19,8 +19,20 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { safeRmTmp } from './helpers/safe-rm-tmp.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+// Scheduled-task registry: the runner fires only registry-matched tasks and the API routes register what
+// they write. The registry gate is covered by schedule-source-registry.test.ts; here it is a passthrough.
+vi.mock('../web/schedule-registry.js', () => ({
+  filterRegisteredTasks: <T,>(tasks: T[]) => tasks,
+  backfillScheduledTaskRegistryOnce: () => ({ ran: false, registered: [] }),
+  verifyScheduledTask: () => ({ ok: true }),
+  describeVerdict: () => '',
+  registerScheduledTask: () => 'test-hash',
+  unregisterScheduledTask: () => true,
+}))
 
 const tmpHome = mkdtempSync(join(tmpdir(), 'schedule-once-home-'))
 const realHome = process.env.HOME
@@ -50,7 +62,7 @@ function fixture(name: string, config: Record<string, unknown>, withSkill = true
   writeFileSync(join(dirOf(name), 'task-config.json'), JSON.stringify(config, null, 2))
 }
 
-beforeEach(() => { rmSync(io.SCHEDULED_TASKS_DIR, { recursive: true, force: true }) })
+beforeEach(() => { safeRmTmp(io.SCHEDULED_TASKS_DIR) })
 
 describe('the sandbox holds', () => {
   it('SCHEDULED_TASKS_DIR is under the throwaway HOME', () => {

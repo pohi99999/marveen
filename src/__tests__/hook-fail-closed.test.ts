@@ -123,12 +123,20 @@ describe('the fail-closed tail, on stand-in gates', () => {
         expect(JSON.parse(r.stdout)).toEqual([EMAIL_THREAD_REPLY_FLAG])
       })
 
+      // Hook timeout 5 s, not 3: the deadline is the same 1 s floor either way (gateDeadlineSec(3) and
+      // gateDeadlineSec(5) are both 1), but 5 s leaves the same four-second margin the production
+      // formula keeps (a62a27ce). With 3 s the margin was 2 s of wall clock for spawn + signal + reap,
+      // which a fully loaded vitest run can eat, so the check failed only under load. The assertion is
+      // still the real contract -- the wrapper ends the gate before the hook timeout it was given -- and
+      // a wrapper that waits for the hung gate (60 s) or a deadline at the hook timeout still fails it.
       it.skipIf(!HAS_TIMEOUT)('a hung gate ends at the wrapper\'s deadline, inside the hook timeout, and blocks', () => {
+        const HOOK_TIMEOUT_SEC = 5
+        expect(gateDeadlineSec(HOOK_TIMEOUT_SEC)).toBe(1)
         const g = fakeGate('hang.mjs', 'setTimeout(() => {}, 60_000)')
-        const r = run(shell, hookCommand(g, [], 3)) // hook timeout 3 s -> the gate's deadline 1 s
+        const r = run(shell, hookCommand(g, [], HOOK_TIMEOUT_SEC))
         expect(r.rc).toBe(2)
         expect(r.stderr).toContain('rc=124')
-        expect(r.ms).toBeLessThan(3000)
+        expect(r.ms).toBeLessThan(HOOK_TIMEOUT_SEC * 1000)
       })
     })
   }
@@ -258,8 +266,8 @@ describe('the real security gates on a disposable copy', () => {
     const entries = (settings.hooks.PreToolUse as { matcher: string; hooks: { command: string }[] }[])
       .flatMap((e) => e.hooks.map((h) => ({ matcher: e.matcher, command: h.command })))
     const security = entries.filter((e) => /outgoing-copy-gate\.py|email-approval-gate\.py|egress-gate\.mjs/.test(e.command))
-    // Fork: 14, not 13 -- the marveen-api MCP tools carry the copy gate too (PR #16, kanban 5f3617d9).
-    expect(security.length).toBe(14)
+    // Fork: 16, not upstream's 15 -- the marveen-api MCP tools carry the copy gate too (PR #16, kanban 5f3617d9).
+    expect(security.length).toBe(16)
     for (const e of security) {
       expect(e.command, e.matcher).toContain(GATE_FAIL_CLOSED_TAG)
       const rel = e.command.match(/scripts\/(hooks\/[a-z-]+\.(?:py|mjs))/)![1]

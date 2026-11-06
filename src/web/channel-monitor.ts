@@ -5,7 +5,8 @@ import { releaseOwnRespawnStamp, type OwnRespawnStamp } from './respawn-stamp-re
 import { existsSync, readFileSync, statSync, writeFileSync, utimesSync } from 'node:fs'
 import { hostname, loadavg, cpus, homedir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, execFile, spawn } from 'node:child_process'
+import { promisify } from 'node:util'
 import { makeLazyBinResolver } from '../platform.js'
 import { WEB_PORT } from '../config.js'
 import { logger } from '../logger.js'
@@ -17,7 +18,7 @@ import { listKanbanCards, createAgentMessage } from '../db.js'
 import {
   agentHasChannel,
   agentSessionName,
-  capturePane,
+  capturePane, capturePaneWithHistory,
   captureParkedInputView,
   clearInputBuffer,
   dismissResumeSummaryModalIfPresent,
@@ -39,6 +40,8 @@ import {
 } from './agent-process.js'
 import { sendSystemDirective } from './system-directive.js'
 import { isRestartInFlight, beginRestart, endRestart } from './restart-lock.js'
+import { paneRunsClaude, scheduleHardRestartVerify } from './hard-restart-verify.js'
+import { freshSupervisor, launchdReloadVerdict, reloadWindowSec, runningChannelsSupervisors, supervisorWaitDecision, type SupervisorWait } from './channels-supervisor.js'
 import { resolveMainConfigDecision, type MainConfigDecision } from './main-config-decision.js'
 import { runMainContinueRestart, type ContinueRestartResult } from './main-rotation-continue.js'
 import { withSessionSendLock } from './session-send-lock.js'
@@ -48,7 +51,6 @@ import { schedulePluginUnlockAfterRespawn, wasPluginConfirmedAbsent, clearPlugin
 import { getInjectedPrompt, matchesInjectedPrompt } from './injected-prompt-registry.js'
 import {
   detectPaneState, idleConsideringDimGhost, detectQuotaWall, decidePaneErrorAlert, detectsBlockingMenu, detectsPermissionDialog, detectsFirstRunGate, detectsModelConsentDialog, type PaneErrorAlertState, type PaneState,
-  permissionPromptSummary,
   stuckInputSignature, decideStuckInputRecovery, parkedChannelInput,
   parkedInputText, shouldClearTruncatedPreamble,
   parkedInputRowCount, submitLanded, decideStuckInputAction,
@@ -59,8 +61,10 @@ import {
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { recordChannelEvent } from './channel-event-log.js'
 import { notifyChannel, type AlertMeta } from '../notify.js'
-import { escalatePermissionPrompt, type PermPromptEscalationState } from './permission-prompt-escalation.js'
-import { sendRoutineAlert } from './routine-alert.js'
+import { ComputerUseAccessGuard, liveComputerUseAccessDeps } from './computer-use-access.js'
+import type { PermPromptEscalationState } from './permission-prompt-escalation.js'
+import { sendRoutineAlert, sendOwnerActionAlert } from './routine-alert.js'
+import { runPermissionPromptPass, clearPermissionPromptAlert } from './permission-prompt-alert.js'
 import { getProvider, channelStateDir, channelStateDirEnvVar, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
 import { readLastIngestionTimestampAcross, mainTranscriptDirs } from './inbound-probe.js'
@@ -70,11 +74,11 @@ import {
   AGENT_FAILURE_COUNT_TTL_MS,
   GIVE_UP_REALERT_MS,
   isFailureCountStale,
-  parseEtimeToSeconds,
+  etimeOutputToMs,
 } from './agent-restart-policy.js'
 // getClaudePidForSession + hasChannelPluginAlive live in the shared liveness
 // module so the standalone channel-coordinator reuses the exact same probe.
-import { getClaudePidForSession, hasChannelPluginAlive, probeChannelPluginLiveness, classifyRespawnStampAdvance } from '../channel-coordinator/liveness.js'
+import { getClaudePidForSession, getClaudePidForSessionAsync, hasChannelPluginAlive, probeChannelPluginLiveness, probeChannelPluginLivenessAsync, takeProcSnapshotAsync, classifyRespawnStampAdvance } from '../channel-coordinator/liveness.js'
 import { colistenProviders, runColistenCheck, type ColistenState } from './main-colisten-health.js'
 import { runReconcileBurst, waitReconcileGap, RECONCILE_MAIN_FIRST_MAX_WAIT_MS } from './reconcile-stagger.js'
 import { getDesiredAgents } from './agent-desired-state.js'
@@ -82,6 +86,7 @@ import { startSleepWakeDetector, systemSleptBetween } from './sleep-wake-detecto
 import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
 import { exactTmuxTarget } from '../tmux-target.js'
 import { beginMainRespawn } from './main-respawn-hold.js'
+import { whileNotFrozen } from './fleet-freeze.js'
 
 // Lazily resolved (see makeLazyBinResolver): a module-level `resolveFromPath`
 // const throws at IMPORT time, so any environment where the binary is not
@@ -107,8 +112,19 @@ const CHANNELS_FAILURES_LOG_PATH = join(PROJECT_ROOT, 'store', 'channels-failure
 function getProcessAgeMs(pid: number): number {
   try {
     const out = execFileSync('/bin/ps', ['-o', 'etime=', '-p', String(pid)], { timeout: 3000, encoding: 'utf-8' })
-    const secs = parseEtimeToSeconds(out)
-    return secs < 0 ? -1 : secs * 1000
+    return etimeOutputToMs(out)
+  } catch {
+    return -1
+  }
+}
+
+const execFileAsyncCm = promisify(execFile)
+// Async twin of getProcessAgeMs for the per-minute check(): the sweep must not hold the
+// event loop on one ps per agent.
+async function getProcessAgeMsAsync(pid: number): Promise<number> {
+  try {
+    const { stdout } = await execFileAsyncCm('/bin/ps', ['-o', 'etime=', '-p', String(pid)], { timeout: 3000, encoding: 'utf-8' })
+    return etimeOutputToMs(stdout)
   } catch {
     return -1
   }
@@ -928,8 +944,8 @@ export function decideMarveenRecoveryReport(
 // Pure. The stage-4 message, written AFTER the hard restart returned so it
 // reports what actually happened instead of announcing an attempt.
 export function hardRestartStageAlertText(svcName: string, session: string, r: { ok: boolean; error?: string }): string {
-  if (r.ok) return `⚠️ Session resume nem segitett. Hard restart (${svcName}) elinditva a ${session} session-on.`
-  return `⚠️ Session resume nem segitett, es a hard restart (${svcName}) sem sikerult a ${session} session-on: ${r.error ?? 'ismeretlen hiba'}.`
+  if (r.ok) return `⚠️ Session resume nem segített. Hard restart (${svcName}) elindítva a ${session} session-on.`
+  return `⚠️ Session resume nem segített, és a hard restart (${svcName}) sem sikerült a ${session} session-on: ${r.error ?? 'ismeretlen hiba'}.`
 }
 
 function getMainAgentProvider(): ChannelProviderType {
@@ -1566,6 +1582,8 @@ const CHANNELS_SCRIPT = join(PROJECT_ROOT, 'scripts', 'channels.sh')
 // recreated on the next 60s poll.
 const MAIN_SESSION_CREATE_GRACE_MS = 360_000
 let marveenLastSessionCreate = 0
+// CHANNELSDUP1023 follow-up: how long the recreate path has been waiting on a running supervisor.
+let supervisorWait: SupervisorWait | null = null
 
 export function mainChannelsSessionExists(): boolean {
   try {
@@ -1596,6 +1614,24 @@ export function createMainChannelsSession(): MainSessionCreateResult {
     logger.error({ script: CHANNELS_SCRIPT }, 'Cannot recreate main channels session: channels.sh missing')
     return 'script-missing'
   }
+  // CHANNELSDUP1023: a supervisor that is already running owns this session -- it is between
+  // a kill-session and its rebuild, or in its own restart back-off. Starting a second one made
+  // two supervisors watch one session (measured 2026-10-22 13:10, channels-supervisor.ts).
+  const live = runningChannelsSupervisors(CHANNELS_SCRIPT)
+  const wait = supervisorWaitDecision(supervisorWait, now, live.length)
+  supervisorWait = wait.state
+  if (wait.verdict === 'stuck') {
+    logger.error({ session: MAIN_CHANNELS_SESSION, supervisors: live, absentSinceMs: now - wait.state!.since }, 'Main channels session still absent next to a running channels.sh supervisor -- the supervisor looks stuck; not starting a second one')
+    // Owner-action, not self-heal: this branch deliberately starts nothing
+    // (a second supervisor would double-own the session) -- a manual check is
+    // the only recovery, so NOTIFY_ROUTINE_ALERTS must not silence it.
+    sendOwnerActionAlert('main-session-supervisor-stuck', `⚠️ A ${MAIN_CHANNELS_SESSION} session ${Math.round((now - wait.state!.since) / 60_000)} perce hiányzik, pedig fut channels.sh supervisor (pid ${live.map((s) => s.pid).join(', ')}): valószínűleg beragadt. Másodikat nem indítok mellé; kézi ellenőrzés kell.`)
+    return 'grace'
+  }
+  if (wait.verdict === 'wait') {
+    logger.warn({ session: MAIN_CHANNELS_SESSION, supervisors: live }, 'Main channels session absent, but a channels.sh supervisor is already running -- not starting a second one')
+    return 'grace'
+  }
   try {
     // Detached + unref'd: channels.sh is a long-lived supervisor (it tails the
     // session in a wait loop), so it must outlive this check() tick without
@@ -1612,7 +1648,7 @@ export function createMainChannelsSession(): MainSessionCreateResult {
     // boot instead of stacking a respawn on a session that is still coming up.
     writeRespawnStamp()
     logger.warn({ session: MAIN_CHANNELS_SESSION }, 'Main channels session absent -- recreating via channels.sh')
-    sendRoutineAlert('main-session-recreate', `♻️ A ${MAIN_CHANNELS_SESSION} session eltunt -- ujrainditom (channels.sh). Enelkul minden utemezett feladat csendben kimaradna.`)
+    sendRoutineAlert('main-session-recreate', `♻️ A ${MAIN_CHANNELS_SESSION} session eltűnt -- újraindítom (channels.sh). Enélkül minden ütemezett feladat csendben kimaradna.`)
     return 'started'
   } catch (err) {
     logger.error({ err }, 'Failed to recreate main channels session via channels.sh')
@@ -1721,7 +1757,7 @@ function schedulePostResumePluginGuard(provider: ChannelProviderType): void {
         return
       }
       logger.warn({ provider }, 'Post-resume guard: --continue resume came up WITHOUT the channels plugin (CC 2.1.193) -- escalating to fresh respawn (context dropped, memory persists)')
-      sendRoutineAlert('post-resume-fresh-respawn', `⚠️ A --continue resume suketen jott fel (nincs channel plugin). Fresh respawn most a ${MAIN_CHANNELS_SESSION} session-on (a beszelgetes elveszik, memoria marad).`)
+      sendRoutineAlert('post-resume-fresh-respawn', `⚠️ A --continue resume süketen jött fel (nincs channel plugin). Fresh respawn most a ${MAIN_CHANNELS_SESSION} session-on (a beszélgetés elveszik, memória marad).`)
       respawnMarveenSessionFresh()
     } catch (err) {
       logger.warn({ err }, 'Post-resume guard probe failed (leaving recovery to the down-cascade)')
@@ -1778,6 +1814,31 @@ function mainPaneClaudePid(): number | null {
   }
 }
 
+// CHANNELSDUP1023 follow-up (b): tmux's `#{pane_dead}` for the main pane, or null when unreadable.
+function mainPaneDead(): boolean | null {
+  try {
+    const out = execFileSync(tmuxBin(), ['list-panes', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), '-F', '#{pane_dead}'],
+      { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\n')[0]
+    return out === '1' ? true : out === '0' ? false : null
+  } catch {
+    return null
+  }
+}
+
+// A successful hard restart is measured once more, a few minutes later: a fresh supervisor that
+// could not bring claude up would otherwise go unnoticed (the reload already counted as done).
+function verifyHardRestartLater(): void {
+  scheduleHardRestartVerify(
+    () => paneRunsClaude(mainPaneDead(), getClaudePidForSession(MAIN_CHANNELS_SESSION)),
+    () => {
+      logger.error({ session: MAIN_CHANNELS_SESSION }, 'Hard restart reported success, but claude is not running in the main pane some minutes later')
+      // Owner-action, not self-heal: the restart already ran and this is the
+      // verification that it did NOT take -- nothing further is attempted here.
+      sendOwnerActionAlert('main-hard-restart-no-claude', `⚠️ A ${MAIN_CHANNELS_SESSION} újraindítása után néhány perccel sem fut claude a fő pane-ben. A csatorna valószínűleg nem jött vissza; kézi ellenőrzés kell.`)
+    },
+  )
+}
+
 export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   // FABLEFALL1: the restarted session boots from the main/worker shared config
   // roots, which the per-agent spawn-time stamp never covers -- stamp them now
@@ -1791,6 +1852,7 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   // accepts a non-existent plist with exit 0, leaving the session untouched.
   if (process.platform !== 'linux' && existsSync(MAIN_CHANNELS_PLIST)) {
     const pidBefore = mainPaneClaudePid()
+    const reloadAt = Date.now()
     try {
       execFileSync('/bin/launchctl', ['unload', MAIN_CHANNELS_PLIST], { timeout: 5000 })
       execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
@@ -1813,7 +1875,23 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
       marveenLastHardRestart = Date.now()
       writeRespawnStamp() // coordinate with the systemd-timer watchdog
       noteOwnHardRestartStamp(marveenLastHardRestart)
+      verifyHardRestartLater()
       return { ok: true }
+    }
+    // CHANNELSDUP1023: an unreadable pane after the reload is, by itself, no proof either way.
+    // A channels.sh that launchd started for THIS reload is: it is rebuilding the session
+    // (kill-session, then a cold start that outlasts the poll), so the reload took effect and
+    // falling through would launch a second supervisor on top of it.
+    if (pidBefore !== null && pidAfter === null) {
+      const fresh = freshSupervisor(runningChannelsSupervisors(CHANNELS_SCRIPT), reloadWindowSec(reloadAt, Date.now()))
+      if (launchdReloadVerdict(pidBefore, pidAfter, fresh?.pid ?? null) === 'rebuilding') {
+        logger.warn({ pidBefore, supervisor: fresh }, `Hard restart: launchctl reload of com.${SERVICE_ID}.channels -- a fresh channels.sh is rebuilding the session (the pane is not readable yet)`)
+        marveenLastHardRestart = Date.now()
+        writeRespawnStamp() // coordinate with the systemd-timer watchdog
+        noteOwnHardRestartStamp(marveenLastHardRestart)
+        verifyHardRestartLater()
+        return { ok: true }
+      }
     }
     logger.warn(
       { pidBefore, pidAfter, plist: MAIN_CHANNELS_PLIST },
@@ -1837,6 +1915,7 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   if (respawnMarveenSessionFresh()) {
     marveenLastHardRestart = Date.now()
     noteOwnHardRestartStamp(marveenLastHardRestart) // respawnMarveenSessionFresh wrote the stamp
+    verifyHardRestartLater()
     return { ok: true }
   }
   return { ok: false, error: 'hard restart failed: tmux respawn-pane failed' }
@@ -1885,7 +1964,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   }
   if (step.sendResolved) {
     logger.info({ session: MAIN_CHANNELS_SESSION }, 'Stuck main channel input cleared -- closing the cap alert')
-    sendAlert(`✅ A ${MAIN_CHANNELS_SESSION} bemenete felszabadult: a panel tetlen es a beviteli mezo ures. A beragadt-bemenet riasztas lezarva.`)
+    sendAlert(`✅ A ${MAIN_CHANNELS_SESSION} bemenete felszabadult: a panel tétlen és a beviteli mező üres. A beragadt-bemenet riasztás lezárva.`)
   }
   if (!parked) return
   // Busy-guard: never hard-restart while the main pane is actively generating --
@@ -1929,7 +2008,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   if (action === 'skip') return
   if (action === 'alert') {
     logger.error({ session: MAIN_CHANNELS_SESSION }, 'Stuck main channel input survived max restart escalations -- manual intervention needed')
-    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt es ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabaditotta ki. Kezi beavatkozas kell: inditsd ujra a ${SERVICE_ID}-channels szolgaltatast.`)
+    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt, és ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabadította ki. Kézi beavatkozás kell: indítsd újra a ${SERVICE_ID}-channels szolgáltatást.`)
     stuckLadder.noteCapAlert()
     return
   }
@@ -2341,7 +2420,7 @@ function checkMainKeepaliveStaleness(): void {
   const staleDueToSleep = ageMs != null && systemSleptBetween(now - ageMs, now)
   logger.warn({ ageMs, paneState, staleDueToSleep }, 'Channel keep-alive stale -- main session likely wedged/deaf, respawning via respawn-pane')
   if (!staleDueToSleep) {
-    sendRoutineAlert('keepalive-respawn', `⚠️ A fő channel keep-alive ${ageMin} perce nem frissült -- respawn-pane a ${MAIN_CHANNELS_SESSION} session-on (a beszelgetes elveszik, memoria marad).`)
+    sendRoutineAlert('keepalive-respawn', `⚠️ A fő channel keep-alive ${ageMin} perce nem frissült -- respawn-pane a ${MAIN_CHANNELS_SESSION} session-on (a beszélgetés elveszik, memória marad).`)
   }
   if (respawnMarveenSessionFresh()) {
     marveenLastKeepaliveRespawn = now
@@ -2350,6 +2429,33 @@ function checkMainKeepaliveStaleness(): void {
     // existing hard-restart grace) so the two recovery paths don't collide.
     marveenLastHardRestart = now
   }
+}
+
+let cuAccessGuard: ComputerUseAccessGuard | null = null
+function computerUseAccess(): ComputerUseAccessGuard {
+  cuAccessGuard ??= new ComputerUseAccessGuard(liveComputerUseAccessDeps((s) => capturePane(s), tmuxBin, (text) => sendAlert(text)))
+  return cuAccessGuard
+}
+
+/**
+ * The fast path for the computer-use dialog: the main session every 5 s (so the owner is asked
+ * without waiting for the minute pass), plus any session with an open request (so the keystroke
+ * follows the owner's button within seconds).
+ */
+export function startComputerUseAccessWatcher(intervalMs = 5000): NodeJS.Timeout {
+  let running = false
+  const t = setInterval(() => {
+    if (running) return
+    running = true
+    void (async () => {
+      const g = computerUseAccess()
+      const seen = new Set<string>()
+      for (const [session, label] of g.pendingSessions()) { seen.add(session); await g.tick(session, label) }
+      if (!seen.has(MAIN_CHANNELS_SESSION)) await g.tick(MAIN_CHANNELS_SESSION, BOT_NAME)
+    })().catch((err) => logger.warn({ err }, 'computer-use access watcher tick failed')).finally(() => { running = false })
+  }, intervalMs)
+  t.unref?.()
+  return t
 }
 
 export function sendAlert(text: string, meta?: AlertMeta): void {
@@ -2476,7 +2582,7 @@ async function handleMarveenDown(): Promise<void> {
     // Issue #189: a plain `tmux attach -t ...` may itself fail with "Permission
     // denied" when the operator is running it from another tmux session. Prefix
     // with `unset TMUX` so the hint works in both nested and non-nested cases.
-    sendAlert(`🚨 Hard restart SEM segitett. Kezzel kell megnezni: \`unset TMUX && tmux attach -t ${MAIN_CHANNELS_SESSION}\` es ${serviceCmd}.`)
+    sendAlert(`🚨 Hard restart SEM segített. Kézzel kell megnézni: \`unset TMUX && tmux attach -t ${MAIN_CHANNELS_SESSION}\` és ${serviceCmd}.`)
     // Hand the channel to the independent backstops instead of holding them off
     // with the stamp of a hard restart that did not work -- our own stamp only,
     // and only after its settle time (retried on later gave_up ticks).
@@ -2486,7 +2592,7 @@ async function handleMarveenDown(): Promise<void> {
   if (marveenDownState.stage === 'gave_up') tryReleaseOwnRespawnStamp(now)
   if (now - marveenDownState.lastAlertAt > PLUGIN_ALERT_DEDUP_MS) {
     marveenDownState.lastAlertAt = now
-    sendAlert(`🚨 ${BOT_NAME} ${providerLabel} plugin meg mindig halott. Nezd meg kezzel.`)
+    sendAlert(`🚨 ${BOT_NAME} ${providerLabel} plugin még mindig halott. Nézd meg kézzel.`)
   }
 }
 
@@ -2537,8 +2643,8 @@ function handleMarveenUp(): void {
     // disruptive too; decideMarveenRecoveryReport owns the rule.
     if (report.notify) {
       sendAlert(
-        `✅ ${BOT_NAME} ${providerLabel} kapcsolat helyreallt (${downedFor}s kieses, ${stage} szint). ` +
-        `Ha a kieses alatt irtal es nem jott valasz, mindjart potolom.`,
+        `✅ ${BOT_NAME} ${providerLabel} kapcsolat helyreállt (${downedFor}s kiesés, ${stage} szint). ` +
+        `Ha a kiesés alatt írtál és nem jött válasz, mindjárt pótolom.`,
       )
     }
     marveenDownState = null
@@ -2686,6 +2792,14 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     for (const t of menuTargets) {
       const pane = capturePane(t.session)
       menuTargetsWalked++
+      // The computer-use request_access dialog is the OWNER's to answer, from Telegram
+      // (computer-use-access.ts): while it stands, the generic recovery below must not touch it --
+      // its Escape is a deny the owner never gave (2026-10-22 22:02:58).
+      if (!t.gateOnly && await computerUseAccess().tick(t.session, t.isMarveen ? BOT_NAME : (t.agentName ?? t.session), pane)) {
+        paneMenuState.delete(t.session)
+        permPromptState.delete(t.session)
+        continue
+      }
       // First-run gates (fresh-install folder-trust / bypass acceptance /
       // login picker) are detected SEPARATELY from generic blocking menus,
       // because the recovery differs: Escape on the trust/bypass dialogs
@@ -2707,6 +2821,8 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       if (decision.next.firstSeenAt === null) {
         paneMenuState.delete(t.session)
         permPromptState.delete(t.session)
+        // PERMFLOOD1012: the spell is over, so a later prompt is a new question.
+        clearPermissionPromptAlert(t.session)
       } else {
         paneMenuState.set(t.session, decision.next)
       }
@@ -2759,19 +2875,20 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             // requests ~45s after they appeared, while the operator believed
             // they had approved them. Same rule as the unrecognised trust dialog
             // above: no keystroke is neutral, so send none and say so, loudly.
-            // Card 68cb6715: the main agent hears first (an inter-agent message,
-            // Escape only), the owner after PERM_PROMPT_OWNER_AFTER_MS if the same
-            // prompt still stands; the main agent's own prompt goes to the owner.
-            const escalation = escalatePermissionPrompt(permPromptState, {
-              session: t.session,
-              label,
+            // Card 68cb6715 + PERMFLOOD1012: this branch is reached once per dedup
+            // window for as long as nobody answers. The main agent hears first
+            // (an inter-agent message, Escape only); the owner hears at fixed
+            // marks of the prompt's age (the first one, 15 min by default, is the
+            // main agent's head start), and the message says what is asked. The
+            // main agent's own prompt goes to the owner on the same marks. The
+            // decision and both sends live in runPermissionPromptPass
+            // (permission-prompt-alert.ts), where they are under test.
+            const escalation = runPermissionPromptPass(label, t.session, paneNow, {
+              captureWithHistory: capturePaneWithHistory,
+              escalation: permPromptState,
               isMainAgent: t.isMarveen,
-              ask: permissionPromptSummary(paneNow),
-              now: Date.now(),
-              ownerText: `🔐 A(z) ${label} session egy engedélykérésen vár, és NEM nyomtam meg semmit: ott az Escape NEM-et jelentene. Döntsd el te: tmux attach -t ${t.session}`,
-            }, {
               messageMainAgent: (text) => { createAgentMessage('system', MAIN_AGENT_ID, text) },
-              alertOwner: (text, meta) => sendAlert(text, meta),
+              send: (text, meta) => sendAlert(text, meta),
             })
             logger.warn({ session: t.session, agent: label, escalation }, 'Blocking "menu" is a tool-permission prompt -- a human decides, NO keystrokes sent')
           } else {
@@ -2840,8 +2957,10 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       }
     }
 
+    // One ps snapshot for the whole liveness loop (null -> each probe takes its own).
+    const sweepSnapshot = await takeProcSnapshotAsync()
     for (const t of targets) {
-      const claudePid = getClaudePidForSession(t.session)
+      const claudePid = await getClaudePidForSessionAsync(t.session)
       if (!claudePid) {
         if (!t.isMarveen && t.agentName) {
           const lastRestart = agentLastRestart.get(t.agentName)
@@ -2873,7 +2992,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
         continue
       }
-      const liveness = probeChannelPluginLiveness(claudePid, t.provider, t.agentName)
+      // An 'alive' read from the shared snapshot is confirmed with a fresh ps when it would
+      // close an open down spell (and reset its restart back-off): the poller may have died
+      // after the snapshot was taken.
+      const openDownSpell = t.isMarveen
+        ? marveenSuspectFirstSeen !== null || marveenDownState !== null || marveenRecreatedOutage !== null
+        : agentDownSince.has(t.session) || (t.agentName !== undefined && agentRestartFailures.has(t.agentName))
+      const liveness = await probeChannelPluginLivenessAsync(claudePid, t.provider, t.agentName, { confirmAlive: openDownSpell }, sweepSnapshot ?? undefined)
       if (liveness === 'unknown') {
         // The PROBE failed (ps timed out, state dir unreadable) -- that is not
         // evidence about the plugin. Leave every counter untouched (down-since,
@@ -2947,6 +3072,10 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             logger.warn({ err, agent: t.agentName }, 'Plugin-down forensics failed (continuing)')
           }
         }
+        // Awaited BEFORE the restart state below is read: the context guard calls
+        // markAgentRestartPending() before its own stop, and a read taken before this
+        // await could miss that mark and restart the agent a second time.
+        const processAgeMs = await getProcessAgeMsAsync(claudePid)
         const lastRestart = agentLastRestart.get(t.agentName!)
         const failures = agentRestartFailures.get(t.agentName!) ?? 0
         // If the unlock probe confirmed the plugin ABSENT from /mcp (never
@@ -2966,7 +3095,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         const agentPaneState = agentPane != null ? detectPaneState(agentPane) : null
         const agentBusy = shouldDeferKeepaliveRespawn(agentPaneState)
         const action = decideDownAgentAction({
-          processAgeMs: getProcessAgeMs(claudePid),
+          processAgeMs,
           msSinceLastRestart: lastRestart != null ? Date.now() - lastRestart : null,
           startupGraceMs: AGENT_STARTUP_GRACE_MS,
           restartGraceMs: AGENT_RESTART_GRACE_MS,
@@ -3104,8 +3233,8 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           // and no poller (verified: continue -> "Plugin not found" in /mcp; fresh
           // -> plugin loads + poller attaches). Context is dropped, memory persists.
           // startAgentProcess schedules the recovery brief itself for any
-          // fresh start (see agent-process): this path is no longer the only
-          // door onto a fresh session, so the brief lives at the door rather
+          // successful start (see agent-process): this path is not the only
+          // door onto a new session, so the brief lives at the door rather
           // than at each caller.
           await startAgentProcess(t.agentName!, { fresh: true })
           agentLastRestart.set(t.agentName!, Date.now())
@@ -3165,8 +3294,10 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       checkRunning = false
     }
   }
-  setTimeout(() => { void check() }, 30000)
-  return setInterval(() => { void check() }, 60000)
+  setTimeout(whileNotFrozen('channel-monitor', () => { void check() }), 30000)
+  // KILLSWITCH1022: this tick also revives desired-but-missing agents
+  // (reconcileDesiredAgents), which a stopped fleet must not do.
+  return setInterval(whileNotFrozen('channel-monitor', () => { void check() }), 60000)
 }
 
 // Start desired-but-missing agents one at a time. The stagger is mandatory:

@@ -50,6 +50,8 @@ import { computeNextRun } from './cron.js'
 import { getTokenSummary, getModelDistribution } from './token-usage.js'
 import { registerModelWriteCommands, readModelChoices as readChoiceList, readHold, readLastSent, readEffortSent, readConfiguredEffort, withRetry, MODEL_CHOICES_FILE, MODEL_HOLD_FILE, MODEL_LAST_SENT_FILE, EFFORT_SENT_FILE, EFFORT_LEVELS, type LastSent, type HoldState, modelSupportsEffort } from './main-model.js'
 import { contextClear } from './session-control.js'
+import { pullFleetBrake } from './routes/fleet-freeze.js'
+import { readFleetFreeze, REASON_MAX as FLEET_REASON_MAX } from './fleet-freeze.js'
 
 function clip(s: string, n: number): string {
   const one = s.replace(/\s+/g, ' ').trim()
@@ -521,7 +523,7 @@ export function boardText(cards: KanbanCard[], owner: string = OWNER_NAME): stri
       if (shown >= LIMIT) break
       lines.push(cardLine(c, owner, byId))
       const kids = openChildren(c, open).length
-      if (kids > 0) lines.push(`    └ ${kids} alfeladat`)
+      if (kids > 0) lines.push(`    └ ${kids} részfeladat`)
       first ??= c
       shown++
     }
@@ -635,7 +637,7 @@ export function boardHelpText(handle: string = botHandle()): string {
     '/board: a kanban tábla',
     '',
     '/board          ami rád vár (várakozik + hozzád rendelt)',
-    '/board 41       egy kártya, alfeladataival',
+    '/board 41       egy kártya, részfeladataival',
     '/board all      minden nyitott kártya, fában',
     '',
     'Egy oszlop:',
@@ -708,7 +710,7 @@ export function cardDetailText(card: KanbanCard, cards: KanbanCard[] = listKanba
   ]
   if (parent) lines.push(`↑ Szülő: ${seqOf(parent)}) ${clip(parent.title, TITLE_MAX)}`)
   if (kids.length > 0) {
-    lines.push('', `Alfeladatok (${openKids.length} nyitott${kids.length > openKids.length ? `, ${kids.length - openKids.length} kész` : ''}):`)
+    lines.push('', `Részfeladatok (${openKids.length} nyitott${kids.length > openKids.length ? `, ${kids.length - openKids.length} kész` : ''}):`)
     for (const k of openKids) lines.push(`${cardLine(k, owner, byId, { parentMark: false })} · ${k.status}`)
   }
   lines.push('', clip(card.description ?? '(nincs leírás)', 800), '', `Kommentek (${comments.length}):`)
@@ -821,6 +823,30 @@ export function registerBuiltinCommands(): void {
     run: async ctx => { const r = await contextClear(ctx.now); await ctx.reply(withRetry('/context clear', { ok: r.cleared, text: r.text, busy: r.busy }, ctx)) },
   })
 
+  // KILLSWITCH1022: the red button from the owner's phone. /stop pulls the brake
+  // (freeze: tool calls denied, loops paused, sessions kept); it is a write, so the
+  // owner-chat and inbound-evidence gates of dispatchForChat apply. Lifting it is
+  // NOT a command: this path runs on the shared token, and the unfreeze takes the
+  // owner's login (POST /api/fleet/unfreeze, the #2163 predicate). /resume says so.
+  registerCommand({
+    name: 'stop', kind: 'write', usage: '/stop <indok>', description: 'piros gomb: a flotta fagyasztása (feloldás a dashboardon, bejelentkezve)',
+    run: async (ctx, args) => {
+      const reason = args.join(' ').trim()
+      if (!reason) return reply(ctx, 'Írd mögé az okát: /stop <indok>. A gazda-üzenet és a napló is ezt mutatja.')
+      if (reason.length > FLEET_REASON_MAX) return reply(ctx, `Az indok legfeljebb ${FLEET_REASON_MAX} karakter lehet.`)
+      const state = await pullFleetBrake('freeze', reason, 'owner-command')
+      return reply(ctx, `🛑 A flotta ${state.mode === 'stop' ? 'LEÁLLÍTVA' : 'FAGYASZTVA'}: ${state.reason}\nFeloldás: a dashboardon, bejelentkezve (Feloldás gomb a piros sávban).`)
+    },
+  })
+  registerCommand({
+    name: 'resume', kind: 'read', description: 'a fagyasztás feloldása: hol és hogyan',
+    run: ctx => {
+      const st = readFleetFreeze()
+      if (!st) return reply(ctx, 'A flotta nincs fagyasztva.')
+      return reply(ctx, `A flotta ${st.mode === 'stop' ? 'leállítva' : 'fagyasztva'} (${st.by}): ${st.reason}\nFeloldani csak a dashboardon lehet, a dashboard-jelszóval bejelentkezve: a piros sáv Feloldás gombja. Innen nem, mert ez az út a közös tokennel fut.`)
+    },
+  })
+
   // ÍR, megerősítéssel: planned until after the stabilization (CMD920 2.).
   registerCommand({ name: 'runs', kind: 'write', confirm: true, planned: true, usage: '/runs stop <nonce>', description: 'a futó kör megszakítása', matches: args => args[0]?.toLowerCase() === 'stop' })
   registerCommand({
@@ -839,7 +865,7 @@ export function registerBuiltinCommands(): void {
       const a = Number.isInteger(n) && n >= 1 ? list[n - 1] : undefined
       if (!a) { await ctx.reply(`Nincs ${args[0]}. várakozó jóváhagyás. Lásd /approvals.`); return }
       const decision = args[1].toLowerCase() === 'approve' ? 'approved' : 'rejected'
-      const r = applyOwnerDecision(a.id, args[2], decision, Math.floor(ctx.now / 1000))
+      const r = applyOwnerDecision(a.id, args[2], decision, Math.floor(ctx.now / 1000), 'command')
       if (!r.ok) { await ctx.reply(`${ownerDecisionRefusalText(r.reason)} (${n}. tétel, id: ${a.id})`); return }
       await ctx.reply(`${decision === 'approved' ? 'Jóváhagyva' : 'Elutasítva'}: ${a.category} · ${clip(a.action_description, 60)} (id: ${a.id}).`)
     },

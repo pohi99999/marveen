@@ -1,8 +1,17 @@
 // Functional test for ensureSkillsPathTrapSection() -- mirrors
-// autonomy-section.test.ts. SKILLUTCSAPDA822: the `.claude-config/skills`
-// path IS the shared global dir (symlink), reads as "my own config", and five
-// third-party skills landed fleet-wide through it on 2026-08-22. This proves
-// the warning block actually reaches the agent file on respawn, idempotently.
+// autonomy-section.test.ts. SKILLUTCSAPDA822: the isolated config root's
+// `skills` entry IS the shared global dir (symlink), reads as "my own config",
+// and five third-party skills landed fleet-wide through it on 2026-08-22. This
+// proves the warning block actually reaches the agent file on respawn,
+// idempotently.
+//
+// SKILLGYOKERNEV925: these assertions deliberately pin the MEASUREMENT
+// (`echo "$CLAUDE_CONFIG_DIR"`) and BOTH root names, not one path string. A body
+// that names a single root teaches a false generalisation in both directions,
+// and the old assertions (`toContain('.claude-config/skills')`) would have
+// passed on exactly the text that caused one: the root is named
+// `.claude-config` for sub-agents and `.channels-config` for the main agent,
+// measured 2026-09-25, and in both the `skills` entry is the same symlink.
 import { describe, it, expect, vi } from 'vitest'
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
@@ -44,6 +53,9 @@ const { ensureSkillsPathTrapSection } = await import('../web/agent-scaffold.js')
 
 const MARKER_BEGIN = '<!-- BEGIN GENERATED: skills-path-trap (auto-generated, do not edit by hand) -->'
 const MARKER_END = '<!-- END GENERATED: skills-path-trap -->'
+// The measuring command: it falls back to ~/.claude when CLAUDE_CONFIG_DIR is empty (a DEFAULT install,
+// MAIN_AGENT_ISOLATED_CONFIG=0), where the old form ran `ls -ld /skills` (upstream review of #1563).
+const MEASURE = 'echo "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; ls -ld "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"'
 
 function setup(agentName: string, content: string) {
   const dir = join(tmpRoot, 'agents', agentName)
@@ -98,6 +110,28 @@ describe('ensureSkillsPathTrapSection', () => {
     const out = readFileSync(join(tmpRoot, 'CLAUDE.md'), 'utf-8')
     expect(out).toContain(MARKER_BEGIN)
   })
+
+  // SKILLGYOKERLATSZIK923: one text for everybody was wrong for the main agent in
+  // the direction that matters -- it promised a private dir that does not exist
+  // for a reader whose cwd IS the project root.
+  // FORK (SKILLSGIT914): one skills tree for the whole fleet, so the main agent and a sub-agent get the SAME
+  // body -- upstream's per-agent body (three locations, "EZ NEKED NEM PRIVÁT") describes a layout this install
+  // retired on 2026-09-14 (no global ~/.claude/skills, no per-agent copy).
+  it('the main agent and a sub-agent get the same one-source body', () => {
+    writeFileSync(join(tmpRoot, 'CLAUDE.md'), '# Main\n', 'utf-8')
+    ensureSkillsPathTrapSection('agent-a')
+    const main = readFileSync(join(tmpRoot, 'CLAUDE.md'), 'utf-8').split(MARKER_BEGIN)[1].split(MARKER_END)[0]
+    setup('agent-b', '# Agent B\n')
+    ensureSkillsPathTrapSection('agent-b')
+    const sub = read('agent-b').split(MARKER_BEGIN)[1].split(MARKER_END)[0]
+    for (const body of [main, sub]) {
+      expect(body).toContain('EGYETLEN forrása')
+      expect(body).toContain('NINCS globális `~/.claude/skills`')
+      expect(body).not.toContain('EZ NEKED NEM PRIVÁT')
+    }
+    expect(main).toBe(sub)
+  })
+
 })
 
 describe('wiring contracts', () => {
@@ -121,10 +155,13 @@ describe('wiring contracts', () => {
 // agent is given must be the path the harness names, resolved -- never a slug the
 // agent derives from its working directory.
 describe('skills-path-trap memory paragraph', () => {
-  it('points at the harness-given path and the git-root keying, not a derived cwd slug', () => {
-    setup('agent-mem', '# Agent Mem\n')
-    ensureSkillsPathTrapSection('agent-mem')
-    const block = read('agent-mem').split(MARKER_BEGIN)[1].split(MARKER_END)[0]
+  // The paragraph is the SAME for the main agent and a sub-agent (it lives outside the per-agent
+  // part), and it comes AFTER the numbered location list: placed before the 2nd item it would cut
+  // the list in two. Both halves are pinned, because dropping it for one kind of agent, or moving
+  // it into the middle of the list, kept the whole file green (measured by mutation on cb174d8).
+  const MEM_START = 'Ugyanez a csapda a MEMÓRIÁRA is áll'
+
+  function expectMemoryParagraph(block: string) {
     expect(block).toContain('MEGADOTT útvonal')
     expect(block).toContain('`readlink -f`')
     expect(block).toContain('REPO GYÖKERE')
@@ -133,5 +170,34 @@ describe('skills-path-trap memory paragraph', () => {
     // git checkout, and writing memory there is the silent loss this block prevents.
     expect(block).not.toMatch(/MUNKAKÖNYVTÁR\s+slugja\s+szerint\s+kulcsolt/)
     expect(block).not.toContain('a tiéd SOHA')
+  }
+
+  it('points at the harness-given path and the git-root keying, not a derived cwd slug', () => {
+    setup('agent-mem', '# Agent Mem\n')
+    ensureSkillsPathTrapSection('agent-mem')
+    expectMemoryParagraph(read('agent-mem').split(MARKER_BEGIN)[1].split(MARKER_END)[0])
+  })
+
+  // FORK (SKILLSGIT914): the paragraph follows the one-source text, identical for both kinds of agent.
+  const FORK_END = '(SKILLSGIT914, 2026-09-14.)'
+  it('the main agent gets the same paragraph, after the one-source text', () => {
+    writeFileSync(join(tmpRoot, 'CLAUDE.md'), '# Main\n', 'utf-8')
+    ensureSkillsPathTrapSection('agent-a')
+    const main = readFileSync(join(tmpRoot, 'CLAUDE.md'), 'utf-8').split(MARKER_BEGIN)[1].split(MARKER_END)[0]
+    expectMemoryParagraph(main)
+    expect(main.indexOf(FORK_END)).toBeGreaterThan(-1)
+    expect(main.indexOf(MEM_START)).toBeGreaterThan(main.indexOf(FORK_END))
+  })
+
+  it('a sub-agent gets it after the one-source text too, and the paragraph text is identical for both kinds', () => {
+    setup('agent-mem2', '# Agent Mem 2\n')
+    ensureSkillsPathTrapSection('agent-mem2')
+    const sub = read('agent-mem2').split(MARKER_BEGIN)[1].split(MARKER_END)[0]
+    expect(sub.indexOf(FORK_END)).toBeGreaterThan(-1)
+    expect(sub.indexOf(MEM_START)).toBeGreaterThan(sub.indexOf(FORK_END))
+    writeFileSync(join(tmpRoot, 'CLAUDE.md'), '# Main\n', 'utf-8')
+    ensureSkillsPathTrapSection('agent-a')
+    const main = readFileSync(join(tmpRoot, 'CLAUDE.md'), 'utf-8').split(MARKER_BEGIN)[1].split(MARKER_END)[0]
+    expect(main.slice(main.indexOf(MEM_START))).toBe(sub.slice(sub.indexOf(MEM_START)))
   })
 })

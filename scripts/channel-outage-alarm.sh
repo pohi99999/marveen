@@ -104,8 +104,18 @@ send_alarm() {
   local text="$1" tok chat http
   tok="$(read_token)" || { log "ERROR cannot send: no bot token in $CHAN_DIR/.env, parked copies, or $TOKEN_STASH"; return 1; }
   chat="$(read_chat_id)" || { log "ERROR cannot send: no allowFrom chat id in $CHAN_DIR/access.json"; return 1; }
-  http="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
-    "https://api.telegram.org/bot${tok}/sendMessage" \
+  # The URL carries the token, so it must never sit in curl's ARGV (ps -ww,
+  # /proc/<pid>/cmdline). Same trick as lib/curl-tok.sh: a curl config line on
+  # stdin (-K -) built by the printf builtin. The URL is a QUOTED config value,
+  # so a token with a quote/backslash/newline in it is refused, not sent.
+  case "$tok" in
+    *\"*|*\\*|*$'\n'*)
+      log "ERROR cannot send: bot token has an unsupported character"
+      return 1
+      ;;
+  esac
+  http="$(printf 'url = "%s"\n' "https://api.telegram.org/bot${tok}/sendMessage" | \
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -K - \
     --data-urlencode "chat_id=${chat}" \
     --data-urlencode "text=${text}" 2>/dev/null)"
   if [ "$http" = "200" ]; then
@@ -188,11 +198,11 @@ if [ -n "$boot_epoch" ] && [ "$boot_epoch" -gt 0 ] 2>/dev/null; then
   if [ "$seen_boot" != "$boot_epoch" ] && [ "$uptime_s" -ge "$BOOT_REPORT_AFTER" ]; then
     ka_now=0; [ -f "$KEEPALIVE_FILE" ] && ka_now="$(mtime_of "$KEEPALIVE_FILE")"
     if [ "$ka_now" -gt 0 ] && [ $(( now - ka_now )) -lt "$STALE_AFTER" ]; then
-      verdict="a Telegram-csatorna el"
+      verdict="a Telegram-csatorna él"
     else
-      verdict="a Telegram-csatorna NEM el -- nezd meg a gepet"
+      verdict="a Telegram-csatorna NEM él, nézd meg a gépet"
     fi
-    if send_alarm "A gep ujraindult ($(date -r "$boot_epoch" '+%H:%M' 2>/dev/null || echo '?')), ujra futok. Allapot: ${verdict}."; then
+    if send_alarm "A gép újraindult ($(date -r "$boot_epoch" '+%H:%M' 2>/dev/null || echo '?')), újra futok. Állapot: ${verdict}."; then
       printf '%s\n' "$boot_epoch" > "$BOOT_MARKER"
       log "boot report sent (boot_epoch=$boot_epoch, $verdict)"
     else
@@ -215,7 +225,7 @@ if [ "$age" -lt "$STALE_AFTER" ]; then
   if [ "$outage_started" != "0" ]; then
     down_for=$(( now - outage_started ))
     if [ "$last_alarm" != "0" ]; then
-      send_alarm "A Telegram-csatorna ujra el. Kimaradas: $(( down_for / 60 )) perc." || true
+      send_alarm "A Telegram-csatorna újra él. Kimaradás: $(( down_for / 60 )) perc." || true
     fi
     log "recovered after ${down_for}s (alarmed=$([ "$last_alarm" != 0 ] && echo yes || echo no))"
     outage_started=0; restart_done=0; last_alarm=0; save_state
@@ -233,7 +243,7 @@ fi
 
 if [ "$age" -ge "$ALARM_AFTER" ]; then
   if [ "$last_alarm" = "0" ] || [ $(( now - last_alarm )) -ge "$REALARM_EVERY" ]; then
-    if send_alarm "A Telegram-csatorna $(( age / 60 )) perce nem el. Automatikus ujrainditas: $([ "$restart_done" = "0" ] && echo "nem tortent" || echo "megtortent, nem segitett"). A gepen a naplo: store/channel-outage-alarm.log"; then
+    if send_alarm "A Telegram-csatorna $(( age / 60 )) perce nem él. Automatikus újraindítás: $([ "$restart_done" = "0" ] && echo "nem történt" || echo "megtörtént, nem segített"). A gépen a napló: store/channel-outage-alarm.log"; then
       last_alarm="$now"
     fi
   fi

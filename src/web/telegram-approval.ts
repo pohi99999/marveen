@@ -13,6 +13,19 @@ export const OWNER_RESOLVER = 'telegram-owner'
 export const CALLBACK_PREFIX = 'apr'
 export type OwnerDecision = 'approved' | 'rejected'
 
+// A category decided ONLY by the owner's button press as the patched plugin recorded it
+// (approval-callbacks.jsonl): not by the /approvals text command, not by the HTTP decision route
+// (its from_id is whatever the caller sends), not by the dashboard PATCH, and its nonce is never
+// served by the GET routes. computer_use_access: a yes there sends a keystroke that grants an app
+// to the main session (computer-use-access.ts).
+export const COMPUTER_USE_ACCESS_CATEGORY = 'computer_use_access'
+export const BUTTON_ONLY_CATEGORIES: ReadonlySet<string> = new Set([COMPUTER_USE_ACCESS_CATEGORY])
+export function isButtonOnlyCategory(category: string | null | undefined): boolean {
+  return typeof category === 'string' && BUTTON_ONLY_CATEGORIES.has(category)
+}
+/** Which Telegram path a decision came through. */
+export type OwnerDecisionVia = 'button' | 'command' | 'http'
+
 /** 8 url-safe chars: short enough to type, 47 bits against a guess inside the window. */
 export function newApprovalNonce(bytes = 6): string {
   return randomBytes(bytes).toString('base64url').replace(/[^A-Za-z0-9]/g, '').slice(0, 8).padEnd(8, 'x')

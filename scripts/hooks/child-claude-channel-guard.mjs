@@ -255,7 +255,9 @@ const REASON = [
 function main() {
   let payload
   try { payload = JSON.parse(readFileSync(0, 'utf8')) } catch { process.exit(0) }
-  if (payload?.tool_name !== 'Bash') process.exit(0)
+  // MONITORGATE1030: Monitor runs its `command` in the same shell as Bash.
+  const shell = payload?.tool_name === 'Bash' || (payload?.tool_name === 'Monitor' && typeof payload?.tool_input?.command === 'string')
+  if (!shell) process.exit(0)
   const verdict = decide(payload?.tool_input?.command)
   if (verdict.allow) process.exit(0)
   process.stdout.write(JSON.stringify({
