@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -23,6 +23,7 @@ let db: ReturnType<typeof ingest.initIngestDb>
 const messages = () => (db.prepare('SELECT COUNT(*) AS n FROM agent_messages').get() as { n: number }).n
 const file = () => join(state.dir, 'approval-callbacks.jsonl')
 const lines = () => (existsSync(file()) ? readFileSync(file(), 'utf-8').trim().split('\n').map((l) => JSON.parse(l)) : [])
+const eventStatus = (id: number) => (db.prepare('SELECT status FROM incoming_events WHERE update_id = ?').get(id) as { status: string }).status
 
 beforeEach(() => {
   state.dir = mkdtempSync(join(tmpdir(), 'coordinator-press-'))
@@ -39,11 +40,21 @@ describe('processBatch: an apr: callback', () => {
     expect(processBatch([press(20, data)])).toEqual({ offset: 20, stalled: false })
     expect(lines()).toMatchObject([{ data, from_id: 42, callback_query_id: 'cq20', chat_id: 42 }])
     expect(messages()).toBe(0)
+    // Handled: it does not come back as an undelivered event.
+    expect(eventStatus(20)).toBe('delivered')
   })
 
   it('from another Telegram user: recorded with that sender, for the watcher to refuse', () => {
     expect(processBatch([press(21, 'apr:abcdefab-1111-4abc-8abc-abcdefabcd01:n0nceAAA:a', 777)]).stalled).toBe(false)
     expect(lines()).toMatchObject([{ from_id: 777 }])
+    expect(messages()).toBe(0)
+  })
+
+  it('when the press cannot be recorded, the event stays open, and the batch goes on', () => {
+    rmSync(state.dir, { recursive: true, force: true })
+    writeFileSync(state.dir, 'a file where the state dir should be')
+    expect(processBatch([press(23, 'apr:abcdefab-1111-4abc-8abc-abcdefabcd01:n0nceAAA:a')])).toEqual({ offset: 23, stalled: false })
+    expect(eventStatus(23)).toBe('pending')
     expect(messages()).toBe(0)
   })
 

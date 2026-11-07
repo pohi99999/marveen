@@ -175,7 +175,7 @@ None found.
 - `PATCH /api/approvals/:id` cannot write the `telegram-owner` resolver name.
 
 **Still open:**
-- Until a dashboard login exists, the shared token can approve through `PATCH`. The owner gate of v1.47.1 closes this.
+- Until a dashboard user account exists, the shared token can approve through `PATCH`. An account that never signed in, or a disabled one, already ends this. The owner gate of v1.47.1 closes it for good.
 - The approvals table and the recorded presses can be written by the same Unix user every agent runs as. Closing this needs an OS-level boundary (see M1).
 - `scripts/hooks/email-approval-gate.py` does not check who resolved an approved row.
 
