@@ -244,6 +244,13 @@ setup_homebrew_cask() {
   chmod +x "$1/brew/Caskroom/claude-code/2.1.308/claude"
   ln -s "$1/brew/Caskroom/claude-code/2.1.308/claude" "$1/stub/claude"
 }
+setup_homebrew_cask_latest() {
+  # FORK: the same link, into the claude-code@latest cask
+  mkdir -p "$1/brew/Caskroom/claude-code@latest/2.1.319" "$1/stub"
+  printf '#!/bin/sh\necho 2.1.319\n' > "$1/brew/Caskroom/claude-code@latest/2.1.319/claude"
+  chmod +x "$1/brew/Caskroom/claude-code@latest/2.1.319/claude"
+  ln -s "$1/brew/Caskroom/claude-code@latest/2.1.319/claude" "$1/stub/claude"
+}
 setup_nothing() { :; }
 
 echo "channels.sh native-install guard"
@@ -271,6 +278,14 @@ if [ "$NPM_CALLS" = "0" ]; then pass "FORK: Homebrew cask: npm is NOT called"
 else fail "FORK: Homebrew cask: npm is NOT called" "0 npm calls" "$NPM_CALLS"; fi
 case "$ERR" in *"SKIPPED: Homebrew cask"*) pass "FORK: Homebrew cask: the skip is logged" ;;
   *) fail "FORK: Homebrew cask: the skip is logged" "a SKIPPED line" "${ERR:-<empty>}" ;; esac
+case "$ERR" in *"brew upgrade --cask claude-code updates it"*) pass "FORK: Homebrew cask: the log names claude-code" ;;
+  *) fail "FORK: Homebrew cask: the log names claude-code" "brew upgrade --cask claude-code" "${ERR:-<empty>}" ;; esac
+
+run_case setup_homebrew_cask_latest
+if [ "$NPM_CALLS" = "0" ]; then pass "FORK: claude-code@latest cask: npm is NOT called"
+else fail "FORK: claude-code@latest cask: npm is NOT called" "0 npm calls" "$NPM_CALLS"; fi
+case "$ERR" in *"brew upgrade --cask claude-code@latest updates it"*) pass "FORK: claude-code@latest cask: the log names the cask" ;;
+  *) fail "FORK: claude-code@latest cask: the log names the cask" "brew upgrade --cask claude-code@latest" "${ERR:-<empty>}" ;; esac
 
 run_case setup_nothing
 if [ "$NPM_CALLS" = "1" ]; then pass "no claude, no native versions: npm self-heal still runs (positive control)"

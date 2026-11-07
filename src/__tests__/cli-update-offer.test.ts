@@ -1,10 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
-import { readFileSync, writeFileSync, mkdtempSync, chmodSync, existsSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, symlinkSync, chmodSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  decideCliOffer, readAvxSafePin, detectInstallMethod, manualInstallCommand, probeClaudeLaunches, fetchLatestVersion,
+  decideCliOffer, readAvxSafePin, detectInstallMethod, homebrewCaskName, manualInstallCommand, probeClaudeLaunches, fetchLatestVersion,
   resetLatestVersionCache, buildCliUpdateStatus, startCliUpdate, setCliUpdateDepsForTests,
   RUNNING_SESSIONS_NOTE, REGISTRY_LATEST_URL, readCliUpdateResult,
   notWritableMessage, accessState, npmGlobalDirsNotWritable, cliUpdateRunning,
@@ -73,6 +73,39 @@ describe('detectInstallMethod', () => {
     expect(manualInstallCommand('2.1.318', 'homebrew')).toBe('brew upgrade --cask claude-code')
     expect(manualInstallCommand('2.1.318', 'homebrew')).not.toContain('npm')
     expect(startCliUpdate('2.1.318', 'homebrew')).toEqual({ ok: false, error: 'install method homebrew' })
+  })
+  it('FORK: the claude-code@latest cask is homebrew too, and a look-alike cask is not', () => {
+    const bin = '/opt/homebrew/bin/claude'
+    expect(detectInstallMethod(bin, () => '/opt/homebrew/Caskroom/claude-code@latest/2.1.319/claude')).toBe('homebrew')
+    expect(detectInstallMethod(bin, () => '/opt/homebrew/Caskroom/claude-code-router/1.0.0/claude')).toBe('unknown')
+    expect(homebrewCaskName('/opt/homebrew/Caskroom/claude-code@latest/2.1.319/claude')).toBe('claude-code@latest')
+    expect(homebrewCaskName('/opt/homebrew/Caskroom/claude-code/2.1.308/claude')).toBe('claude-code')
+    expect(homebrewCaskName('/home/u/.local/share/claude/versions/2.1.280')).toBeNull()
+    expect(manualInstallCommand('2.1.319', 'homebrew', 'claude-code@latest')).toBe('brew upgrade --cask claude-code@latest')
+  })
+  it.each([
+    ['claude-code', '2.1.308', 'brew upgrade --cask claude-code'],
+    ['claude-code@latest', '2.1.319', 'brew upgrade --cask claude-code@latest'],
+  ])('FORK: the status names the cask a real symlink resolves into: %s', async (cask, version, command) => {
+    const dir = mkdtempSync(join(tmpdir(), 'cliupd-cask-'))
+    try {
+      const keg = join(dir, 'Caskroom', cask, version)
+      mkdirSync(keg, { recursive: true })
+      writeFileSync(join(keg, 'claude'), '#!/bin/sh\n', { mode: 0o755 })
+      const link = join(dir, 'claude')
+      symlinkSync(join(keg, 'claude'), link)
+      const s = await buildCliUpdateStatus({
+        measure: async () => ({ version: '2.1.300', error: null }),
+        latest: async () => ({ version: '2.1.400', error: null }),
+        avxLess: () => false,
+        pin: () => null,
+        resolveBin: () => link,
+      })
+      expect(s.installMethod).toBe('homebrew')
+      expect(s.manualCommand).toBe(command)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

@@ -88,14 +88,22 @@ export function decideCliOffer(i: CliOfferInput): CliOfferDecision {
   return { target: i.latest, targetKind: 'latest', offer, reason: offer ? 'a newer version is published' : 'installed version is the latest' }
 }
 
+function realOrSelf(binPath: string, resolveReal: (p: string) => string): string {
+  try { return resolveReal(binPath) } catch { return binPath /* keep the symlink path */ }
+}
+
+/** FORK: the cask a resolved binary belongs to: claude-code or a channel of it (claude-code@latest); null outside the Caskroom. */
+export function homebrewCaskName(real: string): string | null {
+  return real.match(/\/Caskroom\/(claude-code(?:@[^/]+)?)\//)?.[1] ?? null
+}
+
 /** How the resolved binary was installed decides how it is upgraded. */
 export function detectInstallMethod(binPath: string | null, resolveReal: (p: string) => string = (p) => realpathSync(p)): InstallMethod {
   if (!binPath) return 'unknown'
-  let real = binPath
-  try { real = resolveReal(binPath) } catch { /* keep the symlink path */ }
+  const real = realOrSelf(binPath, resolveReal)
   if (real.includes('/node_modules/')) return 'npm'
   // FORK: a Homebrew cask. The button does not run brew; it names the command, and npm would collide with the cask's link.
-  if (real.includes('/Caskroom/claude-code/')) return 'homebrew'
+  if (homebrewCaskName(real)) return 'homebrew'
   // The official installer (claude.ai/install.sh) links ~/.local/bin/claude to
   // a versioned binary under ~/.local/share/claude.
   if (real.includes('/.local/share/claude') || real.includes('/.local/bin/claude')) return 'official'
@@ -180,9 +188,9 @@ let running: CliUpdateJobResult | null = null
 export function cliUpdateRunning(): boolean { return running !== null }
 
 /** The shell command an operator can run by hand when the automatic path cannot (EACCES, unknown method). */
-export function manualInstallCommand(target: string, method: InstallMethod): string {
+export function manualInstallCommand(target: string, method: InstallMethod, cask: string = 'claude-code'): string {
   if (method === 'official') return `curl -fsSL https://claude.ai/install.sh | bash -s ${target}`
-  if (method === 'homebrew') return 'brew upgrade --cask claude-code'
+  if (method === 'homebrew') return `brew upgrade --cask ${cask}`
   return `npm install -g ${CLAUDE_CODE_PACKAGE}@${target}`
 }
 
@@ -359,11 +367,12 @@ export async function buildCliUpdateStatus(deps: {
   const [m, l] = await Promise.all([measure(), avxLess ? Promise.resolve({ version: null, error: null }) : latestFn()])
   const decision = decideCliOffer({ installed: m.version, latest: l.version, avxLess, avxSafePin })
   const installMethod = detectInstallMethod(bin)
+  const cask = bin ? homebrewCaskName(realOrSelf(bin, realpathSync)) : null
   return {
     installed: m.version, installedError: m.error, bin, installMethod,
     latest: l.version, latestError: l.error, avxLess, avxSafePin,
     ...decision,
-    manualCommand: decision.target ? manualInstallCommand(decision.target, installMethod) : null,
+    manualCommand: decision.target ? manualInstallCommand(decision.target, installMethod, cask ?? undefined) : null,
     job: { running: cliUpdateRunning(), result: readCliUpdateResult() },
   }
 }
