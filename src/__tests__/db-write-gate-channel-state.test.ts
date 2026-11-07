@@ -38,7 +38,7 @@ const o = (subAgent = true) => ({ root, cwd: self, subAgent, projectDir: subAgen
 const write = (p: string, subAgent = true) => gateDecision('Write', { file_path: p, content: '{}' }, o(subAgent))
 const bash = (c: string) => gateDecision('Bash', { command: c }, o())
 
-const FILES = ['access.json', '.env', 'invites.json', 'inbound-evidence.jsonl', 'inbound-evidence.jsonl.1', 'inbox-pending.jsonl',
+const FILES = ['access.json', '.env', 'invites.json', 'inbound-evidence.jsonl', 'inbound-evidence.jsonl.1', 'approval-callbacks.jsonl', 'approval-callbacks.jsonl.1', 'inbox-pending.jsonl',
   'inbox-draining-4242.jsonl', 'allowlist.json', 'pending.json', 'audit.jsonl', 'own-threads.json', 'bot.pid', 'coordinator.pid',
   'delivered-dms.json', 'delivered-dms.json.tmp.4242']
 const roots = () => ({

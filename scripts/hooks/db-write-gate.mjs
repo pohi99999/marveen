@@ -82,6 +82,8 @@ export const INSTALL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..
 // restarts) teaches its outbound gate whose DM a channel is, so a forged row would open a stranger's DM; it is a trust
 // file like access.json, and so is the temporary name its atomic write renames from (delivered-dms.json.tmp.<pid>).
 const CHANNEL_STATE_FILES = ['access.json', '.env', 'invites.json', 'inbound-evidence.jsonl', 'inbound-evidence.jsonl.1',
+  // FORK: the owner's recorded approval button presses (web/approval-callbacks.ts).
+  'approval-callbacks.jsonl', 'approval-callbacks.jsonl.1',
   'inbox-pending.jsonl', 'inbox-draining-*.jsonl', 'allowlist.json', 'pending.json', 'audit.jsonl', 'own-threads.json',
   'bot.pid', 'coordinator.pid', 'delivered-dms.json', 'delivered-dms.json.tmp.*']
 const CHANNEL_STATE_DIRS = ['progress', 'approved']

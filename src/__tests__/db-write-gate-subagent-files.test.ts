@@ -53,7 +53,7 @@ it('the sub-agent list is exactly the plan\'s: the root .env, five store files, 
       ...['.marveen-worker', '.marveen-worker-fast'].flatMap((w) => ['.claude-config', '.claude', '.mcp.json', 'CLAUDE.md', 'CLAUDE.local.md'].map((f) => `~/${w}/${f}`)),
       // CHANSTATEWRITE1104: the channel trust files and dirs under the three state roots
       ...['~/.claude/channels', '.claude/channels', 'agents/*/.claude/channels'].flatMap((b) => [
-        'access.json', '.env', 'invites.json', 'inbound-evidence.jsonl', 'inbound-evidence.jsonl.1', 'inbox-pending.jsonl',
+        'access.json', '.env', 'invites.json', 'inbound-evidence.jsonl', 'inbound-evidence.jsonl.1', 'approval-callbacks.jsonl', 'approval-callbacks.jsonl.1', 'inbox-pending.jsonl',
         'inbox-draining-*.jsonl', 'allowlist.json', 'pending.json', 'audit.jsonl', 'own-threads.json', 'bot.pid', 'coordinator.pid',
         // SLACKOUTDM1007: the Slack plugin's persisted allowFrom DMs and their atomic-write temporary name
         'delivered-dms.json', 'delivered-dms.json.tmp.*',
