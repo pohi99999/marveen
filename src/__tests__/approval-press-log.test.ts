@@ -67,6 +67,19 @@ describe('the press log line', () => {
     expect(JSON.stringify(line)).not.toContain(NONCE)
   })
 
+  it('a line that is not JSON: no log call at any level carries its content, and the next press still decides', async () => {
+    const levels = (['trace', 'debug', 'info', 'warn', 'error', 'fatal'] as const).map((l) => vi.spyOn(logger, l))
+    const raw = `{broken ${buildCallbackData(ID, NONCE, 'approved')}`
+    appendFileSync(file, raw + '\n')
+    const line = await press(buildCallbackData(ID, NONCE, 'rejected'))
+    expect(line).toMatchObject({ approval_id: ID, outcome: 'rejected' })
+    expect(getApproval(ID)!.status).toBe('rejected')
+    const logged = JSON.stringify(levels.flatMap((s) => s.mock.calls))
+    expect(logged).not.toContain('{broken')
+    expect(logged).not.toContain(NONCE)
+    for (const s of levels) if (s !== info) s.mockRestore()
+  })
+
   it('pressForLog, both directions', () => {
     expect(pressForLog(buildCallbackData(ID, NONCE, 'rejected'))).toEqual({ approval_id: ID, decision: 'rejected' })
     expect(pressForLog('x'.repeat(5))).toEqual({ unparsed_length: 5 })
