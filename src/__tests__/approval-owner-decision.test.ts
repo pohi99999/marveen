@@ -15,7 +15,7 @@ vi.mock('../config.js', async (importOriginal) => {
 })
 import { initDatabase, createApproval, getApproval } from '../db.js'
 import { applyOwnerDecision, tryHandleApprovals } from '../web/routes/approvals.js'
-import { buildCallbackData, OWNER_RESOLVER } from '../web/telegram-approval.js'
+import { buildCallbackData, namesOwnerResolver, OWNER_RESOLVER } from '../web/telegram-approval.js'
 import { pollApprovalCallbacks } from '../web/approval-callbacks.js'
 import { recordApprovalPress } from '../channel-coordinator/approval-press.js'
 import { dispatchForChat } from '../web/routes/commands.js'
@@ -133,6 +133,29 @@ describe('the owner resolver name is the server\'s', () => {
       expect(p.out.status).toBe(403)
     }
     expect(getApproval(ID)).toMatchObject({ status: 'pending', resolved_by: null })
+  })
+
+  it.each([
+    ['upper case', 'Telegram-Owner'],
+    ['outer spaces', '  telegram-owner  '],
+    ['a zero-width space', 'telegram\u200B-owner'],
+    ['a no-break space', 'telegram-owner\u00A0'],
+    ['a byte order mark', '\uFEFFtelegram-owner'],
+    ['a soft hyphen', 'tele\u00ADgram-owner'],
+    ['a non-breaking hyphen', 'telegram\u2011owner'],
+    ['full-width letters', '\uFF54elegram-owner'],
+  ])('PATCH may not write it with %s either', async (_name, name) => {
+    mk()
+    const p = call('PATCH', `/api/approvals/${ID}`, { status: 'approved', resolved_by: name })
+    await tryHandleApprovals(p.ctx)
+    expect(p.out.status).toBe(403)
+    expect(getApproval(ID)).toMatchObject({ status: 'pending', resolved_by: null })
+  })
+
+  it('a name that only resembles it is an ordinary name', () => {
+    expect(namesOwnerResolver('telegram_owner')).toBe(false)
+    expect(namesOwnerResolver('telegram-owner-2')).toBe(false)
+    expect(namesOwnerResolver('marveen')).toBe(false)
   })
 
   it('the rejection path a sub-agent uses to cancel keeps working under its own name', async () => {

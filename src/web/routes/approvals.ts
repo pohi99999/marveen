@@ -18,7 +18,7 @@ import { getEffectiveSettingValue } from '../../settings-store.js'
 import { mainBotToken, ownerDmVerdict, SLACK_CHUNK } from '../../slack-notify.js'
 import { reactionRoute, reactionsOn, dashboardOnlyLine, postReactionPrompt, startApprovalSlackSweeper, type RouteDeps } from '../approval-slack-route.js'
 import { sendTelegramMessage, editTelegramMessageText } from '../telegram.js'
-import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, OWNER_RESOLVER, isButtonOnlyCategory, type OwnerDecision, type OwnerDecisionVia } from '../telegram-approval.js'
+import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, OWNER_RESOLVER, namesOwnerResolver, isButtonOnlyCategory, type OwnerDecision, type OwnerDecisionVia } from '../telegram-approval.js'
 import { mayIssueCredentials, mayActAsOwner, OWNER_SESSION_REQUIRED } from './auth.js'
 import { supersededApprovals, supersededResolver, SUPERSEDED_NOTE } from '../approval-supersede.js'
 import type { RouteContext } from './types.js'
@@ -827,7 +827,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       return true
     }
     // This name means a recorded press or the owner's command. The server writes it on those paths, nothing else may.
-    if (resolved_by.trim() === OWNER_RESOLVER) {
+    if (namesOwnerResolver(resolved_by)) {
       json(res, { error: `resolved_by ${OWNER_RESOLVER} is written by the server only` }, 403)
       return true
     }

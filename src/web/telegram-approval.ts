@@ -10,6 +10,10 @@ import type { Approval } from '../db.js'
 import { APP_TZ } from '../config.js'
 
 export const OWNER_RESOLVER = 'telegram-owner'
+/** The name as a reader would take it: case, spacing, invisible characters and dash variants do not make it another. */
+export function namesOwnerResolver(name: string): boolean {
+  return name.normalize('NFKC').replace(/[\p{Cf}\s]/gu, '').replace(/\p{Pd}/gu, '-').toLowerCase() === OWNER_RESOLVER
+}
 export const CALLBACK_PREFIX = 'apr'
 export type OwnerDecision = 'approved' | 'rejected'
 
