@@ -36,6 +36,7 @@ import { isStandby, STANDBY_NOTICE } from './standby.js'
 import { isSettingOn } from './setting-flag.js'
 import { STORE_DIR, WEB_PORT, PROJECT_ROOT, MAIN_AGENT_ID, CHANNEL_PROVIDER, BOT_NAME, ALLOWED_CHAT_ID } from './config.js'
 import { channelStateDir } from './channel-provider.js'
+import { recordApprovalPress } from './channel-coordinator/approval-press.js'
 import { getUpdates, probeHighWater, mapUpdate, TelegramApiError } from './channel-coordinator/telegram-client.js'
 import { probeNativeChannelDown } from './channel-coordinator/liveness.js'
 import {
@@ -377,20 +378,6 @@ export function transientBackoffMs(attempt: number): number {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
-// ---- approval button relay (card 3558) --------------------------------------
-
-async function relayApprovalCallback(ev: { content: string; user_id: number | null; meta: Record<string, unknown> }): Promise<void> {
-  const token = readFileSync(join(STORE_DIR, '.dashboard-token'), 'utf-8').trim()
-  const approvalId = ev.content.split(':')[1] ?? ''
-  const resp = await fetch(`http://127.0.0.1:${WEB_PORT}/api/approvals/${encodeURIComponent(approvalId)}/telegram-decision`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ callback_data: ev.content, from_id: ev.user_id, callback_query_id: ev.meta?.callback_query_id ?? null }),
-    signal: AbortSignal.timeout(10_000),
-  })
-  logger.info({ approvalId, status: resp.status }, 'channel-coordinator: approval callback relayed to the dashboard')
-}
-
 // ---- batch processing ----------------------------------------------------
 
 // Process one getUpdates batch. For each update: normalize, dedup-insert, and
@@ -420,12 +407,20 @@ export function processBatch(updates: { update_id: number }[]): { offset: number
     if (!ins.inserted || ins.eventId == null) continue // dedup: already handed off
 
     // Card 3558: an approval button press is the OWNER's decision for the server, never a message
-    // for the agent (handing it off would put the nonce in the agent's context). The dashboard
-    // route checks from.id against the owner and the nonce against the approval.
+    // for the agent (handing it off would put the nonce in the agent's context). It goes where the
+    // plugin records a press; the dashboard's watcher checks from.id and the nonce (approval-callbacks.ts).
     if (ev.kind === 'callback_query' && typeof ev.content === 'string' && ev.content.startsWith('apr:')) {
-      void relayApprovalCallback(ev).then(() => markEventDelivered(ins.eventId!, 0)).catch((err) => {
-        logger.error({ err, update_id: ev.update_id }, 'channel-coordinator: approval callback relay failed')
-      })
+      try {
+        recordApprovalPress(channelStateDir('telegram'), {
+          data: ev.content,
+          from_id: ev.user_id,
+          callback_query_id: ev.meta?.callback_query_id,
+          chat_id: ev.chat_id,
+        })
+        markEventDelivered(ins.eventId, 0)
+      } catch (err) {
+        logger.error({ err, update_id: ev.update_id }, 'channel-coordinator: approval press not recorded')
+      }
       continue
     }
 

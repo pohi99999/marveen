@@ -167,30 +167,21 @@ None found.
 - Approval button presses still go to the dashboard, which checks the sender against the owner itself.
 - Regression tests: `src/__tests__/security-audit-fixes.test.ts`.
 
-### H5 — Any agent can approve an approval request, including an outgoing email — NOT FIXED (needs a design change)
+### H5 — An approval could be decided without the owner — PARTLY FIXED (the rest needs a design change)
 
-**Where:**
-- `src/web/routes/approvals.ts:457-490`: `PATCH /api/approvals/:id` accepts a self-declared `resolved_by`. The only check is `resolved_by !== target.agent_id`, and the code comment itself says identity cannot be enforced under the shared token.
-- `src/web/routes/approvals.ts:332` and the GET routes return the full row, including `owner_nonce`.
-- `scripts/hooks/email-approval-gate.py:519-526` accepts any `status='approved'` row with a matching `content_hash`, whoever resolved it.
+**Fixed (#50):**
+- No API answer returns `owner_nonce`.
+- `POST /api/approvals/:id/telegram-decision` decides nothing, for any caller. A decision comes from the owner's recorded Telegram button press, or from the owner's own command with its message on record.
+- `PATCH /api/approvals/:id` cannot write the `telegram-owner` resolver name.
 
-**Why it matters:**
-- A prompt-injected agent can do the whole loop alone:
-  1. create an `email_send` approval;
-  2. PATCH it to `approved` with `resolved_by: "owner"`;
-  3. send the email.
-- No human is involved at autonomy level 2, which is exactly the level meant to require the owner.
-- The owner nonce, which is meant to protect the Telegram button path, also comes back in the response to the requesting agent.
+**Still open:**
+- Until a dashboard user account exists, the shared token can approve through `PATCH`. An account that never signed in, or a disabled one, already ends this. The owner gate of v1.47.1 closes it for good.
+- The approvals table and the recorded presses can be written by the same Unix user every agent runs as. Closing this needs an OS-level boundary (see M1).
+- `scripts/hooks/email-approval-gate.py` does not check who resolved an approved row.
 
-**Why not fixed here:**
-- The main agent legitimately approves through this PATCH (with the shared token) after asking the owner in chat. Restricting it would break that flow.
-- An existing test asserts that `owner_nonce` appears in the POST response.
-
-**Recommended fix:**
-- Stop returning `owner_nonce` from any API response, and update the test.
-- Make the email gate accept only approvals whose `resolved_by` is `telegram-owner` (set server-side by `applyOwnerDecision`) or a dashboard session/device-key user. Record that resolver kind server-side from `ctx.auth.kind`, never from the request body.
-- Have `/telegram-decision` accept only the in-process coordinator, and never trust `from_id` from the request body.
-- Long term: give each agent its own credential (see M1).
+**Recommended next:**
+- Make the email gate accept only resolutions it can attribute server-side.
+- Long term: give each agent its own credential and OS boundary (see M1).
 
 ### H6 — Agents can raise their own autonomy level and change other gate inputs — NOT FIXED (needs a design change)
 
@@ -464,7 +455,7 @@ None found.
 
 ## 9. Fix order for the open findings
 
-1. **H5 and H6:** stop returning `owner_nonce`, and make the email gate trust only resolutions it can attribute server-side; protect the gate's input files with a write guard and restrict `POST /api/autonomy`.
+1. **H5 and H6:** make the email gate trust only resolutions it can attribute server-side; protect the gate's input files with a write guard and restrict `POST /api/autonomy`.
 2. **M1:** per-agent credentials. This removes the root cause of H5, H6 and M1.
 3. **M10:** enable the destructive and credential gates by default, and make web-reading profiles `strict`.
 4. **M14 and M2.**
