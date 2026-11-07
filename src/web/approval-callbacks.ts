@@ -12,7 +12,7 @@ import { logger } from '../logger.js'
 import { STORE_DIR, TELEGRAM_BOT_TOKEN } from '../config.js'
 import { channelStateDir } from '../channel-provider.js'
 import { resolveOwnerChatId } from '../owner-chat.js'
-import { checkOwnerCallback } from './telegram-approval.js'
+import { checkOwnerCallback, parseCallbackData } from './telegram-approval.js'
 import { applyOwnerDecision, ownerDecisionRefusalText } from './routes/approvals.js'
 import { answerTelegramCallbackQuery } from './telegram.js'
 
@@ -38,6 +38,13 @@ export async function handleCallbackLine(
   const text = r.ok ? (check.parsed.decision === 'approved' ? 'Jóváhagyva.' : 'Elutasítva.') : ownerDecisionRefusalText(r.reason)
   if (line.callback_query_id) await deps.answer(line.callback_query_id, text).catch(() => {})
   return r.ok ? { data, outcome: check.parsed.decision } : { data, outcome: 'refused', reason: r.reason }
+}
+
+/** What a log line may say about a press: which approval and which way. The data also carries the nonce, and a line
+ *  that does not parse may carry anything, so of that one only its length is kept. */
+export function pressForLog(data: string): { approval_id: string; decision: string } | { unparsed_length: number } {
+  const parsed = parseCallbackData(data)
+  return parsed ? { approval_id: parsed.approvalId, decision: parsed.decision } : { unparsed_length: data.length }
 }
 
 export function callbacksFile(): string { return join(channelStateDir('telegram'), 'approval-callbacks.jsonl') }
@@ -75,7 +82,7 @@ export async function pollApprovalCallbacks(
       apply: (id, nonce, decision) => applyOwnerDecision(id, nonce, decision, undefined, 'button'),
       answer: (cb, text) => TELEGRAM_BOT_TOKEN ? answerTelegramCallbackQuery(TELEGRAM_BOT_TOKEN, cb, text) : Promise.resolve(false),
     })
-    logger.info({ data: o.data, outcome: o.outcome, reason: o.reason }, 'approval-callbacks: owner button press handled')
+    logger.info({ ...pressForLog(o.data), outcome: o.outcome, reason: o.reason }, 'approval-callbacks: owner button press handled')
     outcomes.push(o)
   }
   writeOffset(offset + Buffer.byteLength(complete, 'utf-8'), offsetPath)
