@@ -18,6 +18,7 @@ vi.mock('../config.js', async (importOriginal) => {
 import { initDatabase, createApproval, getApproval, resolveApprovalByOwner } from '../db.js'
 import { newApprovalNonce, buildCallbackData, parseCallbackData, checkOwnerCallback, resolvableByOwner, ownerApprovalKeyboard, emailSummaryLines } from '../web/telegram-approval.js'
 import { tryHandleApprovals, applyOwnerDecision, buildOwnerApprovalText } from '../web/routes/approvals.js'
+import { handleCallbackLine } from '../web/approval-callbacks.js'
 import type { RouteContext } from '../web/routes/types.js'
 import * as tg from '../web/telegram.js'
 
@@ -74,49 +75,42 @@ describe('telegram approval: server-side resolution', () => {
     return getApproval(id)!
   }
   it("the owner's press approves once; a second press, a wrong nonce, a foreign id and an expired row do not", async () => {
+    const press = (id: string, nonce: string, from: number, decision: 'approved' | 'rejected' = 'approved') => handleCallbackLine(
+      { callback_query_id: 'cq1', data: buildCallbackData(id, nonce, decision), from_id: from },
+      String(OWNER),
+      { apply: (i, n, d) => applyOwnerDecision(i, n, d, undefined, 'button'), answer: (cb, text) => tg.answerTelegramCallbackQuery('test-token', cb, text) },
+    )
     mk('a1a1a1a1')
-    const { ctx, out } = fakeReq('POST', '/api/approvals/a1a1a1a1/telegram-decision', { callback_data: buildCallbackData('a1a1a1a1', 'n0nceAAA', 'approved'), from_id: OWNER, callback_query_id: 'cq1' })
-    expect(await tryHandleApprovals(ctx)).toBe(true)
-    expect(out.status).toBe(200)
+    expect(await press('a1a1a1a1', 'n0nceAAA', OWNER)).toMatchObject({ outcome: 'approved' })
     expect(getApproval('a1a1a1a1')).toMatchObject({ status: 'approved', resolved_by: 'telegram-owner' })
     expect(tg.answerTelegramCallbackQuery).toHaveBeenCalledWith('test-token', 'cq1', 'Jóváhagyva.')
     // second press
-    const again = fakeReq('POST', '/api/approvals/a1a1a1a1/telegram-decision', { callback_data: buildCallbackData('a1a1a1a1', 'n0nceAAA', 'rejected'), from_id: OWNER })
-    await tryHandleApprovals(again.ctx)
-    expect(again.out.status).toBe(409)
+    expect(await press('a1a1a1a1', 'n0nceAAA', OWNER, 'rejected')).toMatchObject({ outcome: 'refused', reason: 'already_resolved' })
     expect(getApproval('a1a1a1a1')!.status).toBe('approved')
     // foreign id
     mk('a2a2a2a2')
-    const foreign = fakeReq('POST', '/api/approvals/a2a2a2a2/telegram-decision', { callback_data: buildCallbackData('a2a2a2a2', 'n0nceAAA', 'approved'), from_id: 123456 })
-    await tryHandleApprovals(foreign.ctx)
-    expect(foreign.out.status).toBe(403)
+    expect(await press('a2a2a2a2', 'n0nceAAA', 123456)).toMatchObject({ outcome: 'refused', reason: 'not-owner' })
     expect(getApproval('a2a2a2a2')!.status).toBe('pending')
     // wrong nonce (right owner)
-    const wrong = fakeReq('POST', '/api/approvals/a2a2a2a2/telegram-decision', { callback_data: buildCallbackData('a2a2a2a2', 'wrongNON', 'approved'), from_id: OWNER })
-    await tryHandleApprovals(wrong.ctx)
-    expect(wrong.out.status).toBe(403)
+    expect(await press('a2a2a2a2', 'wrongNON', OWNER)).toMatchObject({ outcome: 'refused', reason: 'wrong_nonce' })
     expect(getApproval('a2a2a2a2')!.status).toBe('pending')
     // expired
     mk('a3a3a3a3', { timeout: Math.floor(Date.now() / 1000) - 5 })
-    const exp = fakeReq('POST', '/api/approvals/a3a3a3a3/telegram-decision', { callback_data: buildCallbackData('a3a3a3a3', 'n0nceAAA', 'approved'), from_id: OWNER })
-    await tryHandleApprovals(exp.ctx)
-    expect(exp.out.status).toBe(410)
+    expect(await press('a3a3a3a3', 'n0nceAAA', OWNER)).toMatchObject({ outcome: 'refused', reason: 'expired' })
     expect(getApproval('a3a3a3a3')!.status).toBe('pending')
-    // callback_data naming another approval than the path
-    const cross = fakeReq('POST', '/api/approvals/a2a2a2a2/telegram-decision', { callback_data: buildCallbackData('a1a1a1a1', 'n0nceAAA', 'approved'), from_id: OWNER })
-    await tryHandleApprovals(cross.ctx)
-    expect(cross.out.status).toBe(400)
   })
   it('a POST /api/approvals row gets a nonce and the owner notification carries the buttons', async () => {
     const { ctx, out } = fakeReq('POST', '/api/approvals', { agent_id: 'marveen', category: 'email_send', action_description: 'Levél', timeout_seconds: 600, content_hash: 'ef'.repeat(32), action_payload: JSON.stringify({ to: ['x@example.com'], subject: 'T' }) })
     await tryHandleApprovals(ctx)
     expect(out.status).toBe(201)
-    expect(out.body.owner_nonce).toMatch(/^[A-Za-z0-9]{8}$/)
+    expect(out.body.owner_nonce).toBeNull()
+    const nonce = getApproval(out.body.id)!.owner_nonce!
+    expect(nonce).toMatch(/^[A-Za-z0-9]{8}$/)
     await new Promise((r) => setTimeout(r, 10))
     const call = (tg.sendTelegramMessage as any).mock.calls[0]
     expect(call[1]).toBe('777001')
     expect(call[2]).toContain('Címzett: x@example.com')
-    expect(call[3].reply_markup.inline_keyboard[0][0].callback_data).toBe(buildCallbackData(out.body.id, out.body.owner_nonce, 'approved'))
+    expect(call[3].reply_markup.inline_keyboard[0][0].callback_data).toBe(buildCallbackData(out.body.id, nonce, 'approved'))
   })
   it('applyOwnerDecision rewrites the notification with the outcome, and the DB resolver is one conditional write', () => {
     const a = mk('a4a4a4a4'); (a as any).telegram_message_id = 7

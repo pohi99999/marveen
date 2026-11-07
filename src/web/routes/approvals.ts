@@ -17,8 +17,8 @@ import { sendOwnerMessage, sendOwnerSlackDm, slackTargetFor, noticeTargetDrift }
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import { mainBotToken, ownerDmVerdict, SLACK_CHUNK } from '../../slack-notify.js'
 import { reactionRoute, reactionsOn, dashboardOnlyLine, postReactionPrompt, startApprovalSlackSweeper, type RouteDeps } from '../approval-slack-route.js'
-import { sendTelegramMessage, editTelegramMessageText, answerTelegramCallbackQuery } from '../telegram.js'
-import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, checkOwnerCallback, OWNER_RESOLVER, isButtonOnlyCategory, type OwnerDecision, type OwnerDecisionVia } from '../telegram-approval.js'
+import { sendTelegramMessage, editTelegramMessageText } from '../telegram.js'
+import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, OWNER_RESOLVER, isButtonOnlyCategory, type OwnerDecision, type OwnerDecisionVia } from '../telegram-approval.js'
 import { mayIssueCredentials, mayActAsOwner, OWNER_SESSION_REQUIRED } from './auth.js'
 import { supersededApprovals, supersededResolver, SUPERSEDED_NOTE } from '../approval-supersede.js'
 import type { RouteContext } from './types.js'
@@ -179,7 +179,7 @@ export function buildOwnerApprovalText(approval: Approval): string {
 export type OwnerDecisionResult =
   | { ok: true; approval: Approval }
   | { ok: false; reason: 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired' | 'button_only'; approval?: Approval }
-export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDecision, nowS = Math.floor(Date.now() / 1000), via: OwnerDecisionVia = 'http'): OwnerDecisionResult {
+export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDecision, nowS = Math.floor(Date.now() / 1000), via: OwnerDecisionVia = 'command'): OwnerDecisionResult {
   if (via !== 'button') {
     const target = getApproval(id)
     if (target && isButtonOnlyCategory(target.category)) {
@@ -219,9 +219,9 @@ function closeSupersededApprovals(next: Approval, explicitId: string | null): vo
   }
 }
 
-// The nonce of a button-only approval is what a forged decision would need, so no GET serves it.
-export function redactButtonOnlyNonce(a: Approval): Approval {
-  return isButtonOnlyCategory(a.category) && a.owner_nonce ? { ...a, owner_nonce: null } : a
+// The nonce goes to the owner in the Telegram message and nowhere else: no API answer carries it, for any category.
+export function redactOwnerNonce<T extends Pick<Approval, 'owner_nonce'> | undefined>(a: T): T {
+  return a?.owner_nonce ? ({ ...a, owner_nonce: null } as T) : a
 }
 
 export function ownerDecisionRefusalText(reason: string): string {
@@ -517,7 +517,7 @@ function handleCategoryConsume(ctx: RouteContext, id: string, body: Record<strin
   })
   if (result.ok) {
     logger.info({ id, category, consumer: consumer.trim(), ref: ref ?? null }, 'Approval consumed by the acting tool')
-    json(res, { ok: true, approval: result.approval })
+    json(res, { ok: true, approval: redactOwnerNonce(result.approval) })
     return
   }
   if (result.reason === 'not_found') {
@@ -665,7 +665,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     notifyOwner(approval, chatApprovedMessageId)
     notifyMainAgent(approval)
     logger.info({ id, agent_id, category, chatApprovedMessageId, forAgent }, chatApprovedMessageId != null ? 'Approval created as already approved in chat' : 'Approval request created')
-    json(res, approval, 201)
+    json(res, redactOwnerNonce(approval), 201)
     return true
   }
 
@@ -678,7 +678,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     const limit = limitRaw ? Math.min(parseInt(limitRaw, 10) || 100, 500) : 100
 
     const items = listApprovals({ agent_id, category, status, limit })
-    json(res, items.map(redactButtonOnlyNonce))
+    json(res, items.map(redactOwnerNonce))
     return true
   }
 
@@ -744,7 +744,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     })
     if (result.ok) {
       logger.info({ id: consumeMatch[1], consumer: consumer.trim(), ref: message_id ?? null }, 'Approval consumed by the send path')
-      json(res, { ok: true, approval: result.approval })
+      json(res, { ok: true, approval: redactOwnerNonce(result.approval) })
       return true
     }
     if (result.reason === 'not_found') {
@@ -769,49 +769,17 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'Not found' }, 404)
       return true
     }
-    json(res, redactButtonOnlyNonce(approval))
+    json(res, redactOwnerNonce(approval))
     return true
   }
 
-  // POST /api/approvals/:id/telegram-decision -- the owner's button press, relayed by the coordinator
-  // (card 3558). Identity: from_id must equal the configured owner chat/user id; the nonce must be
-  // the approval's own. Any agent can reach this route with the fleet bearer, which is why the
-  // nonce (known only from the owner's Telegram message) is required, not just the id.
+  // POST /api/approvals/:id/telegram-decision decides nothing, for any caller. Only the process that reads a Telegram
+  // update knows who pressed what, and that process records the press (approval-callbacks.ts). The owner's own
+  // command is the other path (builtin-commands.ts). A request body here is not evidence of either.
   const decMatch = path.match(/^\/api\/approvals\/([^/]+)\/telegram-decision$/)
   if (decMatch && method === 'POST') {
-    let body: { nonce?: unknown; decision?: unknown; from_id?: unknown; callback_query_id?: unknown; callback_data?: unknown }
-    try {
-      body = JSON.parse((await readBody(req)).toString())
-    } catch {
-      json(res, { error: 'Invalid JSON' }, 400)
-      return true
-    }
-    const ownerId = resolveOwnerChatId()
-    const data = typeof body.callback_data === 'string'
-      ? body.callback_data
-      : `apr:${decMatch[1]}:${typeof body.nonce === 'string' ? body.nonce : ''}:${body.decision === 'approved' ? 'a' : body.decision === 'rejected' ? 'r' : '?'}`
-    const check = checkOwnerCallback(data, body.from_id as number | string | null | undefined, ownerId)
-    if (!check.ok) {
-      logger.warn({ id: decMatch[1], reason: check.reason }, 'telegram-decision refused')
-      json(res, { error: check.reason }, check.reason === 'malformed' ? 400 : 403)
-      return true
-    }
-    if (check.parsed.approvalId !== decMatch[1]) {
-      json(res, { error: 'callback_data names another approval' }, 400)
-      return true
-    }
-    const r = applyOwnerDecision(decMatch[1], check.parsed.nonce, check.parsed.decision)
-    const cbId = typeof body.callback_query_id === 'string' ? body.callback_query_id : null
-    if (cbId && TELEGRAM_BOT_TOKEN) {
-      void answerTelegramCallbackQuery(TELEGRAM_BOT_TOKEN, cbId, r.ok ? (check.parsed.decision === 'approved' ? 'Jóváhagyva.' : 'Elutasítva.') : ownerDecisionRefusalText(r.reason))
-        .catch((err) => logger.warn({ err }, 'answerCallbackQuery failed'))
-    }
-    if (!r.ok) {
-      const status = r.reason === 'not_found' ? 404 : r.reason === 'wrong_nonce' || r.reason === 'button_only' ? 403 : r.reason === 'expired' ? 410 : 409
-      json(res, { error: r.reason, text: ownerDecisionRefusalText(r.reason) }, status)
-      return true
-    }
-    json(res, r.approval)
+    logger.warn({ id: decMatch[1], auth: ctx.auth?.kind, agent: ctx.auth?.agent }, 'telegram-decision refused: this route does not decide')
+    json(res, { error: 'owner_decision_only_from_telegram', text: 'A döntés csak Péter Telegram-gombjáról vagy parancsából jöhet.' }, 403)
     return true
   }
 
@@ -858,6 +826,11 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'The requesting agent cannot approve its own request' }, 403)
       return true
     }
+    // This name means a recorded press or the owner's command. The server writes it on those paths, nothing else may.
+    if (resolved_by.trim() === OWNER_RESOLVER) {
+      json(res, { error: `resolved_by ${OWNER_RESOLVER} is written by the server only` }, 403)
+      return true
+    }
 
     const updated = resolveApproval(idMatch[1], status, resolved_by.trim(), msgId)
     if (!updated) {
@@ -873,7 +846,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
 
     const approval = getApproval(idMatch[1])
     logger.info({ id: idMatch[1], status, resolved_by }, 'Approval resolved')
-    json(res, approval)
+    json(res, redactOwnerNonce(approval))
     return true
   }
 

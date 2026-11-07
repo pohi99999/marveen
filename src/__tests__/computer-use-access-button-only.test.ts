@@ -44,7 +44,7 @@ describe('computer_use_access: decided by the owner\'s button only', () => {
     const { ctx, out } = fakeReq('POST', '/api/approvals/c1c1c1c1/telegram-decision', { callback_data: buildCallbackData('c1c1c1c1', NONCE, 'approved'), from_id: OWNER })
     await tryHandleApprovals(ctx)
     expect(out.status).toBe(403)
-    expect(out.body.error).toBe('button_only')
+    expect(out.body.error).toBe('owner_decision_only_from_telegram')
     expect(getApproval('c1c1c1c1')!.status).toBe('pending')
   })
 
@@ -68,7 +68,7 @@ describe('computer_use_access: decided by the owner\'s button only', () => {
     expect(out.status).toBe(403)
   })
 
-  it('no GET serves its nonce; an ordinary category keeps it', async () => {
+  it('no GET serves its nonce, nor that of an ordinary category', async () => {
     mk('c4c4c4c4')
     mk('e4e4e4e4', 'email_send')
     const one = fakeReq('GET', '/api/approvals/c4c4c4c4')
@@ -78,7 +78,7 @@ describe('computer_use_access: decided by the owner\'s button only', () => {
     await tryHandleApprovals(list.ctx)
     const byId = Object.fromEntries(list.out.body.map((a: any) => [a.id, a.owner_nonce]))
     expect(byId['c4c4c4c4']).toBeNull()
-    expect(byId['e4e4e4e4']).toBe(NONCE)
+    expect(byId['e4e4e4e4']).toBeNull()
   })
 
   it('the owner\'s button press, as the plugin recorded it, DOES decide it; a foreign press does not', async () => {
@@ -96,12 +96,13 @@ describe('computer_use_access: decided by the owner\'s button only', () => {
     expect(getApproval('c6c6c6c6')!.status).toBe('pending')
   })
 
-  it('an ordinary category is unchanged: the command and the HTTP route still decide it', async () => {
+  it('an ordinary category: the command still decides it, the HTTP route does not', async () => {
     mk('e1e1e1e1', 'email_send')
     expect(applyOwnerDecision('e1e1e1e1', NONCE, 'rejected', undefined, 'command')).toMatchObject({ ok: true })
     mk('e2e2e2e2', 'email_send')
     const { ctx, out } = fakeReq('POST', '/api/approvals/e2e2e2e2/telegram-decision', { callback_data: buildCallbackData('e2e2e2e2', NONCE, 'approved'), from_id: OWNER })
     await tryHandleApprovals(ctx)
-    expect(out.status).toBe(200)
+    expect(out.status).toBe(403)
+    expect(getApproval('e2e2e2e2')!.status).toBe('pending')
   })
 })

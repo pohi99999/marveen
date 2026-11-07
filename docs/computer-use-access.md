@@ -8,7 +8,7 @@ Most a dashboard (`src/web/computer-use-access.ts`) így kezeli:
 2. **Kérdés a tulajnak.** Létrejön egy `computer_use_access` kategóriájú jóváhagyás 10 perces lejárattal, és Péter Telegram-üzenetet kap az appokkal és két gombbal: **Engedélyezem** / **Elutasítom**. A várakozás alatt a menüfigyelő nem küld Escape-et erre a dialógusra.
 3. **Döntés.** Csak Péter gombja dönthet. Ennél a kategóriánál a döntés kizárólag a patchelt Telegram-plugin `approval-callbacks.jsonl` sorából jöhet, amely a valódi Telegram-frissítés `from.id`-jét és a nonce-ot hordozza. A többi út elutasítja:
    - a `/approvals` szöveges parancs;
-   - a `POST /api/approvals/:id/telegram-decision` (ott a `from_id` a hívótól jön);
+   - a `POST /api/approvals/:id/telegram-decision` (ez a route semmilyen kategóriánál nem dönt);
    - a dashboard `PATCH`-e;
    - a `POST /api/approvals` ilyen kategóriával;
    - a GET-ek a nonce-ot sem adják ki.
