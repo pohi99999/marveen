@@ -5,13 +5,18 @@
 // to another install. Without the install check here, a second checkout started on the same port stopped the live
 // dashboard, although the startup path had just logged "belongs to a different install, leaving alone".
 //
-// A holder is taken over only when it is proven ours: this UID, a node or tsx process, and this install by its argv and
-// cwd. What cannot be read is left alone: a port we fail to get ends in a loud exit, a stranger's dashboard stopped is
+// A holder is taken over only when it is proven ours: this UID, a node or tsx program, and THIS install's dashboard
+// entry. What cannot be read is left alone: a port we fail to get ends in a loud exit, a stranger's dashboard stopped is
 // silent damage.
+//
+// Stricter than process-lock.ts argvBelongsToInstall on purpose: that one also accepts an argv that merely names our
+// path, or a cwd below the root. Here the entry itself must be ours: its absolute path, or `dist/index.js` run from
+// exactly the root. Paths are compared as written, so a root reached through a symlink, or with a space in it, proves
+// nothing and is left alone.
 import { execFileSync } from 'node:child_process'
 import { readlinkSync } from 'node:fs'
+import { basename } from 'node:path'
 import { runLsof } from '../lsof.js'
-import { argvBelongsToInstall } from '../process-lock.js'
 
 export interface PortHolderProbe {
   comm(pid: number): string | null
@@ -22,6 +27,22 @@ export interface PortHolderProbe {
 
 export interface PortReclaimLog {
   warn(obj: Record<string, unknown>, msg: string): void
+}
+
+const ABSOLUTE_ENTRY = /\/(?:dist\/index\.js|src\/index\.ts)$/
+const RELATIVE_ENTRY = /^(?:\.\/)?(?:dist\/index\.js|src\/index\.ts)$/
+
+/** Whether this argv runs this install's dashboard. `cwdOf` is lazy: lsof on macOS. */
+export function runsThisDashboard(argv: string, projectRoot: string, cwdOf: () => string | null): boolean {
+  const tokens = argv.split(/\s+/)
+  const absolute = tokens.filter((t) => t.startsWith('/') && ABSOLUTE_ENTRY.test(t))
+  if (absolute.length > 0) return absolute.some((t) => t.startsWith(projectRoot + '/') && !t.includes('/node_modules/'))
+  return tokens.some((t) => RELATIVE_ENTRY.test(t)) && cwdOf() === projectRoot
+}
+
+/** The program's own name: macOS `ps -o comm=` gives the full path, and a directory named node proves nothing. */
+export function isNodeProgram(comm: string): boolean {
+  return /^(?:node(?:js)?\d*|tsx)$/i.test(basename(comm))
 }
 
 export function portReclaimVictims(
@@ -35,12 +56,12 @@ export function portReclaimVictims(
     const comm = probe.comm(pid)
     if (comm === null) continue
     if (uid !== null && probe.uid(pid) !== uid) continue
-    if (!/node|tsx/i.test(comm)) {
+    if (!isNodeProgram(comm)) {
       log.warn({ port, pid, cmd: comm }, 'Port held by non-node process -- refusing to kill')
       continue
     }
     const argv = probe.argv(pid)
-    if (argv === null || !argvBelongsToInstall(argv, projectRoot, () => probe.cwd(pid))) {
+    if (argv === null || !runsThisDashboard(argv, projectRoot, () => probe.cwd(pid))) {
       log.warn({ port, pid }, 'Port held by a process of another install -- refusing to kill')
       continue
     }
@@ -54,7 +75,8 @@ export function reclaimPortHolders(
   port: number,
   opts: { projectRoot: string; log: PortReclaimLog; selfPid?: number; probe?: PortHolderProbe },
 ): number[] {
-  const raw = (runLsof(['-ti', `:${port}`], 3000) ?? '').trim()
+  // Listeners only: a bare `-ti :port` also names every client connected to the port.
+  const raw = (runLsof(['-tiTCP:' + port, '-sTCP:LISTEN'], 3000) ?? '').trim()
   const pids = raw.split('\n').map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n) && n > 0)
   const victims = portReclaimVictims(pids, {
     port,
