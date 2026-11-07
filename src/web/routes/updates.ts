@@ -5,7 +5,9 @@ import { join } from 'node:path'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { PROJECT_ROOT, STORE_DIR } from '../../config.js'
+import { readConflictGuard } from '../../update-conflict-guard.js'
 import { logger } from '../../logger.js'
+import { generatedDriftPaths, runInstallDriftRepair, withoutGeneratedDrift } from '../../install-drift-repair.js'
 import {
   getUpdateStatus, refreshUpdateStatus,
 } from '../update-checker.js'
@@ -67,7 +69,8 @@ export async function tryHandleUpdates(ctx: RouteContext): Promise<boolean> {
   const { res, req, path, method } = ctx
 
   if (path === '/api/updates' && method === 'GET') {
-    json(res, getUpdateStatus())
+    // UPDATECONFLICT1105: what start.sh's conflict guard found after the last update (null when nothing).
+    json(res, { ...getUpdateStatus(), conflictGuard: readConflictGuard(STORE_DIR) })
     return true
   }
 
@@ -286,9 +289,21 @@ export async function tryHandleUpdates(ctx: RouteContext): Promise<boolean> {
         }
       },
     }
+    // INSTALLDIRTYTREE1103: the install's own tracked-file drift must not block the
+    // update (or send it down the stash path). The dashboard only ASKS (dry run,
+    // no file written while the services run -- Samu 67345 (A)); the preflight
+    // ignores exactly those paths, and update.sh restores them before its own
+    // dirty guard, in the run that ends with a restart.
+    const drift = await runInstallDriftRepair(PROJECT_ROOT, undefined, { dryRun: true })
+    if (drift.results.length > 0 || drift.error) logger.info({ drift }, 'install-drift-repair dry run before the update preflight')
+    const generated = generatedDriftPaths(drift)
+    const preflightGit: GitRunner = generated.size === 0 ? git : {
+      ...git,
+      porcelainStatus: async () => withoutGeneratedDrift(await git.porcelainStatus(), generated),
+    }
     let preflight
     try {
-      preflight = await checkUpdatePreflight(git)
+      preflight = await checkUpdatePreflight(preflightGit)
     } catch (err) {
       releaseLock()
       json(res, {

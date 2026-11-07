@@ -150,7 +150,8 @@ describe('the builders', () => {
     expect(cmd.endsWith(failClosedGateRun(`"${HOOK_NODE_BIN}" "/some/dir/gate.mjs"`, 'gate.mjs', 10))).toBe(true)
     const py = pythonHookCommand('/some/dir/gate.py')
     expect(py).toMatch(/^command -v python3 >\/dev\/null 2>&1 \|\| /)
-    expect(py.endsWith(failClosedGateRun('python3 "/some/dir/gate.py"', 'gate.py', 10))).toBe(true)
+    // SITEPKGPLANT1104 (1): the gate runs isolated (-I -S): no start-up code from site-packages or the user site
+    expect(py.endsWith(failClosedGateRun('python3 -I -S "/some/dir/gate.py"', 'gate.py', 10))).toBe(true)
   })
 
   // a62a27ce: four seconds, not two -- a hung gate under `timeout -k 1 8` ended at 11.6 s in one run of
