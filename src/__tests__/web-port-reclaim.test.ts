@@ -164,6 +164,7 @@ describe('runsThisDashboard', () => {
     ['node dist/index.js /inst/x', '/other', false],
     ['node dist/index.js', '/inst/agents/x', false],
     ['node dist/index.js', '/inst2', false],
+    ['node /inst2/dist/index.js', '/else', false],
     ['node dist/index.js', null, false],
     ['node /inst/scripts/tool.js', '/inst', false],
     ['node server.js', '/inst', false],
