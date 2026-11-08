@@ -26,7 +26,7 @@ import {
   buildBackgroundCheckpointBodyEn, buildSkillsPathTrapBodyEn, buildSystemDirectiveAuthBodyEn, buildAgentIdHeaderBodyEn,
   buildMemorySearchLabelBodyEn, buildFleetAuthBodyEn, buildStrictApiBodyEn, buildApiHelperBodyEn,
   type PromptRecipes, strictPromptRecipesEn, SKILL_SECTION_HEADING_EN, buildSkillSectionEn, buildClaudeMdPromptEn,
-  buildSoulPromptEn, buildSkillPromptEn, PRECOMPACT_PROMPT_EN_TPL,
+  buildSoulPromptEn, buildSkillPromptEn, PRECOMPACT_PROMPT_EN_TPL, SKILLS_TRAP_HEADING_EN,
 } from './agent-scaffold-en.js'
 import { EXTRA_HOOKS_FILE, applyExtraHookEntries, extraHooksDigest, loadExtraHookEntries, type ExtraHookDeps } from './extra-hook-entries.js'
 
@@ -3946,11 +3946,16 @@ export function recipientLedgerEnabledForScaffold(): boolean {
 // ledger for the main agent too (its approval gate and the project's own
 // senders check every recipient), and the paragraph then says so: the text
 // must stay true for the install it is written into.
+// FORK: the English twin of the ledger-off paragraph below (the same code spans; generated-sections-en.test.ts pins it).
+const LEDGER_OFF_PARAGRAPHS_EN: string[] = [
+  'On this install the recipient ledger (`store/verified-recipients.json`) is switched OFF (`EMAIL_RECIPIENT_LEDGER=off` in the root `.env`, owner decision 2026-09-23): the PreToolUse hook does NOT check the `to`/`cc`/`bcc` addresses of an outgoing email against a ledger, so a letter or a draft can go to anyone. The source rule is not weakened by this: an address still comes from a source (From header, live site, order, contract), and you name the source in the note with the letter or on the card. If the switch is turned back on, adding the addresses:',
+]
+
 // FORK: with EMAIL_RECIPIENT_LEDGER=off the ledger gate is off for EVERY audience, so both
 // get the same switched-off paragraph; with it on, upstream's split applies (main with MAIN_AGENT_RECIPIENT_LEDGER=1,
 // main without it, sub-agent). `mainLedger` is upstream's switch, see below.
 export function buildEvidenceBody(isMainAgent = false, ledgerOn: boolean = recipientLedgerEnabledForScaffold(), mainLedger = mainAgentRecipientLedgerEnabled()): string {
-  if (agentTextLang() === 'en') return buildEvidenceBodyEn(isMainAgent, mainLedger, scaffoldFrags(MAIN_AGENT_ID))
+  if (agentTextLang() === 'en') return buildEvidenceBodyEn(isMainAgent, mainLedger, scaffoldFrags(MAIN_AGENT_ID), ledgerOn ? undefined : LEDGER_OFF_PARAGRAPHS_EN)
   const gateParagraphs: string[] = !ledgerOn
     ? [
         'Ezen a telepítésen a címzett-ledger (`store/verified-recipients.json`) KI van kapcsolva (`EMAIL_RECIPIENT_LEDGER=off` a gyökér `.env`-ben, tulajdonosi döntés 2026-09-23): a kimenő levél `to`/`cc`/`bcc` címeit a PreToolUse hook NEM méri ledgerhez, bárkinek írható levél és piszkozat. A forrás-szabály ettől nem gyengül: a cím továbbra is forrásból jön (From fejléc, élő oldal, rendelés, szerződés), és a forrást a levél kísérőjében vagy a kártyán nevezd meg. Ha a kapcsolót visszaveszik, a címek felvétele:',
@@ -4337,10 +4342,41 @@ const SKILLS_TRAP_BLOCK_RE = new RegExp(
   `${SKILLS_TRAP_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${SKILLS_TRAP_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
 )
 
+// FORK: the English twin of the one-tree body below (SKILLSGIT914), line for line, with the same code spans.
+function buildForkSkillsPathTrapBodyEn(): string {
+  return [
+    SKILLS_TRAP_HEADING_EN,
+    '',
+    'The fleet\'s skills have ONE source, the repo root\'s `.claude/skills` tree: a',
+    'clone of the PRIVATE marveen-skills git repo (the marveen fork is public, so the skills',
+    'cannot live in it). Claude reads the project skills from your working directory up to the git',
+    'root, so this tree is visible to YOU TOO, from the agents/<name> cwd as well.',
+    'There is NO global `~/.claude/skills` and NO per-agent `.claude/skills` copy:',
+    'whatever goes there reaches nobody, and next to the tree it causes a double listing.',
+    'A new or fixed skill: under the repo root\'s `.claude/skills/<name>/`, then',
+    `\`git -C ${PROJECT_ROOT}/.claude/skills add -A && git commit && git push\``,
+    '(AGENT.md 2/A: push right after the commit; the pre-commit secret-gate runs). What the',
+    'fleet should not see is not a skill but a memory. (SKILLSGIT914, 2026-09-14.)',
+    '',
+    'The same trap holds for MEMORY: `.claude-config/projects` can be a symlink',
+    'to `~/.claude/projects`. Do NOT derive which memory folder is yours from the',
+    'name of your working directory: what counts is the path GIVEN in the memory section of the system prompt,',
+    'resolved with `readlink -f`. On a git-checkout install (the default case)',
+    'Claude Code keys it by the REPO ROOT: if the resolved path is the folder under',
+    '`~/.claude/projects/` keyed by the slug of the install root,',
+    'then it is the main agent\'s, and whatever goes there is loaded by the main agent and by every',
+    'agent session that gets the same folder. It is yours if the resolved path is in the real folder of your own',
+    '`.claude-config`, or if the slug of your own folder is in it',
+    '(an own stub git repo, or an install without git). The place of a memory that belongs',
+    'to you alone is the dashboard API regardless (`POST /api/memories`,',
+    'with `agent_id`).',
+  ].join('\n')
+}
+
 // FORK: the body is the same for every agent (SKILLSGIT914: one tree, no global dir, no per-agent copy), so the
 // agent name upstream passes is accepted and not used.
 export function buildSkillsPathTrapBody(_name?: string): string {
-  if (agentTextLang() === 'en') return buildSkillsPathTrapBodyEn(_name === MAIN_AGENT_ID)
+  if (agentTextLang() === 'en') return buildForkSkillsPathTrapBodyEn()
   return [
     '## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)',
     '',
@@ -5426,6 +5462,42 @@ Minden kontextus-tömörítés előtt (PreCompact hook) automatikusan vizsgáld 
 - Van-e meglévő skill amit javítani kellene?`
 }
 
+// FORK: the English twin of the creation prompt's one-tree skill section (the Hungarian one is inline in
+// generateClaudeMd: "## Öntanulás és Skill rendszer"). The mkdir line is the Hungarian prompt's, byte for byte.
+function buildForkSkillSectionEn(): string {
+  return `${SKILL_SECTION_HEADING_EN}
+
+You are a self-improving agent. You learn as you work, and you create reusable skills.
+
+### Where skills live
+- ONE tree: the repo root's .claude/skills/ (a clone of the private marveen-skills git repo; every agent sees it, from the agents/<name> cwd too)
+- TRAP: ~/.claude/skills and agents/<name>/.claude/skills do NOT exist any more -- whatever goes there reaches nobody; a skill goes into the tree, commit + push
+
+### Automatic skill generation
+After complex tasks (5+ tool calls, recovery after an error, user correction, multi-step workflow) create a SKILL.md file automatically:
+
+mkdir -p ${PROJECT_ROOT}/.claude/skills/SKILL-NEV   # majd: git -C ${PROJECT_ROOT}/.claude/skills add -A && git commit && git push
+The SKILL.md has a YAML frontmatter (name, description), then sections: When to use, Procedure, Pitfalls, Verification.
+
+### Skill patch (runtime fix)
+If you find a better way while using an existing skill:
+1. Do not rewrite the whole skill, fix only the changed part
+2. Use a targeted replacement (old text -> new text)
+3. Note the reason for the change in the Pitfalls section of the skill
+
+### When to generate a skill?
+- 5+ tool calls, successful finish: Generate a skill
+- Error -> recovery -> success: Generate a skill (with a pitfalls section)
+- User correction: Patch the existing skill
+- Non-trivial workflow: Generate a skill
+- Simple, one-step task: Generate nothing
+
+### Skill reflection
+Before every context compaction (PreCompact hook) check automatically:
+- Is there a reusable pattern in the session?
+- Is there an existing skill that should be fixed?`
+}
+
 export async function generateClaudeMd(name: string, description: string, model: string): Promise<string> {
   // Distribution-safe default-drive line: only emit a concrete folder when this
   // install has one configured (OWNER_DRIVE_FOLDER). A fresh install with no
@@ -5460,7 +5532,8 @@ export async function generateClaudeMd(name: string, description: string, model:
   const prompt = agentTextLang() === 'en'
     ? buildClaudeMdPromptEn({
         name, description, model, ownerName: OWNER_NAME, appTz: APP_TZ, driveFolder: ownerDriveFolder,
-        agentsDir: join(PROJECT_ROOT, 'agents'), helper, R, skillSection: buildSkillSection(helper ? name : undefined, tokenPath),
+        // FORK: the creation prompt's skill section is the one-tree text (SKILLSGIT914), as in the Hungarian prompt below.
+        agentsDir: join(PROJECT_ROOT, 'agents'), helper, R, skillSection: buildForkSkillSectionEn(),
         f: scaffoldFrags(name),
       })
     : `You are creating the CLAUDE.md (project instructions) file for an AI agent.

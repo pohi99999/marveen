@@ -182,8 +182,10 @@ export function buildAutonomyBodyEn(name: string, helper: boolean, strict: boole
 }
 
 // ---- evidence-rule ----
-export function buildEvidenceBodyEn(isMainAgent: boolean, mainLedger: boolean, f: ScaffoldFrags): string {
-  const gateParagraphs: string[] = isMainAgent && mainLedger
+// FORK: gateOverride carries the fork's ledger-off paragraph (EMAIL_RECIPIENT_LEDGER=off), the twin of the Hungarian
+// one in agent-scaffold.ts buildEvidenceBody; without it upstream's three-way split applies unchanged.
+export function buildEvidenceBodyEn(isMainAgent: boolean, mainLedger: boolean, f: ScaffoldFrags, gateOverride?: string[]): string {
+  const gateParagraphs: string[] = gateOverride ? gateOverride : isMainAgent && mainLedger
     ? [
         'For outgoing email the recipient ledger (`store/verified-recipients.json`) **is a machine gate for you too**: this install switched it on (`MAIN_AGENT_RECIPIENT_LEDGER=1` in `.env`). The approval gate checks the recipients of every send, draft and Bash send against the ledger before any approval is consumed, and the project\'s own senders deliver only to an address in the ledger, the owner CC included. What the gate does not see is an address locked inside a script: that one is held by the rule, not the machine.',
         '',

@@ -490,21 +490,23 @@ describe('the retired path of the English text (EGM review Major 2): per languag
 
 // STALENESS GUARD. A Hungarian body changed? Bring its English twin in src/web/agent-scaffold-en.ts along, then
 // update the hash here (the failing test prints the new one). The hash covers every branch combination above.
+// FORK: evidence, skills-path-trap and claude-md-prompt hash the fork's Hungarian bodies (ledger-off, SKILLSGIT914);
+// their English twins are the FORK blocks in agent-scaffold.ts.
 const HU_SOURCE_HASHES: Record<string, string> = {
   'agent-id-header': '44f5248d7fc36cbc',
   'api-helper': 'a70dbd6e315bb59e',
   'autonomy': '728210d786c75e11',
   'background-checkpoint': '04505f8789507f70',
-  'evidence': '9dff6e8bd9b8d64c',
+  'evidence': 'bb88050dd1cff21d',
   'fleet-auth': '93c48bc9916ec0da',
   'fleet-roster': '4849b0f0ec0dab70',
   'skill-section': 'ccb3df74b18e6c8f',
-  'claude-md-prompt': '47a4cd6b4097e6be',
+  'claude-md-prompt': '2440ba408cc028c5',
   'precompact-prompt': 'ba0d64daf27b1316',
   'mcp-list-channel': 'a7ccf3ed2f0ca342',
   'memory-search-label': '9ddf9811134c353e',
   'message-close': '835ee6c92d6e0a7a',
-  'skills-path-trap': '76b7632b730c8120',
+  'skills-path-trap': '073cd572d4fb4a86',
   'strict-api': 'e619c666af284fec',
   'system-directive-auth': '2267241c76f696aa',
 }
