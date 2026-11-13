@@ -23,7 +23,8 @@ setup '"[2026-10-22 16:53:40.957 +0200] WARN (86607): Keychain migration failed,
 out="$(GOOD_SECRET=vault:label bash "$T/scripts/vault-env-wrapper.sh" printenv GOOD_SECRET 2>"$T/err")"; rc=$?
 [ "$rc" -eq 0 ] && ok "(a) exit 0 with a log line on the resolver's stdout" || bad "(a) exit $rc (expected 0)"
 [ "$out" = "fixture-value-1" ] && ok "(a) the secret still reaches the command" || bad "(a) the command saw '$out'"
-grep -q "2 non KEY=value line(s)" "$T/err" && ok "(a) the skip is counted on stderr" || bad "(a) no skip count on stderr: $(cat "$T/err")"
+# upstream VAULTWRAPMULTI1108 reports every skipped line on its own (no count), quoting nothing of it
+[ "$(grep -c "skipped an output line that is not NAME=value" "$T/err")" = "2" ] && ok "(a) both skips are reported on stderr" || bad "(a) the two skips are not reported: $(cat "$T/err")"
 grep -q "Keychain migration" "$T/err" && bad "(a) the skipped line's content was echoed" || ok "(a) the skipped line's content is not echoed"
 
 # (b) only KEY=value lines: unchanged

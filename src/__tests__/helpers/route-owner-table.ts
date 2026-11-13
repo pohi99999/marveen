@@ -18,6 +18,7 @@ export const UNGATED_ROUTES: ReadonlyArray<{ key: string; cls: RouteClass; why: 
   { key: "agents.ts POST <drainMatch>", cls: "agent", why: "agent lifecycle: drain" },
   { key: "agents.ts POST <restartMatch>", cls: "agent", why: "agent lifecycle: the main agent restarts agents" },
   { key: "approvals.ts POST <consumeMatch>", cls: "agent", why: "an agent consumes its own approved request (single use, bound to the grantee)" },
+  { key: "approvals.ts POST <decMatch>", cls: "by-design", why: "fork #50: refuses every caller with 403 and changes nothing; the owner decides only by the Telegram button or command" },
   { key: "auth.ts POST /api/auth/login", cls: "own-check", why: "the caller's own session or credential (login, logout); a password change refuses the token" },
   { key: "auth.ts POST /api/auth/logout", cls: "own-check", why: "the caller's own session or credential (login, logout); a password change refuses the token" },
   { key: "auth.ts POST /api/auth/logout-all", cls: "own-check", why: "the caller's own session or credential (login, logout); a password change refuses the token" },

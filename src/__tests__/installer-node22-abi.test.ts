@@ -174,7 +174,8 @@ describe('install-macos.sh: the native module must be built for the SERVICE node
     const modules = mkdtempSync(join(tmpdir(), 'marveen-node-path-'))
     const { nodes } = runNpmInstallStep({ NODE_PATH: modules })
 
-    const install = nodes.find((l) => l.startsWith('install'))
+    // upstream INSTALLDIRTYTREE1103: the step is `npm ci` first, `npm install` only as the fallback (as on line 154)
+    const install = nodes.find((l) => l.startsWith('ci ') || l.startsWith('install'))
     const rebuild = nodes.find((l) => l.includes('rebuild') && l.includes('better-sqlite3'))
 
     expect(install, `npm install never ran; saw: ${JSON.stringify(nodes)}`).toContain('node22')

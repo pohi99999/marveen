@@ -87,6 +87,8 @@ vi.mock('../web/agent-config.js', () => ({
 }))
 
 vi.mock('../web/agent-process.js', () => ({
+  // upstream v1.49: the router batches its tmux reads (same stub as the upstream mocks)
+  withTmuxBatch: (fn: () => unknown) => fn(),
   agentSessionName: (name: string) => `agent-${name}`,
   isSessionReadyForPrompt: (...a: unknown[]) => mockIsSessionReadyForPrompt(...a),
   // Upstream v1.35.1 added this ahead of the janitor inside the not-ready

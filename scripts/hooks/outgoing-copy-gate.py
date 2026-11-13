@@ -4071,7 +4071,7 @@ def inter_agent_homoglyph_gate(cmd: str) -> None:
                "lett vizsgalva: homoglifa nincs benne. Az uzenet ATMENT; ami futasidoben kerul a fajlba "
                "(nem a parancs szovegebol), az homoglifa-ellenorzes NELKUL ment.")
         _gate_log(msg)
-        print(json.dumps({"systemMessage": msg}))
+        print(pass_with_warning(msg))
     sys.exit(0)
 
 
