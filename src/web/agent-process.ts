@@ -1776,7 +1776,14 @@ export function resolveProviderEnv(
       // the native ollama API. Empty AGENT_LOCAL_BASE_URL falls back to
       // OLLAMA_URL, so nothing changes for an install whose local agent really
       // is ollama.
-      exportsStr: `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${AGENT_LOCAL_BASE_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && `,
+      //
+      // CLAUDE_CODE_DISABLE_1M_CONTEXT=1: from Claude Code 2.1.323 a model id the
+      // CLI does not recognize (every local tag, e.g. `gemma4:12b`) is assumed to
+      // have a 1M window instead of 200K. A local model does not get a 1M window
+      // from that guess, so auto-compact would wait for a limit the model never
+      // had and, per the 2.1.323 changelog, such a session "can fail every turn
+      // until /clear". The changelog names this variable as the way to keep 200K.
+      exportsStr: `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${AGENT_LOCAL_BASE_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && export CLAUDE_CODE_DISABLE_1M_CONTEXT=1 && `,
     }
   }
   return { provider: 'claude', exportsStr: '' }

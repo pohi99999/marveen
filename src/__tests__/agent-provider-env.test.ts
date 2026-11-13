@@ -64,6 +64,18 @@ describe('resolveProviderEnv', () => {
     expect(r.exportsStr).toContain(`ANTHROPIC_MODEL='qwen3.6:27b'`)
   })
 
+  it('caps the context window for an Ollama tag with CLAUDE_CODE_DISABLE_1M_CONTEXT=1 -- from Claude Code 2.1.323 an unrecognized model id is assumed to be 1M', () => {
+    const r = resolveProviderEnv('gemma4:12b', () => null)
+    expect(r.provider).toBe('ollama')
+    // Exact token, chained like the other exports, so a typo or a dropped `&&` also fails.
+    expect(r.exportsStr).toContain(' && export CLAUDE_CODE_DISABLE_1M_CONTEXT=1 && ')
+  })
+
+  it('does NOT set CLAUDE_CODE_DISABLE_1M_CONTEXT for a claude- model -- the Anthropic models keep their own [1m] choice', () => {
+    const r = resolveProviderEnv('claude-opus-5-5', () => null)
+    expect(r.exportsStr).not.toContain('CLAUDE_CODE_DISABLE_1M_CONTEXT')
+  })
+
   it('a titok ERTEKE sosem jut el a fuggvenyig: ami athalad, az hivatkozas (LATENSKULCSARGV920)', () => {
     // NEGATIV KONTROLL a javitas lenyegere. A hivo `launchSecretRef`-et ad at, ami FAJLBA teszi a
     // titkot; ide mar csak a `$(cat ...)` alak jon. Ha valaki visszaallitana az ertek-atadast, ez
