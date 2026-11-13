@@ -849,8 +849,11 @@ export PATH="$HOME/.local/bin:$PATH"
 _claude_runs() {
   command -v claude >/dev/null 2>&1 || return 1
   local probe_cfg rc
-  probe_cfg="$(mktemp -d 2>/dev/null || echo "/tmp/claude-probe-$$")"
-  mkdir -p "$probe_cfg"
+  # TMPPROBE1108 (Dani 73504): no fixed /tmp fallback name. The probe hands the dir to claude as CLAUDE_CONFIG_DIR,
+  # and a predictable one another local user created first could carry a settings.json whose hooks run commands.
+  # Without a private dir there is no probe: counted as "does not run" (the step then says so).
+  probe_cfg="$(mktemp -d 2>/dev/null)" || probe_cfg=""
+  [ -n "$probe_cfg" ] && [ -d "$probe_cfg" ] || return 1
   env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
     CLAUDE_CONFIG_DIR="$probe_cfg" DISABLE_AUTOUPDATER=1 \
     timeout "${CLAUDE_PROBE_TIMEOUT:-25}" claude -p 'ping' --max-turns 1 --output-format json \
@@ -874,6 +877,119 @@ _shelve_broken_claude() {
     warn "A mar telepitett claude ($p) AVX nelkul nem indul, es nem tudtam felretenni -- a pinnelt verziot arnyekolhatja."
   fi
   hash -r
+}
+
+# BUNTIMEOUT1108: the vendors' "curl | bash" installers (Claude Code, Bun) ran with no time limit and with their
+# errors thrown away (`2>/dev/null`). On 2026-11-08 a fresh Bun download on the owner's VPS stalled: ~/.bun/bin was
+# created empty, the installer never got past the step, and the Bridge showed only "Claude + Bun". This helper fetches
+# the vendor script to a file (connect and total time limits), runs it under `timeout` (its own downloads included:
+# timeout signals the whole process group), retries, and on the final failure prints the vendor's own last lines, so
+# the reason is visible. It never decides the outcome by the script's exit code alone: $3 is the check that the tool
+# is really there (a vendor script can exit 0 without installing).
+#   _run_remote_installer <label> <url> <check-fn> [script args...]   -> 0 when <check-fn> passes, else 1
+_run_remote_installer() {
+  local label="$1" url="$2" check="$3"
+  shift 3
+  local tries="${REMOTE_INSTALL_TRIES:-3}" n=1 rc dir script log
+  # No fixed /tmp fallback name: the installer runs as root, and a predictable path that it fills and then runs could
+  # be replaced by another local user (Dani 73434). Without a private temp dir the step stops.
+  if ! dir="$(mktemp -d 2>/dev/null)" || [ -z "$dir" ]; then
+    warn "$label: nem tudtam privat ideiglenes konyvtarat letrehozni (mktemp -d)."
+    return 1
+  fi
+  script="$dir/install.sh"
+  log="$dir/install.log"
+  while [ "$n" -le "$tries" ]; do
+    : > "$log"
+    rc=0
+    if curl -fsSL --connect-timeout "${REMOTE_INSTALL_CONNECT_TIMEOUT:-20}" --max-time "${REMOTE_INSTALL_FETCH_TIMEOUT:-60}" \
+         -o "$script" "$url" 2>>"$log"; then
+      if timeout --kill-after=10 "${REMOTE_INSTALL_TIMEOUT:-300}" bash "$script" "$@" </dev/null >>"$log" 2>&1; then
+        rc=0
+      else
+        rc=$?
+      fi
+    else
+      rc=$?
+      echo "(the installer script could not be downloaded from $url, curl exit $rc)" >>"$log"
+    fi
+    hash -r
+    if "$check"; then
+      rm -rf "$dir"
+      return 0
+    fi
+    if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+      warn "$label: a(z) $n/$tries. probalkozas tullepte az idokorlatot (${REMOTE_INSTALL_TIMEOUT:-300} mp)."
+    else
+      warn "$label: a(z) $n/$tries. probalkozas sikertelen (kilepesi kod: $rc)."
+    fi
+    n=$((n + 1))
+    if [ "$n" -le "$tries" ]; then sleep "${REMOTE_INSTALL_RETRY_DELAY:-5}"; fi
+  done
+  echo -e "  ${DIM}$label telepito utolso sorai:${NC}"
+  tail -n 15 "$log" 2>/dev/null | sed 's/^/    /'
+  rm -rf "$dir"
+  return 1
+}
+_claude_present() { command -v claude >/dev/null 2>&1; }
+_bun_present() { [ -x "$BUN_INSTALL/bin/bun" ] && "$BUN_INSTALL/bin/bun" --version >/dev/null 2>&1; }
+
+# BUNTIMEOUT1108 (Samu 73430): the fallback when the GitHub release download fails. Measured on the owner's VPS on
+# 2026-11-08: bun.sh/install answered 200, the GitHub bun-linux-x64.zip timed out (0 bytes in 90 s) and then gave
+# HTTP 503, twice in a row. npm's `bun` package comes from registry.npmjs.org instead. Same version as the Docker image
+# (Dockerfile BUN_VERSION; a test pins the two together). The binary is linked into ~/.bun/bin, the official layout
+# every PATH line and probe of ours already names.
+BUN_PIN="1.4.4"
+_install_bun_from_npm() {
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "Bun (npm tartalek): az npm nem elerheto."
+    return 1
+  fi
+  ensure_global_npm_writable auto || true
+  local log rc=0 npm_prefix npm_bun real
+  if ! log="$(mktemp 2>/dev/null)" || [ -z "$log" ]; then
+    warn "Bun (npm tartalek): nem tudtam privat ideiglenes fajlt letrehozni (mktemp)."
+    return 1
+  fi
+  if [ "${NPM_NEEDS_SUDO:-}" = "1" ]; then
+    timeout --kill-after=10 "${REMOTE_INSTALL_TIMEOUT:-300}" sudo npm install -g "bun@${BUN_PIN}" </dev/null >"$log" 2>&1 || rc=$?
+  else
+    timeout --kill-after=10 "${REMOTE_INSTALL_TIMEOUT:-300}" npm install -g "bun@${BUN_PIN}" </dev/null >"$log" 2>&1 || rc=$?
+  fi
+  hash -r
+  # The bun this npm install put in, by npm's own prefix: `command -v bun` could name an older bun earlier on PATH
+  # (Dani 73434).
+  # An empty prefix would make this "/bin/bun", on a merged-/usr system possibly a distro bun (Dani 73504): no prefix,
+  # no link.
+  npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+  npm_bun="${npm_prefix:+$npm_prefix/bin/bun}"
+  if [ "$rc" = 0 ] && [ -n "$npm_bun" ] && [ -x "$npm_bun" ] && "$npm_bun" --version >/dev/null 2>&1; then
+    real="$(readlink -f "$npm_bun" 2>/dev/null || echo "$npm_bun")"
+    mkdir -p "$BUN_INSTALL/bin"
+    ln -sf "$real" "$BUN_INSTALL/bin/bun"
+    ln -sf bun "$BUN_INSTALL/bin/bunx"
+    rm -f "$log"
+    return 0
+  fi
+  warn "Bun (npm tartalek): sikertelen (kilepesi kod: $rc)."
+  echo -e "  ${DIM}Bun (npm tartalek) utolso sorai:${NC}"
+  tail -n 15 "$log" 2>/dev/null | sed 's/^/    /'
+  rm -f "$log"
+  return 1
+}
+# The official installer (bun.sh/install, which downloads from GitHub releases) first, npm as the fallback; a stop with
+# the reason when both fail. Never a hang and never a silent "continue without bun".
+_install_bun() {
+  if _run_remote_installer "Bun (GitHub-letoltes)" https://bun.sh/install _bun_present; then
+    ok "bun telepitve: $("$BUN_INSTALL/bin/bun" --version 2>/dev/null)"
+    return 0
+  fi
+  warn "A Bun GitHub-letoltese nem sikerult; tartalek: npm install -g bun@${BUN_PIN} (registry.npmjs.org)."
+  if _install_bun_from_npm && _bun_present; then
+    ok "bun telepitve (npm tartalek): $("$BUN_INSTALL/bin/bun" --version 2>/dev/null)"
+    return 0
+  fi
+  fail "A Bun telepitese nem sikerult: a GitHub-letoltes (bun.sh/install) es az npm-tartalek (bun@${BUN_PIN}) is bukott, az okot a fenti sorok mutatjak. Ellenorizd, hogy a gep eleri-e a github.com-ot vagy a registry.npmjs.org-ot, majd inditsd ujra a telepitest."
 }
 
 # Pinned Node-based fallback for AVX-less hosts. @2.1.112 is the LAST version
@@ -918,13 +1034,20 @@ else
       fi
     else
       warn "npm nem elerheto; a pinnelt hivatalos installert probalom (@${CLAUDE_PIN})."
-      curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_PIN}" || warn "pinnelt install.sh sikertelen."
+      _run_remote_installer "Claude Code (@${CLAUDE_PIN})" https://claude.ai/install.sh _claude_present "${CLAUDE_PIN}" \
+        || warn "pinnelt install.sh sikertelen."
     fi
   else
     echo -e "  Claude Code telepitese (hivatalos installer, ~/.local/bin)..."
-    curl -fsSL https://claude.ai/install.sh | bash
+    _run_remote_installer "Claude Code" https://claude.ai/install.sh _claude_present || true
   fi
   hash -r
+  # BUNTIMEOUT1108: no claude at all after the installer (and its retries) is a hard stop with the reason above,
+  # not a "continue" into a claude-auth step that can never work. A claude that is there but does not launch keeps
+  # the existing AVX message below.
+  if ! _claude_present; then
+    fail "A Claude Code telepitese nem sikerult (a fenti sorok mutatjak az okat). Inditsd ujra a telepitest; ha ugyanitt akad el, ellenorizd, hogy a gep eleri-e a claude.ai-t (AVX nelkuli gepen a registry.npmjs.org-ot)."
+  fi
   # Verify the install actually launches -- surfaces an AVX crash HERE with a
   # clear message instead of a cryptic SIGILL at first agent-spawn.
   if _claude_runs; then
@@ -979,25 +1102,10 @@ fi'
   ok "XDG_RUNTIME_DIR / DBUS beallitva (headless)"
 fi
 
-# Bun
+# Bun: no longer here. GROMZONOPROVIDER1108: it is installed after the channel choice ("bun-install" below), and only
+# for a channel whose plugin runs on Bun (telegram, discord). A Gromzo or Slack install never downloads it.
 export BUN_INSTALL="$HOME/.bun"
 export PATH="$BUN_INSTALL/bin:$PATH"
-if command -v bun &>/dev/null; then
-  ok "bun mar telepitve: $(bun --version)"
-else
-  # unzip -- a Bun hivatalos telepitoje ezzel csomagolja ki a binarist; nincs alapertelmezetten telepitve friss WSL distrokon,
-  # nelkule "error: unzip is required to install bun"-nal elhasal.
-  command -v unzip &>/dev/null || pkg_install_noninteractive unzip || true
-  echo -e "  Bun telepitese (Telegram plugin fuggoseg)..."
-  curl -fsSL https://bun.sh/install | bash 2>/dev/null
-  if ! command -v bun &>/dev/null; then
-    echo -e "  ${RED}✗${NC} Bun telepites sikertelen. Probalj manualisan: curl -fsSL https://bun.sh/install | bash"
-  else
-    ok "bun telepitve"
-  fi
-fi
-ensure_in_rc 'BUN_INSTALL' 'export BUN_INSTALL="$HOME/.bun"'
-ensure_in_rc '.bun/bin' 'export PATH="$BUN_INSTALL/bin:$PATH"'
 
 INSTALL_STEP="claude-auth"
 # ─────────────────────────────────────────────
@@ -1255,13 +1363,21 @@ echo -e "${DIM}  Melyik csatornan kommunikaljon az AI asszisztensed?${NC}"
 echo -e "  ${BOLD}1.${NC} Telegram (alapertelmezett)"
 echo -e "  ${BOLD}2.${NC} Slack"
 echo -e "  ${BOLD}3.${NC} Discord"
+echo -e "  ${BOLD}4.${NC} $(_t channel_option_gromzo)"
+echo -e "  ${BOLD}5.${NC} $(_t channel_option_teams)"
 echo ""
-read -rp "$(_t prompt_channel_select_linux)" PROVIDER_CHOICE
+read -rp "$(_t prompt_channel_select5)" PROVIDER_CHOICE
 PROVIDER_CHOICE=${PROVIDER_CHOICE:-1}
 if [ "$PROVIDER_CHOICE" = "2" ]; then
   CHANNEL_PROVIDER="slack"
 elif [ "$PROVIDER_CHOICE" = "3" ]; then
   CHANNEL_PROVIDER="discord"
+elif [ "$PROVIDER_CHOICE" = "4" ] || [ "$PROVIDER_CHOICE" = "gromzo" ]; then
+  # GROMZONOPROVIDER1108: the main agent talks only through Gromzo (no bot token, no Bun); accepted as 4 or by name.
+  CHANNEL_PROVIDER="gromzo"
+elif [ "$PROVIDER_CHOICE" = "5" ] || [ "$PROVIDER_CHOICE" = "teams" ]; then
+  # EE2392D3: Microsoft Teams (claude-channel-teams, an Azure Bot); accepted as 5 or by name.
+  CHANNEL_PROVIDER="teams"
 else
   CHANNEL_PROVIDER="telegram"
 fi
@@ -1310,6 +1426,14 @@ SLACK_APP_TOKEN=""
 DISCORD_BOT_TOKEN=""
 DISCORD_CHANNEL_ID=""
 OPERATOR_DISCORD_USER_ID=""
+TEAMS_BOT_APP_ID=""
+TEAMS_BOT_TENANT_ID=""
+TEAMS_BOT_APP_PASSWORD=""
+
+# EE2392D3: one .env value per key: whitespace (a pasted newline, a trailing space) is cut, never written.
+_teams_clean() { printf '%s' "$1" | tr -d '[:space:]'; }
+_teams_uuid() { printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; }
+_teams_tty() { [ -t 0 ]; } # a terminal on stdin: only there is echo switched off
 
 if [ "$CHANNEL_PROVIDER" = "telegram" ]; then
   echo ""
@@ -1337,6 +1461,51 @@ elif [ "$CHANNEL_PROVIDER" = "discord" ]; then
   echo -e "${DIM}  Az operator user ID-re a parositashoz kell: amikor egy uj felhasznalo${NC}"
   echo -e "${DIM}  DM-et ir a botnak, a bot ezen az ID-n ertesit teged jovahagyasert.${NC}"
   read -rp "$(_t prompt_discord_user_id)" OPERATOR_DISCORD_USER_ID
+elif [ "$CHANNEL_PROVIDER" = "teams" ]; then
+  # EE2392D3: the three keys of the Azure Bot's Entra app (the names the Teams plugin and the dashboard read:
+  # TEAMS_BOT_APP_ID, TEAMS_BOT_TENANT_ID, TEAMS_BOT_APP_PASSWORD). Each read stays a plain `read -rp` line, so the
+  # Bridge's headless derive can turn it into its env preset; the secret is not echoed (stty, a no-op without a
+  # terminal) and is never printed. Empty = set up later with the plugin's setup-azure-bot.sh --env-file.
+  echo ""
+  echo -e "${DIM}  Az AI asszisztensed Microsoft Teamsen kommunikal veled, egy Azure Boton at.${NC}"
+  echo -e "${DIM}  Ha mar van Azure Botod: add meg az alkalmazas (App ID), a tenant es a titkos kulcs ertekeit.${NC}"
+  echo -e "${DIM}  Ha meg nincs: hagyd uresen, a bot a telepites utan a Teams-bovitmeny${NC}"
+  echo -e "${DIM}  setup-azure-bot.sh szkriptjevel hozhato letre (Teams-bekotesi sugo).${NC}"
+  echo ""
+  read -rp "$(_t prompt_teams_app_id)" TEAMS_BOT_APP_ID
+  TEAMS_BOT_APP_ID="$(_teams_clean "$TEAMS_BOT_APP_ID")"
+  if [ -n "$TEAMS_BOT_APP_ID" ]; then
+    read -rp "$(_t prompt_teams_tenant_id)" TEAMS_BOT_TENANT_ID
+    TEAMS_BOT_TENANT_ID="$(_teams_clean "$TEAMS_BOT_TENANT_ID")"
+    # Echo off only on a terminal, and back on every way out of the read: Ctrl+C and TERM restore it and stop
+    # (130), a stdin EOF under the ERR trap restores it on EXIT. The traps that were set before (the Bridge's
+    # headless run has its own EXIT trap, headless-helpers.sh on_exit_emit_result) are saved and put back, also on
+    # the Ctrl+C path; without a terminal no trap is touched at all (Ábel 75250, measured).
+    _teams_prev_traps="$(trap -p INT TERM EXIT)"
+    if _teams_tty; then
+      trap 'stty echo 2>/dev/null || true; trap - INT TERM EXIT; eval "$_teams_prev_traps"; exit 130' INT TERM
+      trap 'stty echo 2>/dev/null || true' EXIT
+      stty -echo 2>/dev/null || true
+    fi
+    read -rp "$(_t prompt_teams_app_password)" TEAMS_BOT_APP_PASSWORD
+    if _teams_tty; then
+      stty echo 2>/dev/null || true
+      trap - INT TERM EXIT
+      eval "$_teams_prev_traps"
+    fi
+    unset _teams_prev_traps
+    echo ""
+    TEAMS_BOT_APP_PASSWORD="$(_teams_clean "$TEAMS_BOT_APP_PASSWORD")"
+    _teams_uuid "$TEAMS_BOT_APP_ID" || warn "Az App ID nem GUID alaku (pl. 11111111-2222-3333-4444-555555555555). Ellenorizd az Entra-alkalmazasnal."
+    _teams_uuid "$TEAMS_BOT_TENANT_ID" || warn "A Tenant ID nem GUID alaku. Ellenorizd: az login utan az account show --query tenantId."
+    [ -n "$TEAMS_BOT_APP_PASSWORD" ] || warn "A titkos kulcs ures: a bot igy nem tud valaszolni. Kesobb a setup-azure-bot.sh --env-file potolja."
+  fi
+elif [ "$CHANNEL_PROVIDER" = "gromzo" ]; then
+  # GROMZONOPROVIDER1108: no bot, no token: the Gromzo channel is connected later from the Marveen Bridge (Gromzo
+  # wizard), through the local marveen-mxd.
+  echo ""
+  echo -e "${DIM}  Az AI asszisztensed a Gromzo alkalmazason at kommunikal veled; bot-token nem kell.${NC}"
+  echo -e "${DIM}  A Gromzot a Marveen Bridge-ben kotod be a telepites utan.${NC}"
 else
   echo ""
   echo -e "${DIM}  Az AI asszisztensed Slack-en kommunikal veled.${NC}"
@@ -1381,6 +1550,31 @@ fi
 BRAND_NAME="$BOT_NAME"
 SERVICE_ID="$MAIN_AGENT_ID"
 
+INSTALL_STEP="bun-install"
+# GROMZONOPROVIDER1108: Bun only for a channel plugin that runs on it (telegram, discord). Slack runs on Node, Gromzo
+# on Node through marveen-mxd: those installs never download Bun, so they cannot fail on it (the owner's 11-08 Gromzo
+# install failed exactly on the Bun download). A Bun channel added later installs it then (release B).
+case "$CHANNEL_PROVIDER" in
+  # EE2392D3: teams too: the Teams plugin's .mcp.json starts its server with `bun run ... start`.
+  telegram|discord|teams)
+    if command -v bun &>/dev/null; then
+      ok "bun mar telepitve: $(bun --version)"
+    else
+      # unzip -- a Bun hivatalos telepitoje ezzel csomagolja ki a binarist; nincs alapertelmezetten telepitve friss WSL distrokon,
+      # nelkule "error: unzip is required to install bun"-nal elhasal.
+      command -v unzip &>/dev/null || pkg_install_noninteractive unzip || true
+      echo -e "  Bun telepitese (${CHANNEL_PROVIDER} plugin fuggoseg)..."
+      # BUNTIMEOUT1108: time limits, retries, the vendor's own error lines, the npm fallback, and a stop with the reason.
+      _install_bun
+    fi
+    ensure_in_rc 'BUN_INSTALL' 'export BUN_INSTALL="$HOME/.bun"'
+    ensure_in_rc '.bun/bin' 'export PATH="$BUN_INSTALL/bin:$PATH"'
+    ;;
+  *)
+    ok "Bun nem kell (${CHANNEL_PROVIDER}: a csatorna Node-on fut)"
+    ;;
+esac
+
 INSTALL_STEP="npm-install"
 # ─────────────────────────────────────────────
 # [5/7] Fuggosegek telepitese + konfiguracic
@@ -1404,6 +1598,10 @@ if ! npm ci --loglevel warn 2>"$_NPM_CI_LOG"; then
     rm -f "$_NPM_CI_LOG"
     fail "npm install sikertelen. Ellenorizd a fenti hibauzeneteket (pl. node-gyp OOM a better-sqlite3 forditasakor)."
   fi
+  # INSTALLDIRTYTREE1103: the fallback may rewrite the tracked lock into npm's
+  # canonical form; restore it so the fresh install leaves a clean tree (the
+  # next update's npm ci reinstalls from the tracked lock anyway).
+  git -C "$INSTALL_DIR" checkout -q -- package-lock.json 2>/dev/null || true
 fi
 rm -f "$_NPM_CI_LOG"
 ok "npm csomagok telepitve"
@@ -1524,6 +1722,14 @@ if [ "$CHANNEL_PROVIDER" = "telegram" ]; then
   if [ "${CHAT_ID}" != "0" ] || [ -z "$_existing_chat" ]; then
     env_merge_key ALLOWED_CHAT_ID "${CHAT_ID}"
   fi
+elif [ "$CHANNEL_PROVIDER" = "gromzo" ]; then
+  : # GROMZONOPROVIDER1108: no token keys (CHANNEL_PROVIDER=gromzo is written above)
+elif [ "$CHANNEL_PROVIDER" = "teams" ]; then
+  # EE2392D3: the Teams keys go ONLY to the channel .env (below), the file the plugin reads and the plugin's
+  # setup-azure-bot.sh --env-file rewrites on a secret rotation. A second copy here would win in readTeamsCreds
+  # (the install .env is read first) and go stale at the first rotation. CHANNEL_TOKEN finds the app id in the
+  # channel .env (getMainChannelToken, TEAMSALERTENV1110).
+  :
 elif [ "$CHANNEL_PROVIDER" = "discord" ]; then
   env_keep_or_set DISCORD_BOT_TOKEN "${DISCORD_BOT_TOKEN}"
   env_keep_or_set DISCORD_CHANNEL_ID "${DISCORD_CHANNEL_ID}"
@@ -1605,10 +1811,14 @@ else
   # Probe the way a SERVICE will run: an isolated config dir (so ~/.claude and
   # the operator's shell exports cannot make a broken install look healthy)
   # carrying ONLY the credential the units will actually get.
-  _probe_cfg="$(mktemp -d 2>/dev/null || echo /tmp/marveen-authprobe.$$)"
+  # TMPPROBE1108 (Dani 73504): no fixed /tmp fallback name. This dir is claude's CLAUDE_CONFIG_DIR next to the SERVICE
+  # token; a predictable one another local user created first could carry a settings.json whose hooks run commands
+  # with it. Without a private dir the probe is skipped and the state is UNKNOWN (said below).
+  _probe_cfg="$(mktemp -d 2>/dev/null)" || _probe_cfg=""
+  [ -n "$_probe_cfg" ] || warn "Az auth-proba kimarad: nem tudtam privat ideiglenes konyvtarat letrehozni (mktemp -d)."
   _probe_out=""
   _probe_rc=1
-  if command -v claude >/dev/null 2>&1; then
+  if [ -n "$_probe_cfg" ] && command -v claude >/dev/null 2>&1; then
     # A 401 here is the VERDICT this gate exists to report, not an installer
     # error -- see the guard rationale above the operator-shell probe.
     if [ -n "$_svc_token" ]; then
@@ -1629,7 +1839,7 @@ else
   else
     INSTALL_AUTH_STATE="UNKNOWN"
   fi
-  rm -rf "$_probe_cfg" 2>/dev/null || true
+  [ -z "$_probe_cfg" ] || rm -rf "$_probe_cfg" 2>/dev/null || true
 fi
 unset _svc_token _svc_apikey
 
@@ -1653,16 +1863,19 @@ case "$INSTALL_AUTH_STATE" in
     ;;
 esac
 
+# SEEDRENDERLITERAL1108 / PERSONARENDERLITERAL1108: the persona renders and the seeding loops below render through the
+# shared lib (scripts/lib/seed-refresh.sh render_seed_template / render_persona_file): a name typed here with &, / or \
+# goes in literally, a failed render never truncates its target, and the seeded bytes are the ones the seed refresh
+# compares against later. The lib ships in this tree; without it the tree is broken.
+[ -f "$INSTALL_DIR/scripts/lib/seed-refresh.sh" ] && . "$INSTALL_DIR/scripts/lib/seed-refresh.sh"
+command -v render_persona_file >/dev/null 2>&1 || fail "scripts/lib/seed-refresh.sh is missing: the install tree is incomplete"
+
 # CLAUDE.md generalasa template-bol
 if [ -f "$INSTALL_DIR/templates/CLAUDE.md.template" ]; then
-  sed -e "s/{{OWNER_NAME}}/$OWNER_NAME/g" \
-    -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
-    -e "s/{{CHAT_ID}}/$CHAT_ID/g" \
-    -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
-    -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
-    -e "s/{{WEB_PORT}}/${WEB_PORT:-3420}/g" \
-    -e "s|{{TIMEZONE}}|$(. "$INSTALL_DIR/scripts/lib/install-tz.sh"; z="$(install_tz "$INSTALL_DIR")"; printf '%s' "${z:-UTC}")|g" \
-    "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" CLAUDE.md.template decide)" >"$INSTALL_DIR/CLAUDE.md"
+  # PERSONARENDERLITERAL1108: the shared literal render, through a temp file (the target is never truncated)
+  RENDER_CHAT_ID="$CHAT_ID" RENDER_TIMEZONE="$(. "$INSTALL_DIR/scripts/lib/install-tz.sh"; z="$(install_tz "$INSTALL_DIR")"; printf '%s' "${z:-UTC}")" \
+    render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" CLAUDE.md.template decide)" "$INSTALL_DIR/CLAUDE.md" \
+    || fail "CLAUDE.md could not be rendered from its template; nothing was written"
   ok "CLAUDE.md generalva"
 else
   warn "CLAUDE.md.template nem talalhato, CLAUDE.md nem generalhato"
@@ -1670,9 +1883,8 @@ fi
 
 # SOUL.md generalasa template-bol (personality definition for the main agent).
 if [ -f "$INSTALL_DIR/templates/SOUL.md.template" ] && [ ! -f "$INSTALL_DIR/SOUL.md" ]; then
-  sed -e "s/{{OWNER_NAME}}/$OWNER_NAME/g" \
-      -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
-      "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" SOUL.md.template decide)" > "$INSTALL_DIR/SOUL.md"
+  render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" SOUL.md.template decide)" "$INSTALL_DIR/SOUL.md" \
+    || fail "SOUL.md could not be rendered from its template; nothing was written"
   ok "SOUL.md generalva"
 elif [ ! -f "$INSTALL_DIR/templates/SOUL.md.template" ] && [ ! -f "$INSTALL_DIR/SOUL.md" ]; then
   warn "SOUL.md.template nem talalhato, SOUL.md nem generalhato"
@@ -1702,17 +1914,21 @@ if [ -d "$SCHED_TPL_DIR" ]; then
       mkdir -p "$target/$sub"
       for f in "$tpl$sub"*; do
         [ -f "$f" ] || continue
-        sed -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
-            -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
-            -e "s/{{OWNER_NAME}}/$OWNER_NAME/g" \
-            -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
-            -e "s/{{WEB_PORT}}/${WEB_PORT:-3420}/g" \
-            "$f" > "$target/$sub$(basename "$f")"
+        # SEEDRENDERLITERAL1108: the shared render (literal values; the bytes the seed refresh compares against)
+        render_seed_template < "$f" > "$target/$sub$(basename "$f")"
       done
     done
     INSTALL_SCHED_REGISTER="${INSTALL_SCHED_REGISTER:-} $task_name"
     ok "Utemezett feladat scaffoldolva: $task_name"
   done
+fi
+
+# PERSONAESC1107 seed A: the seeders' language (scripts/lib/seed-lang.sh, read only: the persona render above decided it).
+# On en a seeded Markdown file comes from i18n/en/<its repo path> when that exists. Without the lib, Hungarian as before.
+SEED_LANG=hu
+if [ -f "$INSTALL_DIR/scripts/lib/seed-lang.sh" ]; then
+  . "$INSTALL_DIR/scripts/lib/seed-lang.sh"
+  SEED_LANG="$(seed_lang "$INSTALL_DIR")"
 fi
 
 # Seed scheduled tasks: from seed-scheduled-tasks/ into ~/.claude/scheduled-tasks/
@@ -1748,12 +1964,10 @@ if [ -d "$SEED_SCHED_DIR" ]; then
       mkdir -p "$target/$sub"
       for f in "$tpl$sub"*; do
         [ -f "$f" ] || continue
-        sed -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
-            -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
-            -e "s/{{OWNER_NAME}}/$OWNER_NAME/g" \
-            -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
-            -e "s/{{WEB_PORT}}/${WEB_PORT:-3420}/g" \
-            "$f" > "$target/$sub$(basename "$f")"
+        seed_src="$f"
+        command -v seed_src_for >/dev/null 2>&1 && seed_src="$(seed_src_for "$INSTALL_DIR" "seed-scheduled-tasks/$task_name/$sub$(basename "$f")" "${SEED_LANG:-hu}")"
+        # SEEDRENDERLITERAL1108: the shared render (literal values; the bytes the seed refresh compares against)
+        render_seed_template < "$seed_src" > "$target/$sub$(basename "$f")"
       done
     done
     INSTALL_SCHED_REGISTER="${INSTALL_SCHED_REGISTER:-} $task_name"
@@ -1807,7 +2021,8 @@ fi
 
 # Channel state directory setup
 CHANNEL_DIR="$HOME/.claude/channels/$CHANNEL_PROVIDER"
-mkdir -p "$CHANNEL_DIR"
+# GROMZONOPROVIDER1108: gromzo keeps no channel state here (no token, no access.json), so no empty dir for it.
+[ "$CHANNEL_PROVIDER" = "gromzo" ] || mkdir -p "$CHANNEL_DIR"
 
 if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "$BOT_TOKEN" ]; then
   (umask 077 && echo "TELEGRAM_BOT_TOKEN=$BOT_TOKEN" >"$CHANNEL_DIR/.env")
@@ -1853,10 +2068,82 @@ DISCORDENVEOF
 }
 ACCESSEOF
   ok "$(_t linux.discord_channel_configured)"
+elif [ "$CHANNEL_PROVIDER" = "teams" ] && [ -n "$TEAMS_BOT_APP_ID" ]; then
+  # EE2392D3: the plugin's own keys (setup-azure-bot.sh writes the same three plus the type).
+  (umask 077 && cat >"$CHANNEL_DIR/.env" <<TEAMSENVEOF
+TEAMS_BOT_APP_ID=$TEAMS_BOT_APP_ID
+TEAMS_BOT_APP_PASSWORD=$TEAMS_BOT_APP_PASSWORD
+TEAMS_BOT_TENANT_ID=$TEAMS_BOT_TENANT_ID
+TEAMS_BOT_APP_TYPE=SingleTenant
+TEAMSENVEOF
+  )
+  chmod 600 "$CHANNEL_DIR/.env"
+  [ -f "$CHANNEL_DIR/access.json" ] || cat >"$CHANNEL_DIR/access.json" <<ACCESSEOF
+{
+  "dmPolicy": "pairing",
+  "allowFrom": [],
+  "groups": {},
+  "pending": {}
+}
+ACCESSEOF
+  ok "$(_t linux.teams_channel_configured)"
+fi
+
+# EE2392D3: the Teams plugin is not on Claude Code's built-in channel-plugin list, so a teams install needs it in
+# the machine-wide managed-settings allowlist, or the bot looks online and never answers (inbound dropped). The
+# same shared writer as macOS (MANAGEDSETTINGSWRITE1103, scripts/lib/managed-settings-write.py --add-plugin): it
+# merges, keeps every other key and the file mode, and refuses a file it cannot parse. All four channel plugins,
+# as on macOS: once the list exists it REPLACES the built-in one, so a teams-only entry would mute a Telegram or
+# Discord agent on this host. Root as for the channelsEnabled write above; asked first as the user, so a file
+# that already allows all four needs no privilege.
+TEAMS_ALLOWLIST_PLUGINS="slack-channel@marveen-marketplace telegram@claude-plugins-official teams@marveen-marketplace discord@claude-plugins-official"
+managed_allows_all() { # $1 = the managed file, then NAME@MARKET...; 0 only when every one is listed
+  python3 -I -S - "$@" 2>/dev/null <<'MAA_PY'
+import json, sys
+path, want = sys.argv[1], sys.argv[2:]
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict):
+    sys.exit(1)
+have = set()
+for p in d.get("allowedChannelPlugins") or []:
+    if isinstance(p, dict):
+        have.add("%s@%s" % (p.get("plugin"), p.get("marketplace")))
+sys.exit(0 if all(w in have for w in want) else 1)
+MAA_PY
+}
+if [ "$CHANNEL_PROVIDER" = "teams" ]; then
+  TEAMS_MANAGED_FILE="/etc/claude-code/managed-settings.json" # fixed: a root write never takes its target from the environment
+  # shellcheck disable=SC2086
+  if managed_allows_all "$TEAMS_MANAGED_FILE" $TEAMS_ALLOWLIST_PLUGINS; then
+    ok "Teams engedelyezve a managed-settings allowlistben ($TEAMS_MANAGED_FILE)"
+  else
+    managed_settings_notice
+    _ms_priv=""
+    [ "$(id -u)" -eq 0 ] || _ms_priv="sudo"
+    _ms_args=()
+    for _p in $TEAMS_ALLOWLIST_PLUGINS; do _ms_args+=(--add-plugin "$_p"); done
+    if $_ms_priv mkdir -p "$(dirname "$TEAMS_MANAGED_FILE")" 2>/dev/null \
+      && $_ms_priv python3 -I "$INSTALL_DIR/scripts/lib/managed-settings-write.py" "$TEAMS_MANAGED_FILE" --create "${_ms_args[@]}"; then
+      ok "Teams engedelyezve a managed-settings allowlistben ($TEAMS_MANAGED_FILE)"
+    else
+      warn "A managed-settings allowlist nem volt frissitheto, a fajl ERINTETLEN maradt. Teams nelkule a bot nem valaszol."
+      echo -e "  ${DIM}Kezi potlas (root):${NC}"
+      echo -e "  ${DIM}  sudo python3 -I $INSTALL_DIR/scripts/lib/managed-settings-write.py $TEAMS_MANAGED_FILE --create ${_ms_args[*]}${NC}"
+    fi
+    unset _ms_priv _ms_args _p
+  fi
 fi
 
 # Channel plugin install
-if [ "$CHANNEL_PROVIDER" = "telegram" ]; then
+# GROMZONOPROVIDER1108: on gromzo there is no channel plugin to install here; the Gromzo plugin comes with the Bridge's
+# Gromzo step (marveen-mxd's payload).
+if [ "$CHANNEL_PROVIDER" = "gromzo" ]; then
+  PLUGIN_ID=""
+  ok "Gromzo: a csatorna-plugint a Bridge Gromzo-lepese hozza (itt nincs mit telepiteni)"
+elif [ "$CHANNEL_PROVIDER" = "telegram" ]; then
   PLUGIN_MARKETPLACE="anthropics/claude-plugins-official"
   PLUGIN_ID="telegram@claude-plugins-official"
   PLUGIN_SHORT="telegram"
@@ -1864,12 +2151,19 @@ elif [ "$CHANNEL_PROVIDER" = "discord" ]; then
   PLUGIN_MARKETPLACE="anthropics/claude-plugins-official"
   PLUGIN_ID="discord@claude-plugins-official"
   PLUGIN_SHORT="discord"
+elif [ "$CHANNEL_PROVIDER" = "teams" ]; then
+  PLUGIN_MARKETPLACE="Szotasz/marveen-marketplace"
+  PLUGIN_ID="teams@marveen-marketplace"
+  PLUGIN_SHORT="teams"
 else
   PLUGIN_MARKETPLACE="Szotasz/marveen-marketplace"
   PLUGIN_ID="slack-channel@marveen-marketplace"
   PLUGIN_SHORT="slack-channel"
 fi
 
+if [ -z "$PLUGIN_ID" ]; then
+  :
+else
 echo -e "  ${CHANNEL_PROVIDER} plugin telepites..."
 claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
 if claude plugin install "$PLUGIN_ID" 2>/dev/null; then
@@ -1886,6 +2180,7 @@ else
     echo -e "  ${BLUE}claude plugin install ${PLUGIN_ID}${NC}"
     echo ""
   fi
+fi
 fi
 
 # INSTALLDIRTYTREE1103: NO `claude plugin enable --scope project` here. That
@@ -1922,7 +2217,9 @@ if [ -d "$SEED_SKILLS_DIR" ]; then
     mkdir -p "$target"
     for f in "$skill_dir"*; do
       [ -f "$f" ] || continue
-      cp "$f" "$target/$(basename "$f")"
+      seed_src="$f"
+      command -v seed_src_for >/dev/null 2>&1 && seed_src="$(seed_src_for "$INSTALL_DIR" "seed-skills/$skill_name/$(basename "$f")" "${SEED_LANG:-hu}")"
+      cp "$seed_src" "$target/$(basename "$f")"
     done
     # SEEDSKILLSUB1018: a skill's subdirs (scripts/, references/, ...) ship too,
     # verbatim and with their mode bits; its SKILL.md points into them.
@@ -1933,7 +2230,9 @@ if [ -d "$SEED_SKILLS_DIR" ]; then
     git -C "$skill_dir" ls-files -z 2>/dev/null | while IFS= read -r -d '' rel; do
       case "$rel" in */*) ;; *) continue ;; esac   # top-level files: the loop above
       mkdir -p "$target/$(dirname "$rel")"
-      cp -p "$skill_dir$rel" "$target/$rel"
+      seed_src="$skill_dir$rel"
+      command -v seed_src_for >/dev/null 2>&1 && seed_src="$(seed_src_for "$INSTALL_DIR" "seed-skills/$skill_name/$rel" "${SEED_LANG:-hu}")"
+      cp -p "$seed_src" "$target/$rel"
     done
     SEED_NEW=$((SEED_NEW + 1))
   done
@@ -2664,13 +2963,15 @@ fi
 sleep 3
 echo ""
 echo -e "${BOLD}$(_t section_checks)${NC}"
-if [ "$CHANNEL_PROVIDER" = "telegram" ] && ! command -v bun &>/dev/null; then
-  echo -e "  ${RED}✗${NC} Bun nem talalhato. A Telegram plugin nem fog mukodni."
+if { [ "$CHANNEL_PROVIDER" = "telegram" ] || [ "$CHANNEL_PROVIDER" = "teams" ]; } && ! command -v bun &>/dev/null; then
+  echo -e "  ${RED}✗${NC} Bun nem talalhato. A ${CHANNEL_PROVIDER} plugin nem fog mukodni."
   echo -e "  ${BOLD}Javitas:${NC} curl -fsSL https://bun.sh/install | bash"
   echo -e "  ${DIM}Utana: source ~/.bashrc && ./scripts/start.sh${NC}"
 fi
 PLUGIN_CHECK_PATTERN="${CHANNEL_PROVIDER}"
-if ! claude plugin list 2>/dev/null | grep -q "$PLUGIN_CHECK_PATTERN"; then
+if [ "$CHANNEL_PROVIDER" = "gromzo" ]; then
+  ok "Gromzo: a csatorna-plugint a Bridge Gromzo-lepese ellenorzi"
+elif ! claude plugin list 2>/dev/null | grep -q "$PLUGIN_CHECK_PATTERN"; then
   echo -e "  ${RED}✗${NC} ${CHANNEL_PROVIDER} plugin nincs telepitve."
   echo -e "  ${BOLD}Javitas:${NC} claude plugin install ${PLUGIN_ID}"
   echo -e "  ${DIM}Utana: systemctl --user restart ${CHAN_UNIT}${NC}"

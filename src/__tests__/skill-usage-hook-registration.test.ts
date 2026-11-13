@@ -37,9 +37,7 @@ describe('skill-usage-capture registration', () => {
     expect(cmd).toMatch(/; exit 0'$/)
   })
 
-  it('matches only the tools the hook classifies (Skill calls, SKILL.md Reads, and SKILL.md reads from Bash)', () => {
-    // Bash since 2026-10-10 (Zeph 3261): a SKILL.md read with cat/sed/head/python was invisible, so the
-    // dream-engine's "unused skill" verdicts stood on a measuring gap.
+  it('matches only the tools the hook classifies (Skill calls, SKILL.md Reads, Bash reads of a SKILL.md)', () => {
     const entry = (tpl.hooks?.PostToolUse ?? []).find((e) =>
       (e.hooks ?? []).some((h) => (h.command ?? '').includes('skill-usage-capture.py')),
     )!

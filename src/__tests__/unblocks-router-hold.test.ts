@@ -61,6 +61,7 @@ vi.mock('../web/agent-config.js', () => ({
   readAgentEngine: () => 'claude',
 }))
 vi.mock('../web/agent-process.js', () => ({
+  withTmuxBatch: (fn: () => unknown) => fn(),
   clearFeedbackModalAndRecheck: () => false,
   agentSessionName: (name: string) => `agent-${name}`,
   // Every session is mid-turn unless a test marks it ready.

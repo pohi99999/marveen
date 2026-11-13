@@ -3,9 +3,8 @@
 
 Two event types are captured:
   tool_call  -- the Skill tool was invoked (tool_name == 'Skill')
-  skill_read -- a SKILL.md file under <anywhere>/.claude/skills/<name>/SKILL.md was read, either with
-                the Read tool or, since 2026-10-10, from Bash (cat/sed/head/grep/python ... with the
-                path in the command)
+  skill_read -- a SKILL.md file under <root>/skills/<name>/SKILL.md was Read,
+                or named by a Bash command that reads it (SKILLBASHREAD1109)
 
 Unlike tool_call_log (pruned every 24 h), skill_usage is never pruned so the
 dream-engine can make data-driven suggestions after two or more weeks of data.
@@ -27,9 +26,8 @@ import sys
 import os
 import re
 import json
-import shlex
-# urllib.request is imported lazily in _post(): it costs ~25 ms of the hook's ~45 ms, and since the
-# hook also runs on EVERY Bash call (2026-10-10), the common no-match case must stay cheap.
+import urllib.request
+import urllib.error
 
 # Agent identity comes from the ledger library -- ONE resolver for every hook.
 # This file used to carry its own _agent_id_from_cwd() copy, which drifted:
@@ -84,93 +82,58 @@ _agent_id_from_cwd = ledger_lib.agent_id_from_cwd
 # Merve 2026-09-14: 71 telepitett skillhez OSSZESEN 4 usage-sor tartozott, es
 # mind a negy `tool_call` volt, egyetlen `skill_read` sem.
 #
-# 2026-10-10 (Zeph 3261, Marveen 3263): a Bash-bol olvasott SKILL.md is skill_read sort ad
-# (_classify_bash). Elotte a hook csak a Read TOOL-t latta, es a dream-engine "nem hasznalt skill"
-# kovetkeztetese meresi resen allt (pl. a gws-skillek, amiket cat/sed-del olvasnak).
-# MEGMARADO KORLAT, kimondva: amit nem a parancssorban nevez meg az ugynok (pl. egy valtozoban
-# tarolt ut, egy szkriptfajl, ami belul olvas, Grep/Glob tool), az tovabbra sem ad sort. A "0
-# hasznalat" ezert most is csak jelzes, nem bizonyitek arra, hogy a skill halott.
-_SKILL_MD_RE = re.compile(r"(?:^|/)\.claude/skills/([^/]+)/SKILL\.md$")
-
-
-# A Bash parancsban: a SKILL.md utja barmilyen elotaggal (abszolut, relativ, $HOME/...), a skill neve
-# csak "biztonsagos" karakterekbol allhat -- egy glob (`.claude/skills/*/SKILL.md`) NEM egy skill
-# olvasasa, hanem mindegyike, es ilyenkor nem tudjuk, melyiket hasznalta.
-_BASH_SKILL_RE = re.compile(
-    r"(?:^|[\s'\"=(<:])(?:[^\s'\"=(<>|;&]*/)?\.claude/skills/([A-Za-z0-9][A-Za-z0-9._-]*)/SKILL\.md(?![A-Za-z0-9._/-])"
+# MEGMARADO KORLAT, szandekosan kimondva: a hook a Skill es a Read TOOL-t, valamint
+# a Bash-parancsban LITERALISAN leirt SKILL.md utat latja. Valtozobol, globbol vagy
+# szkriptfajlbol olvasott SKILL.md tovabbra sem keletkeztet sort. A statisztika
+# ezert MEG MINDIG ALULMER -- a "0 hasznalat" sosem bizonyitja, hogy a skill halott.
+# Ezt a dream-engine bucket-5 ertelmezesenel figyelembe kell venni.
+#
+# SKILLBASHREAD1109: the "Bash-bol olvasott SKILL.md nem keletkeztet sort" korlat
+# a gyakorlatban a mérés nagy reszet elnyelte. Merve 2026-11-09: 11-07 20:21 es
+# 11-09 08:10 kozott egyetlen sor sem keletkezett, mikozben a fo agens tobb
+# skillt is megnyitott -- mind `cat`/`sed`-del, Bash-bol. A dream-engine ebbol
+# "30 oraja allo merest" jelentett. Ezert a Bash-parancsban szereplo SKILL.md
+# utat is szamoljuk (`skill_read`), lasd _classify_bash().
+#
+# A config-gyoker neve sem mindig `.claude`: a fo agens izolalt gyokere
+# `.channels-config`, a sub-agenseke `.claude-config`, es a Skill tool base
+# directory-ja ezekbe mutat. Mindharom alak skill-gyoker.
+_SKILL_ROOT = r"(?:^|/)\.(?:claude|channels-config|claude-config)/skills/"
+_SKILL_MD_RE = re.compile(_SKILL_ROOT + r"([^/]+)/SKILL\.md$")
+# In a command line the path ends at whitespace, a quote or a shell operator.
+# A glob segment (`*/SKILL.md`) is a listing, not a read of one skill: excluded.
+_SKILL_MD_IN_CMD_RE = re.compile(
+    r"(?:^|(?<=[\s'\"=/]))(?:[^\s'\"]*?/)?\.(?:claude|channels-config|claude-config)/skills/"
+    r"([^/\s'\"*?\[\]{}$`]+)/SKILL\.md(?=$|[\s'\";|&)<>])"
 )
-# Parancsok, amelyek egy fajl TARTALMAT olvassak. Ami nincs itt (ls, git, cp, mv, rm, stat, test,
-# echo ...), az nem hasznalat.
-_READERS = frozenset({
-    "cat", "bat", "batcat", "less", "more", "head", "tail", "sed", "awk", "gawk", "grep", "egrep",
-    "fgrep", "rg", "ugrep", "nl", "python", "python3", "node", "jq", "view", "vim", "nvim", "nano",
-})
-# Interpreterek: a fajlutat a kodjukban (-c, heredoc) is keressuk, nem csak az argumentumokban.
-_INTERPRETERS = frozenset({"python", "python3", "node"})
-_MAX_SKILLS_PER_COMMAND = 5
+# A command that writes or removes a SKILL.md is not a use of the skill.
+_WRITE_HINT_RE = re.compile(
+    r"(?:>>?\s*[^\s]*SKILL\.md)|\bsed\s+(?:-[a-zA-Z]*\s+)*-i|\btee\b|\brm\b|\bmv\b|\bcp\b|"
+    r"\bgit\s+(?:add|commit|checkout|restore|rm|mv)\b|\bln\b"
+)
+_MAX_BASH_SKILLS = 5
 
 
-def _segment_command(seg: str) -> tuple[str, list[str]]:
-    """First real command word of a pipeline segment (skipping VAR=x, sudo, env, timeout N)."""
-    try:
-        words = shlex.split(seg, posix=True)
-    except ValueError:
-        words = seg.split()
-    i = 0
-    while i < len(words):
-        w = words[i]
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w) or w in ("sudo", "env", "command", "exec", "nice"):
-            i += 1
-            continue
-        if w == "timeout":
-            i += 2
-            continue
-        break
-    if i >= len(words):
-        return "", []
-    return os.path.basename(words[i]), words[i + 1:]
+def _classify_bash(command: str) -> list[str]:
+    """Skill names whose SKILL.md a Bash command reads (SKILLBASHREAD1109).
 
-
-def _classify_bash(command: str) -> list[tuple[str, str]]:
-    """skill_read rows for every SKILL.md a Bash command reads (cat/sed/head/grep/python ...)."""
-    if ".claude/skills/" not in command or "SKILL.md" not in command:
-        return []  # the common case: no work, no imports
-    segments = [s for s in re.split(r"\|\||&&|[|;\n]", command)]
-    found: list[str] = []
-
-    def add(name: str) -> None:
-        if name not in found and len(found) < _MAX_SKILLS_PER_COMMAND:
-            found.append(name)
-
-    interpreter_seen = False
-    for seg in segments:
-        cmd, args = _segment_command(seg)
-        if cmd in _INTERPRETERS:
-            interpreter_seen = True
-        if cmd not in _READERS:
-            continue
-        if cmd == "sed" and any(a == "-i" or (a.startswith("-i") and not a.startswith("--")) or a.startswith("--in-place") for a in args):
-            continue  # an in-place edit is maintenance, not use
-        for m in _BASH_SKILL_RE.finditer(seg):
-            if seg[: m.start()].rstrip().endswith(">"):
-                continue  # the SKILL.md is a redirect TARGET: a write, not a read
-            add(m.group(1))
-    if interpreter_seen:
-        # python3 -c "open('.../SKILL.md')" or a heredoc: the path sits in the code, which the
-        # segment split above cut into pieces (newlines). Scan the whole command once.
-        for m in _BASH_SKILL_RE.finditer(command):
-            if command[: m.start()].rstrip().endswith(">"):
-                continue
-            add(m.group(1))
-    return [(name, "skill_read") for name in found]
-
-
-def _classify_all(tool_name: str, tool_input: dict) -> list[tuple[str, str]]:
-    """Every (skill_name, trigger_type) row one tool call produces."""
-    if tool_name == "Bash":
-        return _classify_bash(str(tool_input.get("command") or ""))
-    one = _classify(tool_name, tool_input)
-    return [one] if one else []
+    Distinct, in first-seen order, capped at _MAX_BASH_SKILLS so a long
+    one-off sweep cannot flood the table. A command that looks like it
+    writes, copies, moves or removes a SKILL.md yields nothing: editing a
+    skill is not using it.
+    """
+    if not command or "SKILL.md" not in command:
+        return []
+    if _WRITE_HINT_RE.search(command):
+        return []
+    out: list[str] = []
+    for m in _SKILL_MD_IN_CMD_RE.finditer(command):
+        name = m.group(1)
+        if name not in out:
+            out.append(name)
+        if len(out) >= _MAX_BASH_SKILLS:
+            break
+    return out
 
 
 def _classify(tool_name: str, tool_input: dict) -> tuple[str, str] | None:
@@ -201,8 +164,12 @@ def main() -> None:
     session_id = payload.get("session_id") or None
     cwd = payload.get("cwd") or ""
 
-    rows = _classify_all(tool_name, tool_input)
-    if not rows:
+    if tool_name == "Bash":
+        events = [(name, "skill_read") for name in _classify_bash(str(tool_input.get("command") or ""))]
+    else:
+        result = _classify(tool_name, tool_input)
+        events = [result] if result is not None else []
+    if not events:
         sys.exit(0)
 
     agent_id = ledger_lib.agent_id_from_payload(payload)
@@ -211,9 +178,7 @@ def main() -> None:
     if not token:
         sys.exit(0)
 
-    import urllib.request  # lazy: see the import block at the top
-
-    for skill_name, trigger_type in rows:
+    for skill_name, trigger_type in events:
         body = json.dumps({
             "agent_id": agent_id,
             "skill_name": skill_name,
@@ -234,7 +199,7 @@ def main() -> None:
                 timeout=3,
             )
         except Exception:
-            pass  # never block the agent
+            break  # never block the agent; a dead dashboard is not retried per skill
 
     sys.exit(0)
 
