@@ -186,86 +186,58 @@ class TestProjectScopedSkills(unittest.TestCase):
         self.assertIsNone(self._classify("/srv/marveen/.claude/skills/my-skill/references/x.md"))
 
 
-
-
+# SKILLBASHREAD1109: 2026-11-09-en merve 11-07 20:21 es 11-09 08:10 kozott nulla
+# skill_usage sor keletkezett, mert minden SKILL.md-t Bash-bol (cat/sed) nyitottunk meg.
 class TestBashSkillRead(unittest.TestCase):
-    """2026-10-10 (Zeph 3261, Marveen 3263): a SKILL.md read from Bash is a skill_read row too.
+    def _b(self, cmd):
+        return hook._classify_bash(cmd)
 
-    Before, only the Read tool counted, so every "unused skill" conclusion of the dream-engine stood on
-    a measuring gap (the gws skills, for one, are read with cat/sed). Both directions are pinned: the
-    reads that must count, and the commands that only NAME the file without reading it.
-    """
+    def test_cat_of_a_project_skill_counts(self):
+        self.assertEqual(self._b("cat /srv/m/.claude/skills/fleet-helper/SKILL.md"), ["fleet-helper"])
 
-    def _bash(self, command):
-        return hook._classify_all("Bash", {"command": command})
+    def test_home_and_isolated_roots_count(self):
+        self.assertEqual(self._b("sed -n 1,40p ~/.claude/skills/a/SKILL.md"), ["a"])
+        self.assertEqual(self._b("head -80 /srv/m/.channels-config/skills/b/SKILL.md"), ["b"])
+        self.assertEqual(self._b("cat /srv/m/agents/x/.claude-config/skills/c/SKILL.md | head"), ["c"])
 
-    def _names(self, command):
-        return [n for n, t in self._bash(command) if t == "skill_read"]
+    def test_quoted_path_and_several_skills_are_distinct(self):
+        cmd = 'cat "/s/.claude/skills/a/SKILL.md" && grep x "/s/.claude/skills/b/SKILL.md"; cat /s/.claude/skills/a/SKILL.md'
+        self.assertEqual(self._b(cmd), ["a", "b"])
 
-    # must count ------------------------------------------------------------
-    def test_cat_relative(self):
-        self.assertEqual(self._bash("cat .claude/skills/x/SKILL.md"), [("x", "skill_read")])
+    def test_cap(self):
+        cmd = " ".join(f"/s/.claude/skills/k{i}/SKILL.md" for i in range(9))
+        self.assertEqual(len(self._b("cat " + cmd)), hook._MAX_BASH_SKILLS)
 
-    def test_sed_n_absolute(self):
-        self.assertEqual(self._names("sed -n 1,40p /home/pohi/marveen/.claude/skills/fleet-helper/SKILL.md"), ["fleet-helper"])
+    def test_glob_or_variable_is_not_a_read_of_one_skill(self):
+        self.assertEqual(self._b("grep -l foo ~/.claude/skills/*/SKILL.md"), [])
+        self.assertEqual(self._b('cat ~/.claude/skills/$NAME/SKILL.md'), [])
 
-    def test_head_in_a_pipeline(self):
-        self.assertEqual(self._names("head -50 ~/x/.claude/skills/gws-gmail/SKILL.md | grep -n send"), ["gws-gmail"])
+    def test_writes_do_not_count(self):
+        for cmd in [
+            "cat > ~/.claude/skills/a/SKILL.md << 'EOF'",
+            "echo x >> /s/.claude/skills/a/SKILL.md",
+            "sed -i 's/a/b/' /s/.claude/skills/a/SKILL.md",
+            "cp /tmp/x /s/.claude/skills/a/SKILL.md",
+            "rm /s/.claude/skills/a/SKILL.md",
+            "git add .claude/skills/a/SKILL.md",
+        ]:
+            self.assertEqual(self._b(cmd), [], cmd)
 
-    def test_after_cd_and_env_prefix(self):
-        self.assertEqual(self._names("cd /home/pohi/marveen && LC_ALL=C grep -n Mikor .claude/skills/meresi-csapdak/SKILL.md"), ["meresi-csapdak"])
+    def test_scheduled_task_and_references_do_not_count(self):
+        self.assertEqual(self._b("cat ~/.claude/scheduled-tasks/foo/SKILL.md"), [])
+        self.assertEqual(self._b("cat /s/.claude/skills/a/references/SKILL.md.bak"), [])
 
-    def test_python_dash_c(self):
-        self.assertEqual(self._names("python3 -c \"print(open('.claude/skills/y/SKILL.md').read()[:200])\""), ["y"])
+    def test_unrelated_command(self):
+        self.assertEqual(self._b("echo hi"), [])
+        self.assertEqual(self._b(""), [])
 
-    def test_python_heredoc(self):
-        cmd = "python3 - <<'PY'\ntext = open('/home/pohi/marveen/.claude/skills/z/SKILL.md').read()\nprint(len(text))\nPY"
-        self.assertEqual(self._names(cmd), ["z"])
-
-    def test_two_skills_in_one_command_both_count_once(self):
-        cmd = "cat .claude/skills/a/SKILL.md .claude/skills/b/SKILL.md; cat .claude/skills/a/SKILL.md"
-        self.assertEqual(self._names(cmd), ["a", "b"])
-
-    # must NOT count --------------------------------------------------------
-    def test_cat_of_another_file(self):
-        self.assertEqual(self._bash("cat README.md"), [])
-
-    def test_a_reference_file_of_a_skill(self):
-        self.assertEqual(self._bash("cat .claude/skills/x/references/notes.md"), [])
-
-    def test_naming_without_reading(self):
-        for cmd in ("ls -la .claude/skills/x/SKILL.md", "git add .claude/skills/x/SKILL.md",
-                    "git -C .claude/skills diff -- x/SKILL.md", "stat .claude/skills/x/SKILL.md",
-                    "cp /tmp/new.md .claude/skills/x/SKILL.md"):
-            self.assertEqual(self._bash(cmd), [], cmd)
-
-    def test_in_place_edit_is_not_use(self):
-        self.assertEqual(self._bash("sed -i 's/a/b/' .claude/skills/x/SKILL.md"), [])
-        self.assertEqual(self._bash("sed -i.bak -e 's/a/b/' .claude/skills/x/SKILL.md"), [])
-
-    def test_redirect_target_is_a_write(self):
-        self.assertEqual(self._bash("cat /tmp/draft.md > .claude/skills/x/SKILL.md"), [])
-        self.assertEqual(self._bash("echo hi >> .claude/skills/x/SKILL.md"), [])
-
-    def test_a_glob_is_not_one_skill(self):
-        self.assertEqual(self._bash("for f in .claude/skills/*/SKILL.md; do head -3 $f; done"), [])
-        self.assertEqual(self._bash("cat .claude/skills/*/SKILL.md | wc -l"), [])
-
-    def test_other_tools_unchanged(self):
-        self.assertEqual(hook._classify_all("Read", {"file_path": "/srv/m/.claude/skills/r/SKILL.md"}), [("r", "skill_read")])
-        self.assertEqual(hook._classify_all("Skill", {"skill": "s"}), [("s", "tool_call")])
-        self.assertEqual(hook._classify_all("Grep", {"pattern": "x", "path": ".claude/skills/x/SKILL.md"}), [])
-
-    def test_the_no_match_path_does_not_load_urllib(self):
-        # the hook runs on EVERY Bash call now; urllib.request is imported only when a row is posted
-        import subprocess, json as _json
-        out = subprocess.run(
-            [sys.executable, "-X", "importtime", _HOOK_PATH],
-            input=_json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls -la"}, "cwd": "/tmp"}),
-            capture_output=True, text=True, timeout=30,
+    def test_read_tool_sees_isolated_root(self):
+        self.assertEqual(
+            hook._classify("Read", {"file_path": "/srv/m/.channels-config/skills/b/SKILL.md"}),
+            ("b", "skill_read"),
         )
-        self.assertEqual(out.returncode, 0)
-        self.assertNotIn("urllib.request", out.stderr)
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

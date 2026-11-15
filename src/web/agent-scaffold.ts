@@ -20,6 +20,15 @@ import { sanitizeCapabilityTag, CAPABILITY_TAG_MAX_PER_AGENT } from '../prompt-s
 import { TMP_ROOT_PREFIXES as _TMP_PREFIXES } from './tmp-root-prefixes.js'
 import { shellWord } from './sanitize.js'
 import { agentTokensEnabled, dashboardTokenPathFor, ensureAgentToken, mainTokenPath } from './agent-tokens.js'
+import { agentTextLang, type AgentTextLang } from './agent-text-lang.js'
+import { seedSourceFor } from './seed-lang.js'
+import {
+  type ScaffoldFrags, type RosterText, ROSTER_TEXT_EN, buildMcpListChannelBodyEn, buildAutonomyBodyEn, buildEvidenceBodyEn, buildMessageCloseBodyEn,
+  buildBackgroundCheckpointBodyEn, buildSkillsPathTrapBodyEn, buildSystemDirectiveAuthBodyEn, buildAgentIdHeaderBodyEn,
+  buildMemorySearchLabelBodyEn, buildFleetAuthBodyEn, buildStrictApiBodyEn, buildApiHelperBodyEn,
+  type PromptRecipes, strictPromptRecipesEn, SKILL_SECTION_HEADING_EN, buildSkillSectionEn, buildClaudeMdPromptEn,
+  buildSoulPromptEn, buildSkillPromptEn, PRECOMPACT_PROMPT_EN_TPL, SKILLS_TRAP_HEADING_EN,
+} from './agent-scaffold-en.js'
 import { EXTRA_HOOKS_FILE, applyExtraHookEntries, extraHooksDigest, loadExtraHookEntries, type ExtraHookDeps } from './extra-hook-entries.js'
 
 // Resolve the base URL agents should use to reach the dashboard API.
@@ -81,6 +90,17 @@ export function apiPayloadPath(name: string, kind: ApiPayloadKind): string {
 // Dani 65157/1, Samu 65160: one fixed file per kind means two texts prepared in one round would both send the second.
 // The helper empties the file after a successful send and stops on an empty one (scripts/lib/marveen_api.py).
 export const ONE_FILE_ONE_SEND = 'Egy fájl, egy küldés: írd, küldd, és csak utána a következőt; kettőt párhuzamosan ne készíts elő (ugyanaz a fájl, a második felülírná az elsőt). A segéd sikeres küldés után kiüríti a fájlt, és üres fájlra hibával megáll: régi szöveget nem küld.'
+
+// PERSONAESC1107: the values the English bodies (agent-scaffold-en.ts) embed, the same ones the Hungarian recipes use.
+export function scaffoldFrags(name: string): ScaffoldFrags {
+  const tokenPath = dashboardTokenPathFor(name)
+  return {
+    apiHelper, dashboardOrigin, mainAgentId: MAIN_AGENT_ID, botName: BOT_NAME, tokenPath,
+    ownToken: tokenPath !== mainTokenPath(),
+    payload: (kind) => shellWord(apiPayloadPath(name, kind)),
+    ledgerScript: join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs'),
+  }
+}
 
 // The verbs the generated sections run; a deny rule that hits any of them keeps the agent on the old recipes.
 const HELPER_SECTION_VERBS = ['message', 'message-close', 'directive-verify', 'memory-search', 'memory-save', 'memory-update',
@@ -236,7 +256,10 @@ export function hookCommand(scriptPath: string, args: readonly string[] = [], ho
 // is probed first and a miss exits 2, which blocks.
 export function pythonHookCommand(scriptPath: string, args: readonly string[] = [], hookTimeoutSec = 10): string {
   const miss = 'governance-kapu: a hook interpretere nem talalhato (python3 nincs a PATH-on). A kapu ezert BLOKKOL. Javitas: telepitsd a python3-at, vagy inditsd ujra a dashboardot.'
-  const invocation = gateInvocation('python3', scriptPath, args)
+  // SITEPKGPLANT1104 (1): -I -S, so no start-up code the gate did not ship runs inside it (a .pth line or
+  // sitecustomize in a writable site-packages, a user site, PYTHON* settings). The hooks import only the standard
+  // library and their own directory, which they put on sys.path themselves (measured on every hook).
+  const invocation = gateInvocation('python3 -I -S', scriptPath, args)
   return `command -v python3 >/dev/null 2>&1 || { echo "${miss}" >&2; exit 2; }; ${failClosedGateRun(invocation, basename(scriptPath), hookTimeoutSec)}`
 }
 
@@ -351,6 +374,30 @@ export function substituteTemplatePlaceholders(content: string, id: TemplateIden
     .replaceAll('{{TIMEZONE}}', id.timeZone ?? APP_TZ)
 }
 
+// PERSONAESC1107: on an English install the settings template's PreCompact agent prompt is the English one. Applied to
+// the RAW template (placeholders still in), before resolveTemplatePlaceholders. Without the key the text is returned as
+// it is, byte for byte. Who gets it: a new agent (seeded from the template), and an agent whose settings have no
+// PreCompact agent hook yet (the merge adds the missing event). An agent that already has one keeps it: the merge
+// never adds a second agent hook, and the stock-prompt upgrade is per language (retiredHookPromptsFor), so on an
+// English install only a retired ENGLISH prompt is upgraded, never a Hungarian one. A hand opt-in therefore leaves the
+// existing agents' prompts Hungarian (a documented limit), and a later English wording reaches the English agents
+// through the "en:PreCompact" key of templates/retired-hook-prompts.json.
+export function localizeSettingsTemplate(raw: string): string {
+  if (agentTextLang() !== 'en') return raw
+  try {
+    const tpl = JSON.parse(raw) as { hooks?: Record<string, Array<{ hooks?: Array<{ type?: string; prompt?: unknown }> }>> }
+    let swapped = false
+    for (const group of tpl.hooks?.PreCompact ?? []) {
+      for (const h of group.hooks ?? []) {
+        if (h.type === 'agent' && typeof h.prompt === 'string') { h.prompt = PRECOMPACT_PROMPT_EN_TPL; swapped = true }
+      }
+    }
+    return swapped ? JSON.stringify(tpl, null, 2) + '\n' : raw
+  } catch {
+    return raw
+  }
+}
+
 export function resolveTemplatePlaceholders(content: string): string {
   return substituteTemplatePlaceholders(content, {
     projectRoot: PROJECT_ROOT,
@@ -457,6 +504,43 @@ export function upgradeLegacyHookCommands(
         }
       }
     }
+  }
+  return changed
+}
+
+/**
+ * HOOKISOAGENTS1105: hook commands a template shipped and a later one dropped, removed from an agent's settings.
+ * The add and upgrade passes only ever add or rewrite what the CURRENT template carries, so an entry the template
+ * stopped shipping stays forever. Exact shipped forms only (any install root), so an operator's own hook that
+ * merely shares a name is left alone. An emptied group goes too.
+ *
+ * - claude-usage.py: absorbed into marveen-commands.py (#1529, b1d619225) and deleted. Its sub-agent entry ran
+ *   `python3` without -I -S on a path that no longer exists: a no-op today, an unisolated run in every agent the
+ *   moment a file appears there again.
+ *
+ * Exported for unit testing.
+ */
+export const RETIRED_HOOK_COMMANDS: readonly RegExp[] = [
+  /^bash -c '\[ -f (\/[^\s']+)\/scripts\/hooks\/claude-usage\.py \] && exec python3 \1\/scripts\/hooks\/claude-usage\.py; exit 0'$/,
+  /^python3 "\$CLAUDE_PROJECT_DIR\/scripts\/hooks\/claude-usage\.py"$/,
+]
+export function removeRetiredHookCommands(
+  existingHooks: Record<string, unknown>,
+  retired: readonly RegExp[] = RETIRED_HOOK_COMMANDS,
+): boolean {
+  let changed = false
+  for (const [event, entries] of Object.entries(existingHooks)) {
+    if (!Array.isArray(entries)) continue
+    const kept: HookEntry[] = []
+    let eventChanged = false
+    for (const entry of entries as HookEntry[]) {
+      if (!entry || !Array.isArray(entry.hooks)) { kept.push(entry); continue }
+      const hooks = entry.hooks.filter((h) => !(typeof h?.command === 'string' && retired.some((r) => r.test(h.command as string))))
+      if (hooks.length === entry.hooks.length) { kept.push(entry); continue }
+      eventChanged = true
+      if (hooks.length > 0) kept.push({ ...entry, hooks })
+    }
+    if (eventChanged) { existingHooks[event] = kept; changed = true }
   }
   return changed
 }
@@ -855,6 +939,18 @@ export function upgradeRetiredHookPrompts(
 // The retired stock prompts, resolved like the template. A missing file means no
 // migration; an unreadable one is logged and also means no migration. The path is
 // a test seam only.
+// PERSONAESC1107 (EGM review): the retired stock prompts of the install's language. The file's plain event keys
+// ("PreCompact") are the Hungarian prompts; an "en:"-prefixed key ("en:PreCompact") holds the English ones. Never
+// cross-language: an English install upgrades only a retired English prompt, a Hungarian install only a Hungarian one.
+export function retiredHookPromptsFor(all: Record<string, string[]>, lang: 'hu' | 'en'): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const [key, list] of Object.entries(all)) {
+    if (lang === 'en' && key.startsWith('en:')) out[key.slice(3)] = list
+    else if (lang === 'hu' && !key.includes(':')) out[key] = list
+  }
+  return out
+}
+
 export function readRetiredHookPrompts(
   p: string = join(PROJECT_ROOT, 'templates', 'retired-hook-prompts.json'),
 ): Record<string, string[]> {
@@ -892,7 +988,7 @@ export function ensureAgentHooks(
   if (!existsSync(tplPath)) return false
   let tpl: Record<string, unknown>
   try {
-    const raw = resolveTemplatePlaceholders(readFileSync(tplPath, 'utf-8'))
+    const raw = resolveTemplatePlaceholders(localizeSettingsTemplate(readFileSync(tplPath, 'utf-8')))
     tpl = JSON.parse(raw)
   } catch {
     return false
@@ -930,13 +1026,15 @@ export function ensureAgentHooks(
     //   3. Sync the timeout of any command hook whose command matches but timeout differs.
     const existingHooks = existing.hooks as Record<string, unknown>
     let changed = upgradeLegacyHookCommands(existingHooks, tplHooks)
+    // HOOKISOAGENTS1105: entries the template no longer ships (claude-usage.py) go.
+    if (removeRetiredHookCommands(existingHooks)) changed = true
     // HOSTMOVE923: an existing PreCompact prompt inherited from another
     // install/host names a dead root; the add pass below would never see it.
     if (upgradeForeignRootInHookPrompts(existingHooks, PROJECT_ROOT)) changed = true
     // #2200: an agent still on a stock prompt from an earlier template gets the
     // current one; an edited prompt stays. Before the header pass, so a stock
     // prompt is compared as it shipped.
-    const retiredPrompts = readRetiredHookPrompts()
+    const retiredPrompts = retiredHookPromptsFor(readRetiredHookPrompts(), agentTextLang())
     if (upgradeRetiredHookPrompts(existingHooks, tplHooks, retiredPrompts)) changed = true
     // The add pass's blind spot also hides the task-state curl's X-Agent-Id header.
     if (upgradeTaskStateHeaderInHookPrompts(existingHooks)) changed = true
@@ -1273,6 +1371,8 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   // (APPROVALDBGATE1030): every sub-agent; the main agent's entry is
   // repo-shipped in the tracked .claude/settings.json.
   if (agentGetsGovernanceGates(name)) injectDbWriteGate(existing)
+  // (f) mxd's run dir, the MXD env names, the gromzo-channel entry points (MXDAGENTSOCKID1106): every sub-agent
+  if (agentGetsGovernanceGates(name)) injectMxdPathGate(existing)
   if (agentGetsKanbanWriteGate(name)) {
     injectKanbanWriteGate(existing)
     injectDigestProvenanceGate(existing)
@@ -1295,7 +1395,44 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (name !== MAIN_AGENT_ID) injectWebSearchEnvelope(existing)
   // Install-local extras LAST, so they land after every built-in gate.
   injectExtraHookEntries(name, existing, extraHooksPath)
+  // ENVRELAXGATE1104 (Samu 67797 (b)): keys that switch the gate hooks off or rewrite their environment are dropped on
+  // every spawn; every other key the file carries (effortLevel, emojiCompletionEnabled, enabledPlugins: measured on the
+  // live fleet) stays. The gate hooks themselves are put back by the inject* calls above.
+  stripLooseningKeys(existing, name, 'settings.json')
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
+  sanitizeAgentLocalSettings(name)
+}
+
+// Top-level Claude settings keys that turn the agent's gate hooks off (disableAllHooks) or hand them another
+// environment (env: PATH, NODE_OPTIONS and the like reach every hook command). Only the dashboard writes an agent's
+// settings; the db-write-gate keeps the agents out of both files, and this drops what got in before.
+export const AGENT_SETTINGS_STRIPPED_KEYS = ['disableAllHooks', 'env'] as const
+
+function stripLooseningKeys(settings: Record<string, unknown>, name: string, file: string): string[] {
+  const dropped = AGENT_SETTINGS_STRIPPED_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(settings, k))
+  for (const k of dropped) delete settings[k]
+  if (dropped.length) logger.warn({ agent: name, file, dropped }, 'agent settings: hook-loosening keys dropped on spawn')
+  return dropped
+}
+
+/**
+ * The agent's .claude/settings.local.json, which Claude Code merges over settings.json: the same keys are dropped. The
+ * file is NEVER deleted; one that holds none of them is not rewritten; one that does not parse as an object is left as
+ * it is (logged), since rewriting it would lose what it holds.
+ */
+export function sanitizeAgentLocalSettings(name: string): 'absent' | 'clean' | 'stripped' | 'unparseable' {
+  const p = join(agentDir(name), '.claude', 'settings.local.json')
+  if (!existsSync(p)) return 'absent'
+  let parsed: unknown
+  try { parsed = JSON.parse(readFileSync(p, 'utf-8')) } catch { parsed = undefined }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    logger.warn({ agent: name }, 'agent settings.local.json does not parse as an object: left untouched')
+    return 'unparseable'
+  }
+  const obj = parsed as Record<string, unknown>
+  if (!stripLooseningKeys(obj, name, 'settings.local.json').length) return 'clean'
+  atomicWriteFileSync(p, JSON.stringify(obj, null, 2))
+  return 'stripped'
 }
 
 // Install-local extra hook entries (store/extra-hooks.json), see
@@ -1745,6 +1882,12 @@ export const FLEET_BASELINE_DENY = [
   'Bash(git push --force:*)',
   'Bash(git push -f:*)',
   'mcp__playwright__browser_run_code_unsafe',
+  // MCPWRITEGATE1104 (Samu 68033 D2): the filesystem MCP server (its root was "/": its read tools walked past the
+  // Read(...) rules above, its write tools past every path gate) and gitnexus's repo-wide rename (it rewrites files
+  // with no path in its arguments). The bare server form denies every tool of that server, in every permission mode
+  // including bypassPermissions (code.claude.com/docs/en/permissions, /permission-modes).
+  'mcp__Filesystem',
+  'mcp__gitnexus__rename',
 ]
 
 // The floor's sudo pair, named so the per-agent opt-out (SUDO_AGENTS) lifts
@@ -1934,9 +2077,14 @@ export function agentGetsGovernanceGates(name: string): boolean {
   return name !== MAIN_AGENT_ID
 }
 
+// MCPWRITEGATE1104: every MCP tool too (mcp__.*): an MCP tool that writes or moves a local file reaches the store
+// through its own arguments. A matcher with a `.` or `*` is an UNANCHORED regex (code.claude.com/docs/en/hooks,
+// "Matcher patterns"), so the list is anchored: without it `Write` would also fire on TodoWrite. MultiEdit was
+// handled by gateDecision but missing here.
+// FORK (MONITORGATE1030): the shell tools keep Monitor. A Bash matcher does not fire on a Monitor command.
 // Exported: ensureGovernanceGateCommands treats any other matcher on the gate as stale.
 export const SELF_PACE_GATE_MATCHER =
-  `ScheduleWakeup|CronCreate|CronDelete|CronList|RemoteTrigger|${SHELL_TOOL_MATCHER}|Write|Edit|NotebookEdit`
+  `^(?:ScheduleWakeup|CronCreate|CronDelete|CronList|RemoteTrigger|${SHELL_TOOL_MATCHER}|Write|Edit|MultiEdit|NotebookEdit|mcp__.*)$`
 
 // Idempotently wire the self-pace-gate PreToolUse hook (blocks ScheduleWakeup /
 // Cron* / RemoteTrigger + the Bash self-injection routes). Same shape + dedupe
@@ -1967,7 +2115,8 @@ export function injectSelfPaceGate(existing: Record<string, unknown>): void {
 // database, no write of this install's gate wiring or autonomy levels. Write,
 // Edit, MultiEdit and NotebookEdit are in the matcher: the install-file part is
 // reachable through the native file tools as well as Bash.
-export const DB_WRITE_GATE_MATCHER = 'Bash|Monitor|Write|Edit|MultiEdit|NotebookEdit'
+// MCPWRITEGATE1104: and every MCP tool, anchored (see SELF_PACE_GATE_MATCHER). FORK: Monitor stays.
+export const DB_WRITE_GATE_MATCHER = `^(?:${SHELL_TOOL_MATCHER}|Write|Edit|MultiEdit|NotebookEdit|mcp__.*)$`
 export function injectDbWriteGate(existing: Record<string, unknown>): void {
   const hooks = (existing.hooks && typeof existing.hooks === 'object'
     ? existing.hooks
@@ -1978,6 +2127,27 @@ export function injectDbWriteGate(existing: Record<string, unknown>): void {
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
     ...prev.filter((e) => !JSON.stringify(e).includes('db-write-gate.mjs')),
+    entry,
+  ]
+}
+
+// Idempotently wire the mxd-path-gate PreToolUse hook (MXDAGENTSOCKID1106): a sub-agent's tool call may not name
+// mxd's run dir (the agent token files, agent.sock, dash.sock), set MXD_AGENT / MXD_AGENT_TOKEN_FILE, or start a
+// gromzo-channel entry point. Every sub-agent; the main agent stays out (its plugin connects in-process, Samu 71433).
+// The native file tools (Read and Grep included: the OS lets every agent READ a token file) and every MCP tool are in
+// the matcher, anchored (see SELF_PACE_GATE_MATCHER).
+// FORK: Monitor as well (MONITORGATE1030).
+export const MXD_PATH_GATE_MATCHER = `^(?:${SHELL_TOOL_MATCHER}|Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob|mcp__.*)$`
+export function injectMxdPathGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'mxd-path-gate.mjs'))
+  if (isUnsafeHookCommand(command)) return
+  const entry = { matcher: MXD_PATH_GATE_MATCHER, hooks: [securityGateHook(command)] }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('mxd-path-gate.mjs')),
     entry,
   ]
 }
@@ -2290,10 +2460,17 @@ export const WEBSEARCH_ENVELOPE_MATCHER = 'WebSearch|WebFetch'
 // startup migration (ensureWebSearchEnvelope) sees the command no longer wired
 // and writes it again from the new PROJECT_ROOT, so it needs no entry in
 // INSTALL_ANCHORED_SUFFIXES.
-function webSearchEnvelopeCommand(): string {
+// HOOKISOAGENTS1105: python3 -I -S like every other python hook (SITEPKGPLANT1104), so no start-up code the hook
+// did not ship (a .pth line, a sitecustomize, PYTHON* settings) runs before the label it writes. A plain command,
+// NOT pythonHookCommand(): that builder makes a hook fail-closed, and this one must never block a tool call.
+export function webSearchEnvelopeCommand(): string {
   const scriptPath = join(PROJECT_ROOT, 'scripts', 'hooks', WEBSEARCH_ENVELOPE_SCRIPT)
-  return `python3 "${scriptPath}"`
+  return `python3 -I -S "${scriptPath}"`
 }
+// The forms earlier versions wrote or documented, and nothing else: `python3 "<any root>/scripts/hooks/browser-content-
+// notice.py"` (the injector) and `python3 "$CLAUDE_PROJECT_DIR/..."` (docs/security-hardening.md, operator-wired).
+// The upgrade only inserts -I -S; the path stays exactly as written.
+export const LEGACY_ENVELOPE_COMMAND = /^python3 ("(?:\/[^"]*|\$CLAUDE_PROJECT_DIR)\/scripts\/hooks\/browser-content-notice\.py")$/
 
 // Removes OUR envelope hook only (a hook in a group, not the group: an
 // operator's own hook sharing a WebSearch group stays), then adds the managed
@@ -2335,7 +2512,17 @@ export function injectWebSearchEnvelope(existing: Record<string, unknown>): bool
       g.matcher === WEBSEARCH_ENVELOPE_MATCHER ||
       // a single envelope tool name; this also migrates the old WebSearch-only group
       (ENVELOPE_TOOLS as readonly string[]).includes(g.matcher))
-    if (!managed || !Array.isArray(g.hooks)) { kept.push(g); continue }
+    if (!managed || !Array.isArray(g.hooks)) {
+      // HOOKISOAGENTS1105: an operator-wired group keeps its matcher, its place and its path; an envelope command in
+      // a shipped or documented earlier form only gains -I -S, in place.
+      if (Array.isArray(g?.hooks)) {
+        for (const h of g.hooks) {
+          if (typeof h?.command === 'string') h.command = h.command.replace(LEGACY_ENVELOPE_COMMAND, 'python3 -I -S $1')
+        }
+      }
+      kept.push(g)
+      continue
+    }
     const rest = g.hooks.filter((h) => !isEnvelope(h))
     if (rest.length) kept.push({ ...g, hooks: rest })
   }
@@ -3042,7 +3229,8 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
       || emailGateMatcherStale(ptu)
       || emailGateCommandStale(ptu, emailCmdExpected)
       || !gateEntriesBlockOnFailure(ptu, 'email-send-gate.mjs'))
-  // A pre-MONITORGATE1030 matcher (no Monitor) is wired but blind to Monitor: stale, replaced in place.
+  // A self-pace entry under an older matcher (before MONITORGATE1030 or MCPWRITEGATE1104) is stale, as for the
+  // db-write-gate below. The spawn rewrites it anyway (injectSelfPaceGate); this covers the dashboard-restart pass.
   const paceStale = ptu.some((e) => JSON.stringify(e).includes('self-pace-gate.mjs')
     && (e as { matcher?: unknown })?.matcher !== SELF_PACE_GATE_MATCHER)
   const needPace = agentGetsGovernanceGates(name)
@@ -3052,6 +3240,11 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
     && (e as { matcher?: unknown })?.matcher !== DB_WRITE_GATE_MATCHER)
   const needDbGate = agentGetsGovernanceGates(name)
     && (!hookCommandWired(ptuJson, dbGateCmd) || dbGateStale || !gateEntriesBlockOnFailure(ptu, 'db-write-gate.mjs'))
+  const mxdGateCmd = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'mxd-path-gate.mjs'))
+  const mxdGateStale = ptu.some((e) => JSON.stringify(e).includes('mxd-path-gate.mjs')
+    && (e as { matcher?: unknown })?.matcher !== MXD_PATH_GATE_MATCHER)
+  const needMxdGate = agentGetsGovernanceGates(name)
+    && (!hookCommandWired(ptuJson, mxdGateCmd) || mxdGateStale || !gateEntriesBlockOnFailure(ptu, 'mxd-path-gate.mjs'))
   // The destructive gate has the same two failure modes, plus a third that is
   // specific to it: it was hand-wired on 2026-09-08, so an install can carry a
   // correct-looking entry this code never wrote. Treat a stale matcher as
@@ -3075,12 +3268,13 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
     && (!hookCommandWired(ptuJson, reviewerCmd) || reviewerStale)
   // Off with an entry still wired: the entry goes (see removeSecondReviewerGate).
   const dropReviewer = !agentGetsSecondReviewer(name, profile) && hasSecondReviewerHook(ptu)
-  if (!needEmail && !needPace && !needDbGate && !needDestructive && !needCredential && !needReviewer && !dropReviewer) return false
+  if (!needEmail && !needPace && !needDbGate && !needMxdGate && !needDestructive && !needCredential && !needReviewer && !dropReviewer) return false
   // The injectors dedupe by script basename, so a stale bare-`node` entry is
   // replaced in place rather than accumulated.
   if (needEmail) injectEmailSendGate(settings, threadReply)
   if (needPace) injectSelfPaceGate(settings)
   if (needDbGate) injectDbWriteGate(settings)
+  if (needMxdGate) injectMxdPathGate(settings)
   if (needDestructive) injectDestructiveGate(settings)
   if (needCredential) injectCredentialGate(settings)
   if (needReviewer) injectSecondReviewerGate(settings)
@@ -3220,7 +3414,12 @@ function copyTaskConfigWithAgentRewrite(srcPath: string, destPath: string): void
   }
 }
 
-export function ensureDefaultScheduledTasks(): void {
+/**
+ * Seeds the repo's top-level scheduled tasks into ~/.claude. `lang` (PERSONAESC1107 seed A): the install's agent-text
+ * language, read only; on en a Markdown file comes from i18n/en/<its repo path> when that exists (src/web/seed-lang.ts,
+ * the same rule as the shell seeders). A parameter so a test does not depend on the checkout's .env and CLAUDE.md.
+ */
+export function ensureDefaultScheduledTasks(lang: AgentTextLang = agentTextLang()): void {
   const repoTasks = join(PROJECT_ROOT, 'scheduled-tasks')
   if (!existsSync(repoTasks)) return
   const destRoot = join(homedir(), '.claude', 'scheduled-tasks')
@@ -3251,10 +3450,11 @@ export function ensureDefaultScheduledTasks(): void {
         // Substitute the identity placeholders (same set the install scripts
         // sed) so a template's SKILL.md never seeds a foreign absolute path or
         // name into the user's task. Binary/unreadable -> fall back to a copy.
+        const readFrom = seedSourceFor(PROJECT_ROOT, join('scheduled-tasks', taskName, file), lang)
         try {
-          writeFileSync(destFile, resolveTemplatePlaceholders(readFileSync(srcFile, 'utf-8')))
+          writeFileSync(destFile, resolveTemplatePlaceholders(readFileSync(readFrom, 'utf-8')))
         } catch {
-          copyFileSync(srcFile, destFile)
+          copyFileSync(readFrom, destFile)
         }
       }
     }
@@ -3345,7 +3545,7 @@ export function scaffoldAgentDir(name: string) {
   if (!existsSync(settingsJson)) {
     const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')
     if (existsSync(tplPath)) {
-      const resolved = resolveTemplatePlaceholders(readFileSync(tplPath, 'utf-8'))
+      const resolved = resolveTemplatePlaceholders(localizeSettingsTemplate(readFileSync(tplPath, 'utf-8')))
       atomicWriteFileSync(settingsJson, seedSettingsFromTemplate(resolved, ytDlpIngestOnly()))
     }
   }
@@ -3408,7 +3608,8 @@ const MCPLIST_BLOCK_RE = new RegExp(
  * message is lost. That was reported by the external submitter; we reproduced
  * the tool/plugin side only.
  */
-function buildMcpListChannelBody(): string {
+export function buildMcpListChannelBody(): string {
+  if (agentTextLang() === 'en') return buildMcpListChannelBodyEn()
   return [
     '## `claude mcp list` és gyerek-`claude` egy csatornát birtokló ügynökben',
     '',
@@ -3454,7 +3655,25 @@ const EVIDENCE_BLOCK_RE = new RegExp(
 // - listAgentNames() reads the agents/ directory; the main agent has no
 //   subdirectory there (it lives in the project root). Without explicit
 //   prepending, the main agent would be absent from every peer's roster.
-function buildFleetRosterBody(selfName: string): string {
+// PERSONAESC1107: the roster's words; the English set is ROSTER_TEXT_EN (agent-scaffold-en.ts).
+const ROSTER_TEXT_HU: RosterText = {
+  heading: '## A flotta többi agense',
+  intro: [
+    'Ez a lista automatikusan generálódik az ágens indulásakor, ez a mérvadó és naprakész forrás.',
+    'Ha a fenti szövegben régebbi, kézzel írt felsorolás szerepel, ezt a szekciót vedd figyelembe.',
+  ],
+  subordinateTag: ' (beosztottad)',
+  leadTag: ' (vezetőd)',
+  delegateTag: ' (delegálhatsz neki)',
+  none: '(nincs regisztrált ágens)',
+  lead: (n) => `Vezetőd: **${n}**.`,
+  subordinates: (list) => `Beosztottjaid: ${list}.`,
+  delegates: (list) => `Kiknek delegálhatsz: ${list}.`,
+  outro: 'Ha egy kérés egyértelműen más szakterületére esik, jelezd vagy delegáld inter-agent üzenettel a megfelelő ágensnek.',
+}
+
+export function buildFleetRosterBody(selfName: string): string {
+  const T = agentTextLang() === 'en' ? ROSTER_TEXT_EN : ROSTER_TEXT_HU
   let agentNames: string[]
   try {
     agentNames = listAgentNames()
@@ -3534,18 +3753,18 @@ function buildFleetRosterBody(selfName: string): string {
     // ALSO this agent's own (validated) manager.
     if (peerReportsTo === selfName && agentName !== selfReportsTo) {
       subordinates.push(agentName)
-      roleTag = ' (beosztottad)'
+      roleTag = T.subordinateTag
     } else if (agentName === selfReportsTo) {
-      roleTag = ' (vezetőd)'
+      roleTag = T.leadTag
     } else if (selfDelegates.has(agentName)) {
-      roleTag = ' (delegálhatsz neki)'
+      roleTag = T.delegateTag
     }
     if (selfDelegates.has(agentName)) delegates.push(agentName)
 
     lines.push(`- **${agentName}** (agent_id: ${agentName})${roleTag}: ${capsStr}`)
   }
 
-  const roster = lines.length > 0 ? lines.join('\n') : '(nincs regisztrált ágens)'
+  const roster = lines.length > 0 ? lines.join('\n') : T.none
 
   // Factual only (2026-10-23, reviewer-measured): the line used to also
   // prescribe ROUTING ("a kész munkát neki adod át, nem közvetlenül a
@@ -3555,25 +3774,24 @@ function buildFleetRosterBody(selfName: string): string {
   // agent's own text, not in this generated, one-size-fits-all block.
   const hierarchyLines: string[] = []
   if (selfReportsTo) {
-    hierarchyLines.push(`Vezetőd: **${selfReportsTo}**.`)
+    hierarchyLines.push(T.lead(selfReportsTo))
   }
   if (subordinates.length > 0) {
-    hierarchyLines.push(`Beosztottjaid: ${subordinates.map((n) => `**${n}**`).join(', ')}.`)
+    hierarchyLines.push(T.subordinates(subordinates.map((n) => `**${n}**`).join(', ')))
   }
   if (delegates.length > 0) {
-    hierarchyLines.push(`Kiknek delegálhatsz: ${delegates.map((n) => `**${n}**`).join(', ')}.`)
+    hierarchyLines.push(T.delegates(delegates.map((n) => `**${n}**`).join(', ')))
   }
 
   return [
-    '## A flotta többi agense',
+    T.heading,
     '',
-    'Ez a lista automatikusan generálódik az ágens indulásakor, ez a mérvadó és naprakész forrás.',
-    'Ha a fenti szövegben régebbi, kézzel írt felsorolás szerepel, ezt a szekciót vedd figyelembe.',
+    ...T.intro,
     '',
     roster,
     '',
     ...(hierarchyLines.length > 0 ? [...hierarchyLines, ''] : []),
-    'Ha egy kérés egyértelműen más szakterületére esik, jelezd vagy delegáld inter-agent üzenettel a megfelelő ágensnek.',
+    T.outro,
   ].join('\n')
 }
 
@@ -3626,7 +3844,8 @@ function ownTokenConsume403(name: string): string {
 
 // `helper`: the recipes go through scripts/marveen-api.sh (agentUsesApiHelper: every agent whose settings do not deny
 // it). `strict`: the agent also has the "Dashboard-hívások a strict profilodban" section the level-1 text points at.
-function buildAutonomyBody(name: string, helper = true, strict = false): string {
+export function buildAutonomyBody(name: string, helper = true, strict = false): string {
+  if (agentTextLang() === 'en') return buildAutonomyBodyEn(name, helper, strict, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Autonómia és jóváhagyás',
@@ -3734,10 +3953,16 @@ export function recipientLedgerEnabledForScaffold(): boolean {
 // ledger for the main agent too (its approval gate and the project's own
 // senders check every recipient), and the paragraph then says so: the text
 // must stay true for the install it is written into.
+// FORK: the English twin of the ledger-off paragraph below (the same code spans; generated-sections-en.test.ts pins it).
+const LEDGER_OFF_PARAGRAPHS_EN: string[] = [
+  'On this install the recipient ledger (`store/verified-recipients.json`) is switched OFF (`EMAIL_RECIPIENT_LEDGER=off` in the root `.env`, owner decision 2026-09-23): the PreToolUse hook does NOT check the `to`/`cc`/`bcc` addresses of an outgoing email against a ledger, so a letter or a draft can go to anyone. The source rule is not weakened by this: an address still comes from a source (From header, live site, order, contract), and you name the source in the note with the letter or on the card. If the switch is turned back on, adding the addresses:',
+]
+
 // FORK: with EMAIL_RECIPIENT_LEDGER=off the ledger gate is off for EVERY audience, so both
 // get the same switched-off paragraph; with it on, upstream's split applies (main with MAIN_AGENT_RECIPIENT_LEDGER=1,
 // main without it, sub-agent). `mainLedger` is upstream's switch, see below.
 export function buildEvidenceBody(isMainAgent = false, ledgerOn: boolean = recipientLedgerEnabledForScaffold(), mainLedger = mainAgentRecipientLedgerEnabled()): string {
+  if (agentTextLang() === 'en') return buildEvidenceBodyEn(isMainAgent, mainLedger, scaffoldFrags(MAIN_AGENT_ID), ledgerOn ? undefined : LEDGER_OFF_PARAGRAPHS_EN)
   const gateParagraphs: string[] = !ledgerOn
     ? [
         'Ezen a telepítésen a címzett-ledger (`store/verified-recipients.json`) KI van kapcsolva (`EMAIL_RECIPIENT_LEDGER=off` a gyökér `.env`-ben, tulajdonosi döntés 2026-09-23): a kimenő levél `to`/`cc`/`bcc` címeit a PreToolUse hook NEM méri ledgerhez, bárkinek írható levél és piszkozat. A forrás-szabály ettől nem gyengül: a cím továbbra is forrásból jön (From fejléc, élő oldal, rendelés, szerződés), és a forrást a levél kísérőjében vagy a kártyán nevezd meg. Ha a kapcsolót visszaveszik, a címek felvétele:',
@@ -3824,7 +4049,7 @@ export function ensureEvidenceSection(name: string): void {
 
   let updated: string
   if (EVIDENCE_BLOCK_RE.test(existing)) {
-    updated = existing.replace(EVIDENCE_BLOCK_RE, block)
+    updated = existing.replace(EVIDENCE_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -3857,7 +4082,7 @@ export function ensureMcpListChannelSection(name: string): void {
 
   let updated: string
   if (MCPLIST_BLOCK_RE.test(existing)) {
-    updated = existing.replace(MCPLIST_BLOCK_RE, block)
+    updated = existing.replace(MCPLIST_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -3886,6 +4111,7 @@ const MSGCLOSE_BLOCK_RE = new RegExp(
 // token); the default keeps the zero-argument call shape. `helper`: the recipe goes through
 // scripts/marveen-api.sh (agentUsesApiHelper), the token never on a command line (VOICETOKENLEAK1101 PR-A1).
 export function buildMessageCloseBody(helper = true, name: string = MAIN_AGENT_ID): string {
+  if (agentTextLang() === 'en') return buildMessageCloseBodyEn(helper, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Üzenet lezárása: bejövő riportnál `notify:false`',
@@ -3938,7 +4164,7 @@ export function ensureMessageCloseSection(name: string): void {
   }
 
   const updated = MSGCLOSE_BLOCK_RE.test(existing)
-    ? existing.replace(MSGCLOSE_BLOCK_RE, block)
+    ? existing.replace(MSGCLOSE_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -3963,6 +4189,7 @@ const BGCHECKPOINT_BLOCK_RE = new RegExp(
 )
 
 export function buildBackgroundCheckpointBody(): string {
+  if (agentTextLang() === 'en') return buildBackgroundCheckpointBodyEn()
   return [
     '## Hosszú háttér-munka: menet közbeni mentés, folytatás a mentett részből',
     '',
@@ -3999,7 +4226,7 @@ export function ensureBackgroundCheckpointSection(name: string): void {
   }
 
   const updated = BGCHECKPOINT_BLOCK_RE.test(existing)
-    ? existing.replace(BGCHECKPOINT_BLOCK_RE, block)
+    ? existing.replace(BGCHECKPOINT_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -4032,7 +4259,7 @@ export function ensureAutonomySection(name: string): void {
 
   let updated: string
   if (AUTONOMY_BLOCK_RE.test(existing)) {
-    updated = existing.replace(AUTONOMY_BLOCK_RE, block)
+    updated = existing.replace(AUTONOMY_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4070,7 +4297,7 @@ export function ensureFleetRosterSection(name: string): void {
 
   let updated: string
   if (FLEET_ROSTER_BLOCK_RE.test(existing)) {
-    updated = existing.replace(FLEET_ROSTER_BLOCK_RE, block)
+    updated = existing.replace(FLEET_ROSTER_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4122,9 +4349,41 @@ const SKILLS_TRAP_BLOCK_RE = new RegExp(
   `${SKILLS_TRAP_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${SKILLS_TRAP_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
 )
 
+// FORK: the English twin of the one-tree body below (SKILLSGIT914), line for line, with the same code spans.
+function buildForkSkillsPathTrapBodyEn(): string {
+  return [
+    SKILLS_TRAP_HEADING_EN,
+    '',
+    'The fleet\'s skills have ONE source, the repo root\'s `.claude/skills` tree: a',
+    'clone of the PRIVATE marveen-skills git repo (the marveen fork is public, so the skills',
+    'cannot live in it). Claude reads the project skills from your working directory up to the git',
+    'root, so this tree is visible to YOU TOO, from the agents/<name> cwd as well.',
+    'There is NO global `~/.claude/skills` and NO per-agent `.claude/skills` copy:',
+    'whatever goes there reaches nobody, and next to the tree it causes a double listing.',
+    'A new or fixed skill: under the repo root\'s `.claude/skills/<name>/`, then',
+    `\`git -C ${PROJECT_ROOT}/.claude/skills add -A && git commit && git push\``,
+    '(AGENT.md 2/A: push right after the commit; the pre-commit secret-gate runs). What the',
+    'fleet should not see is not a skill but a memory. (SKILLSGIT914, 2026-09-14.)',
+    '',
+    'The same trap holds for MEMORY: `.claude-config/projects` can be a symlink',
+    'to `~/.claude/projects`. Do NOT derive which memory folder is yours from the',
+    'name of your working directory: what counts is the path GIVEN in the memory section of the system prompt,',
+    'resolved with `readlink -f`. On a git-checkout install (the default case)',
+    'Claude Code keys it by the REPO ROOT: if the resolved path is the folder under',
+    '`~/.claude/projects/` keyed by the slug of the install root,',
+    'then it is the main agent\'s, and whatever goes there is loaded by the main agent and by every',
+    'agent session that gets the same folder. It is yours if the resolved path is in the real folder of your own',
+    '`.claude-config`, or if the slug of your own folder is in it',
+    '(an own stub git repo, or an install without git). The place of a memory that belongs',
+    'to you alone is the dashboard API regardless (`POST /api/memories`,',
+    'with `agent_id`).',
+  ].join('\n')
+}
+
 // FORK: the body is the same for every agent (SKILLSGIT914: one tree, no global dir, no per-agent copy), so the
 // agent name upstream passes is accepted and not used.
 export function buildSkillsPathTrapBody(_name?: string): string {
+  if (agentTextLang() === 'en') return buildForkSkillsPathTrapBodyEn()
   return [
     '## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)',
     '',
@@ -4193,7 +4452,7 @@ export function ensureSkillsPathTrapSection(name: string): void {
 
   let updated: string
   if (SKILLS_TRAP_BLOCK_RE.test(existing)) {
-    updated = existing.replace(SKILLS_TRAP_BLOCK_RE, block)
+    updated = existing.replace(SKILLS_TRAP_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4230,8 +4489,8 @@ export function findSection(text: string, heading: string): { start: number; end
 }
 
 /** The CLAUDE.md with an unedited retired skill section replaced by `current`, or null when nothing changes. */
-export function upgradeRetiredSkillSection(text: string, retired: string[], current: string): string | null {
-  const at = findSection(text, SKILL_SECTION_HEADING)
+export function upgradeRetiredSkillSection(text: string, retired: string[], current: string, heading: string = SKILL_SECTION_HEADING): string | null {
+  const at = findSection(text, heading)
   if (!at) return null
   const norm = normalizeSectionWhitespace(text.slice(at.start, at.end))
   if (norm === normalizeSectionWhitespace(current)) return null
@@ -4245,11 +4504,13 @@ export function upgradeRetiredSkillSection(text: string, retired: string[], curr
 // migration. The path is a test seam only.
 export function readRetiredSkillSections(
   p: string = join(PROJECT_ROOT, 'templates', 'retired-claude-md-sections.json'),
+  // PERSONAESC1107: the list under this heading; the English section's old texts go under its English heading.
+  heading: string = SKILL_SECTION_HEADING,
 ): string[] {
   if (!existsSync(p)) return []
   try {
     const parsed = JSON.parse(readFileSync(p, 'utf-8')) as Record<string, unknown>
-    const list = parsed[SKILL_SECTION_HEADING]
+    const list = parsed[heading]
     return Array.isArray(list) ? list.filter((s): s is string => typeof s === 'string') : []
   } catch (err) {
     logger.warn({ err, path: p }, 'ensureSkillSectionCurrent: retired-claude-md-sections.json unreadable, the skill section is not migrated')
@@ -4293,8 +4554,14 @@ export function ensureSkillSectionCurrent(name: string, retiredPath?: string): b
   const thisForm = buildSkillSection(helper ? name : undefined, tokenFile)
   // SKILLAPPROVALOFF1101: the section as both forms read before the quarantine became a switch. It carries the agent's
   // own token path and name, so it cannot be a fixed entry of the retired file: it is rebuilt from today's form.
-  const retired = [...readRetiredSkillSections(retiredPath), otherForm, preQuarantineSwitchSection(otherForm), preQuarantineSwitchSection(thisForm)]
-  const updated = upgradeRetiredSkillSection(existing, retired, thisForm)
+  // PERSONAESC1107: an English install looks only for the English heading; its retired forms are the other recipe form
+  // and the English heading's list in the retired file (where a later English wording's old text goes, EGM review).
+  // Never cross-language: a Hungarian section on an English install (a key set by hand) is left alone, a documented limit.
+  const english = agentTextLang() === 'en'
+  const retired = english
+    ? [...readRetiredSkillSections(retiredPath, SKILL_SECTION_HEADING_EN), otherForm]
+    : [...readRetiredSkillSections(retiredPath), otherForm, preQuarantineSwitchSection(otherForm), preQuarantineSwitchSection(thisForm)]
+  const updated = upgradeRetiredSkillSection(existing, retired, thisForm, english ? SKILL_SECTION_HEADING_EN : SKILL_SECTION_HEADING)
   if (updated === null || updated === existing) return false
   atomicWriteFileSync(claudeMdPath, updated)
   return true
@@ -4315,6 +4582,7 @@ const SYSTEM_DIRECTIVE_AUTH_BLOCK_RE = new RegExp(
 )
 
 export function buildSystemDirectiveAuthBody(name: string, helper = true): string {
+  if (agentTextLang() === 'en') return buildSystemDirectiveAuthBodyEn(name, helper, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Rendszer-direktíva hitelesítés (KÖTELEZŐ, végrehajtás előtt)',
@@ -4365,7 +4633,7 @@ export function ensureSystemDirectiveAuthSection(name: string): void {
 
   let updated: string
   if (SYSTEM_DIRECTIVE_AUTH_BLOCK_RE.test(existing)) {
-    updated = existing.replace(SYSTEM_DIRECTIVE_AUTH_BLOCK_RE, block)
+    updated = existing.replace(SYSTEM_DIRECTIVE_AUTH_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4391,6 +4659,7 @@ const AGENT_ID_HEADER_BLOCK_RE = new RegExp(
 // customer deleted 84 rows trusting it. agent-id-header-delete-truth.test.ts
 // ties this text to that behaviour.
 export function buildAgentIdHeaderBody(name: string, helper = true): string {
+  if (agentTextLang() === 'en') return buildAgentIdHeaderBodyEn(name, helper, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Ki hívta az API-t: az `X-Agent-Id` fejléc',
@@ -4450,7 +4719,7 @@ export function ensureAgentIdHeaderSection(name: string): void {
   }
 
   const updated = AGENT_ID_HEADER_BLOCK_RE.test(existing)
-    ? existing.replace(AGENT_ID_HEADER_BLOCK_RE, block)
+    ? existing.replace(AGENT_ID_HEADER_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -4718,7 +4987,7 @@ export function ensureThinChiefHandoffSection(name: string): void {
 
   let updated: string
   if (THIN_CHIEF_BLOCK_RE.test(existing)) {
-    updated = existing.replace(THIN_CHIEF_BLOCK_RE, block)
+    updated = existing.replace(THIN_CHIEF_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4754,6 +5023,7 @@ const MEMORY_SEARCH_LABEL_BLOCK_RE = new RegExp(
 // so the header dump file is genuinely per-agent and two agents searching at the
 // same time cannot read each other's label out of one shared /tmp path.
 export function buildMemorySearchLabelBody(name: string, helper = true): string {
+  if (agentTextLang() === 'en') return buildMemorySearchLabelBodyEn(name, helper, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Memória-keresés: a FEJLÉCET is olvasd el (KÖTELEZŐ)',
@@ -4837,7 +5107,7 @@ export function ensureMemorySearchLabelSection(name: string): void {
 
   const block = `${MEMORY_SEARCH_LABEL_BEGIN}\n${buildMemorySearchLabelBody(name, agentUsesApiHelper(name))}\n${MEMORY_SEARCH_LABEL_END}`
   const updated = hasBlock
-    ? existing.replace(MEMORY_SEARCH_LABEL_BLOCK_RE, block)
+    ? existing.replace(MEMORY_SEARCH_LABEL_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -4881,6 +5151,7 @@ const FLEET_AUTH_BLOCK_RE = new RegExp(
 // Host-agnostic on purpose: no operator name, no per-install agent names. The
 // rule is about the auth PATH, which is identical on every install.
 export function buildFleetAuthBody(): string {
+  if (agentTextLang() === 'en') return buildFleetAuthBodyEn()
   return [
     '## Flotta-szintű AUTH-szabály (MEGSZEGHETETLEN)',
     '',
@@ -4935,7 +5206,7 @@ export function ensureFleetAuthSection(name: string): void {
 
   const block = `${FLEET_AUTH_BEGIN}\n${buildFleetAuthBody()}\n${FLEET_AUTH_END}`
   const updated = hasBlock
-    ? existing.replace(FLEET_AUTH_BLOCK_RE, block)
+    ? existing.replace(FLEET_AUTH_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -4982,6 +5253,7 @@ const helperExitCodes = [
 ]
 
 export function buildStrictApiBody(name: string): string {
+  if (agentTextLang() === 'en') return buildStrictApiBodyEn(name, scaffoldFrags(name))
   return [
     '## Dashboard-hívások a strict profilodban',
     '',
@@ -5014,6 +5286,7 @@ const API_HELPER_BLOCK_RE = new RegExp(
 )
 
 export function buildApiHelperBody(name: string): string {
+  if (agentTextLang() === 'en') return buildApiHelperBodyEn(name, scaffoldFrags(name))
   return [
     '## Dashboard-hívások: a segéd (ez ÍRJA FELÜL a curl-recepteket)',
     '',
@@ -5055,7 +5328,7 @@ export function ensureApiHelperSection(name: string): void {
   if (!agentRunsStrict(name) && agentUsesApiHelper(name)) {
     const block = `${API_HELPER_BEGIN}\n${buildApiHelperBody(name)}\n${API_HELPER_END}`
     updated = hasBlock
-      ? existing.replace(API_HELPER_BLOCK_RE, block)
+      ? existing.replace(API_HELPER_BLOCK_RE, () => block)
       : existing.trimEnd() + '\n\n' + block + '\n'
   } else {
     if (!hasBlock) return
@@ -5085,7 +5358,7 @@ export function ensureStrictApiSection(name: string): void {
   if (agentRunsStrict(name)) {
     const block = `${STRICT_API_BEGIN}\n${buildStrictApiBody(name)}\n${STRICT_API_END}`
     updated = hasBlock
-      ? existing.replace(STRICT_API_BLOCK_RE, block)
+      ? existing.replace(STRICT_API_BLOCK_RE, () => block)
       : existing.trimEnd() + '\n\n' + block + '\n'
   } else {
     if (!hasBlock) return
@@ -5101,7 +5374,8 @@ export function ensureStrictApiSection(name: string): void {
 // #2232: the helper recipes a strict-profile agent gets in place of the curl lines of the creation prompt below;
 // since VOICETOKENLEAK1101 PR-A2 every agent whose settings allow the helper (agentUsesApiHelper) gets them too, with
 // a neutral intro (the dontAsk sentence is strict-only). One fixed payload file per recipe kind, in the agent's dir.
-function strictPromptRecipes(name: string, strict = true) {
+function strictPromptRecipes(name: string, strict = true): PromptRecipes {
+  if (agentTextLang() === 'en') return strictPromptRecipesEn(strict, scaffoldFrags(name))
   const mem = shellWord(apiPayloadPath(name, 'memoria'))
   const log = shellWord(apiPayloadPath(name, 'naplo'))
   const msg = shellWord(apiPayloadPath(name, 'uzenet'))
@@ -5147,6 +5421,12 @@ function strictSkillProposeRecipe(name: string): string {
 // The token file is the agent's own (dashboardTokenPathFor, #2325), as in every other
 // recipe of the CLAUDE.md.
 export function buildSkillSection(strictAgent?: string, tokenFile: string = mainTokenPath()): string {
+  if (agentTextLang() === 'en') {
+    return buildSkillSectionEn({
+      strictRecipe: strictAgent ? { draft: join(agentDir(strictAgent), 'skill-javaslat.md'), reason: join(agentDir(strictAgent), 'skill-javaslat-indok.txt') } : null,
+      tokenFile, f: scaffoldFrags(strictAgent ?? MAIN_AGENT_ID),
+    })
+  }
   return `## Öntanulás és Skill rendszer
 
 Te egy önfejlesztő ágens vagy. A munkád során tanulsz, és újrafelhasználható skill-eket hozol létre.
@@ -5189,6 +5469,42 @@ Minden kontextus-tömörítés előtt (PreCompact hook) automatikusan vizsgáld 
 - Van-e meglévő skill amit javítani kellene?`
 }
 
+// FORK: the English twin of the creation prompt's one-tree skill section (the Hungarian one is inline in
+// generateClaudeMd: "## Öntanulás és Skill rendszer"). The mkdir line is the Hungarian prompt's, byte for byte.
+function buildForkSkillSectionEn(): string {
+  return `${SKILL_SECTION_HEADING_EN}
+
+You are a self-improving agent. You learn as you work, and you create reusable skills.
+
+### Where skills live
+- ONE tree: the repo root's .claude/skills/ (a clone of the private marveen-skills git repo; every agent sees it, from the agents/<name> cwd too)
+- TRAP: ~/.claude/skills and agents/<name>/.claude/skills do NOT exist any more -- whatever goes there reaches nobody; a skill goes into the tree, commit + push
+
+### Automatic skill generation
+After complex tasks (5+ tool calls, recovery after an error, user correction, multi-step workflow) create a SKILL.md file automatically:
+
+mkdir -p ${PROJECT_ROOT}/.claude/skills/SKILL-NEV   # majd: git -C ${PROJECT_ROOT}/.claude/skills add -A && git commit && git push
+The SKILL.md has a YAML frontmatter (name, description), then sections: When to use, Procedure, Pitfalls, Verification.
+
+### Skill patch (runtime fix)
+If you find a better way while using an existing skill:
+1. Do not rewrite the whole skill, fix only the changed part
+2. Use a targeted replacement (old text -> new text)
+3. Note the reason for the change in the Pitfalls section of the skill
+
+### When to generate a skill?
+- 5+ tool calls, successful finish: Generate a skill
+- Error -> recovery -> success: Generate a skill (with a pitfalls section)
+- User correction: Patch the existing skill
+- Non-trivial workflow: Generate a skill
+- Simple, one-step task: Generate nothing
+
+### Skill reflection
+Before every context compaction (PreCompact hook) check automatically:
+- Is there a reusable pattern in the session?
+- Is there an existing skill that should be fixed?`
+}
+
 export async function generateClaudeMd(name: string, description: string, model: string): Promise<string> {
   // Distribution-safe default-drive line: only emit a concrete folder when this
   // install has one configured (OWNER_DRIVE_FOLDER). A fresh install with no
@@ -5220,7 +5536,14 @@ export async function generateClaudeMd(name: string, description: string, model:
   const R = strictPromptRecipes(name, strict)
   // The generated sections (autonomy, skill) are rendered as on every start: helper recipes unless the settings deny it.
   const helper = agentUsesApiHelper(name)
-  const prompt = `You are creating the CLAUDE.md (project instructions) file for an AI agent.
+  const prompt = agentTextLang() === 'en'
+    ? buildClaudeMdPromptEn({
+        name, description, model, ownerName: OWNER_NAME, appTz: APP_TZ, driveFolder: ownerDriveFolder,
+        // FORK: the creation prompt's skill section is the one-tree text (SKILLSGIT914), as in the Hungarian prompt below.
+        agentsDir: join(PROJECT_ROOT, 'agents'), helper, R, skillSection: buildForkSkillSectionEn(),
+        f: scaffoldFrags(name),
+      })
+    : `You are creating the CLAUDE.md (project instructions) file for an AI agent.
 Agent name: ${name}
 Description of what the agent should do: ${description}
 Model: ${model}
@@ -5450,7 +5773,7 @@ function blockedHint(target: string, reason: string): string {
 }
 
 export async function generateSoulMd(name: string, description: string): Promise<string> {
-  const prompt = `You are creating the SOUL.md (personality definition) for an AI agent.
+  const prompt = agentTextLang() === 'en' ? buildSoulPromptEn(name, description, OWNER_NAME) : `You are creating the SOUL.md (personality definition) for an AI agent.
 Agent name: ${name}
 Description: ${description}
 
@@ -5478,7 +5801,7 @@ Output ONLY the markdown content, no code fences.`
 }
 
 export async function generateSkillMd(skillName: string, description: string): Promise<string> {
-  const prompt = `You are creating a SKILL.md file for a Claude Code skill. Follow this exact format:
+  const prompt = agentTextLang() === 'en' ? buildSkillPromptEn(skillName, description, OWNER_NAME) : `You are creating a SKILL.md file for a Claude Code skill. Follow this exact format:
 
 Skill name: ${skillName}
 What the user described: ${description}

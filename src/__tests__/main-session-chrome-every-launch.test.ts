@@ -17,13 +17,18 @@ import { mainConfigDecisionForTest } from '../web/main-config-decision.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8')
 
+// Where the channels argument sits on a launch line: the literal flag, or (upstream v1.49, GROMZONOPROVIDER1108)
+// the variable that holds it, ${CHANNELS_ARG} in channels.sh / channel-watchdog.sh and ${CHAN_ARG} in stuck-modal-guard.sh.
+const CHANNELS_AT = ['--channels', '${CHANNELS_ARG}', '${CHAN_ARG}']
+const channelsIndex = (l: string) => Math.min(...CHANNELS_AT.map((t) => l.indexOf(t)).filter((i) => i >= 0))
+
 // The code lines (no comments) of a script that launch claude for a channel.
 const launchLines = (src: string) =>
-  src.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('--dangerously-skip-permissions') && l.includes('--channels'))
+  src.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('--dangerously-skip-permissions') && CHANNELS_AT.some((t) => l.includes(t)))
 
-// --chrome must sit between the permission flag and --channels, as in channels.sh.
+// --chrome must sit between the permission flag and the channels argument, as in channels.sh.
 const chromeBeforeChannels = (l: string) => {
-  const p = l.indexOf('--dangerously-skip-permissions'); const c = l.indexOf('--chrome'); const ch = l.indexOf('--channels')
+  const p = l.indexOf('--dangerously-skip-permissions'); const c = l.indexOf('--chrome'); const ch = channelsIndex(l)
   return p >= 0 && c > p && ch > c
 }
 

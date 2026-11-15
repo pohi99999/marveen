@@ -25,7 +25,8 @@ const OTHER = '/opt/other-install'
 const TAIL = ' && python3 scripts/usage-collect.py; python3 scripts/usage-quota-gate.py'
 
 function shellRender(content: string, installDir: string): string {
-  const update = readFileSync(join(ROOT, 'update.sh'), 'utf-8')
+  // upstream v1.49 moved render_seed_template from update.sh into scripts/lib/seed-refresh.sh (sourced by update.sh)
+  const update = readFileSync(join(ROOT, 'scripts/lib/seed-refresh.sh'), 'utf-8')
   const start = update.indexOf('render_seed_template() {')
   const fn = update.slice(start, update.indexOf('\n}', start) + 2)
   return execFileSync('/bin/bash', ['-c', `${fn}\nrender_seed_template`], {

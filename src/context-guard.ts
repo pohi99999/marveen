@@ -237,6 +237,17 @@ export function contextLimitForModel(model: string | null | undefined): number {
   if (typeof model !== 'string') return 200_000
   const m = model.toLowerCase()
   if (m.includes('[1m]')) return 1_000_000
+  // Fable 5.2 (FABLE52SELECTOR1109, measured 2026-11-09): the model has a 1M
+  // window (official models overview), but Claude Code 2.1.319, the fleet's
+  // CLI, does not know the id yet: `claude -p --model claude-fable-5-2` warns
+  // [claude-code:unrecognized_model] and reports contextWindow 200000 /
+  // maxOutputTokens 32000 in modelUsage, where claude-fable-5-1 on the same CLI
+  // reports 1000000 / 64000. The CLI therefore reports a 200k window for the
+  // session (inferred from that metadata; a 200k+ session was not run to watch
+  // a cap), and reading it against 1M would blind the proactive tiers (the
+  // 2026-07-26 failure mode above) if the CLI acts on what it reports. Drop
+  // this line once the CLI reports 1M for the id.
+  if (/fable-5-2\b/.test(m)) return 200_000
   if (ONE_MILLION_FAMILIES.some(rx => rx.test(m))) return 1_000_000
   // minimax-m3 is a special case, NOT a general "trust the vendor" precedent
   // (see deepseek-v4-pro below, which stays 200_000 on live measurement).
@@ -249,7 +260,21 @@ export function contextLimitForModel(model: string | null | undefined): number {
   // override without reverting this would under-restart against a window the
   // CLI no longer has.
   if (m.startsWith('minimax-')) return 1_000_000
+  // Same pairing for OpenRouter's DeepSeek V4 family: OpenRouter lists a
+  // 1,048,576-token context for deepseek/deepseek-v4* (models API, 2026-10-12),
+  // but Claude Code does not know these ids and caps the session at 200k
+  // (dipike on deepseek/deepseek-v4.1-flash: status bar 165k/200k).
+  // agent-process.ts exports CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000 for exactly
+  // the ids this predicate accepts. The direct-API deepseek-v4-pro (no
+  // "deepseek/" prefix) is untouched and stays 200k.
+  if (isOpenRouterOneMillionModel(m)) return 1_000_000
   return 200_000
+}
+
+/** OpenRouter model ids that run a 1M window once Claude Code is told so via
+ *  CLAUDE_CODE_MAX_CONTEXT_TOKENS (set in agent-process.ts resolveProviderEnv). */
+export function isOpenRouterOneMillionModel(model: string): boolean {
+  return /^deepseek\/deepseek-v4/.test(model.toLowerCase())
 }
 
 /**
@@ -1435,4 +1460,71 @@ function handoffRequest(
       idleFlushSequence: reason.startsWith(IDLE_FLUSH_REASON_PREFIX),
     },
   }
+}
+
+/** OWNERGATE3-1104 (review, Samu 69602): which fields of a context-guard change make the guard WEAKER, comparing the
+ *  normalized config before and after the change. The shared access token (every sub-agent can read it) may only
+ *  strengthen a guard (the main agent arms other agents' guards with it); any weakening needs the owner, on any
+ *  agent, so a sub-agent cannot switch off or loosen another agent's guard. Weaker means:
+ *   - a switch going from on to off: enabled, saturationRestart, idleFlushEnabled, dailyHandoffEnabled;
+ *   - a number going up (the guard acts later, waits longer or holds longer): actPct, hardPct, cooldownMinutes,
+ *     handoffTimeoutMinutes, idleFlushTokens, idleMinutes, heavyJobDeferMaxMinutes;
+ *   - limitTokens changing in any way except to a smaller explicit number (null means "infer from the model", which
+ *     may be a larger window, so clearing it is treated as weakening);
+ *   - dailyHandoffTime moved or cleared once set (a moved time can postpone the restart; setting it from null arms).
+ *  A reset to the shipped defaults is not special: the default enabled is false, so a reset can switch a guard off. */
+export function contextGuardWeakenings(before: ContextGuardConfig, after: ContextGuardConfig): string[] {
+  const out: string[] = []
+  for (const k of ['enabled', 'saturationRestart', 'idleFlushEnabled', 'dailyHandoffEnabled'] as const) {
+    if (before[k] === true && after[k] !== true) out.push(k)
+  }
+  for (const k of ['actPct', 'hardPct', 'cooldownMinutes', 'handoffTimeoutMinutes', 'idleFlushTokens', 'idleMinutes', 'heavyJobDeferMaxMinutes'] as const) {
+    if (after[k] > before[k]) out.push(k)
+  }
+  if (after.limitTokens !== before.limitTokens) {
+    const smaller = before.limitTokens !== null && after.limitTokens !== null && after.limitTokens < before.limitTokens
+    if (!smaller) out.push('limitTokens')
+  }
+  if (before.dailyHandoffTime !== null && after.dailyHandoffTime !== before.dailyHandoffTime) out.push('dailyHandoffTime')
+  return out
+}
+
+/** OWNERGATE3-1104 (review, Dani 69657): every context-guard key, classified, so a new key cannot fall outside the
+ *  token gate silently (a test pins that this covers exactly the keys of DEFAULT_CONTEXT_GUARD). */
+export const CONTEXT_GUARD_FIELD_KIND: Record<keyof ContextGuardConfig, 'switch' | 'value'> = {
+  enabled: 'switch',
+  saturationRestart: 'switch',
+  idleFlushEnabled: 'switch',
+  dailyHandoffEnabled: 'switch',
+  actPct: 'value',
+  hardPct: 'value',
+  limitTokens: 'value',
+  cooldownMinutes: 'value',
+  handoffTimeoutMinutes: 'value',
+  idleFlushTokens: 'value',
+  idleMinutes: 'value',
+  dailyHandoffTime: 'value',
+  heavyJobDeferMaxMinutes: 'value',
+}
+
+/** OWNERGATE3-1104 (review, Dani 69657): the fields of a context-guard change the shared access token may NOT make.
+ *  Strengthening without a bound is not harmless: a guard driven to actPct 0.01 or a cooldown of 0.01 minutes hands
+ *  the agent off and restarts it continuously, an availability attack a sub-agent could aim at any agent, the main
+ *  one included. So with the token:
+ *   - a switch may only be turned ON;
+ *   - any other field may only change to its SHIPPED DEFAULT, and only when that is not a weakening
+ *     (contextGuardWeakenings), e.g. a lowered threshold back to the default is a weakening and stays the owner's.
+ *  Everything else needs the owner. The arming skill (enabled:true with the shipped defaults) stays on the token. */
+export function contextGuardTokenRefusals(before: ContextGuardConfig, after: ContextGuardConfig): string[] {
+  const weak = new Set(contextGuardWeakenings(before, after))
+  const out: string[] = []
+  for (const k of Object.keys(CONTEXT_GUARD_FIELD_KIND) as (keyof ContextGuardConfig)[]) {
+    if (after[k] === before[k]) continue
+    if (CONTEXT_GUARD_FIELD_KIND[k] === 'switch') {
+      if (after[k] !== true) out.push(k)
+      continue
+    }
+    if (weak.has(k) || after[k] !== DEFAULT_CONTEXT_GUARD[k]) out.push(k)
+  }
+  return out
 }

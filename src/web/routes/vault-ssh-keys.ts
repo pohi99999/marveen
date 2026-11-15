@@ -15,6 +15,16 @@ import {
 } from '../../db.js'
 import { setSecret, getSecret, deleteSecret } from '../vault.js'
 import type { RouteContext } from './types.js'
+import { mayActAsOwner, refuseOwner } from './auth.js'
+
+// VAULTSSHOWNER1109: an SSH server entry decides where a connection goes, and an SSH key is a private credential;
+// creating, changing, generating, importing or deleting one is an owner action (mayActAsOwner: a session, or the
+// access token beside the owner's session cookie), checked before the request body is read. Reading stays as it was.
+function sshWriteRefused(ctx: RouteContext, what: string): boolean {
+  if (mayActAsOwner(ctx.auth, ctx.req)) return false
+  refuseOwner(ctx.res, `${what} needs the dashboard login (an owner session).`)
+  return true
+}
 
 const execFileAsync = promisify(execFile)
 
@@ -61,6 +71,28 @@ export async function extractPublicKeyFromVault(vaultKeyId: string): Promise<str
   }
 }
 
+// A label names one key: two keys under the same label look alike in a server's
+// key dropdown ("label (username)") and in the delete question. Compared without
+// case, so "Alma" and "alma" count as the same.
+export function sshKeyLabelTaken(label: string): boolean {
+  const wanted = label.toLocaleLowerCase()
+  return listVaultSshKeys().some(k => k.label.toLocaleLowerCase() === wanted)
+}
+
+// For a label the server makes up itself (generate-key): the first free one of
+// "base", "base 2", "base 3", ...
+export function uniqueSshKeyLabel(base: string): string {
+  if (!sshKeyLabelTaken(base)) return base
+  for (let n = 2; ; n++) {
+    const label = `${base} ${n}`
+    if (!sshKeyLabelTaken(label)) return label
+  }
+}
+
+function labelTakenReply(res: RouteContext['res'], label: string) {
+  json(res, { error: `An SSH key named "${label}" already exists`, code: 'label_taken' }, 409)
+}
+
 function toApiShape(key: VaultSshKey) {
   return {
     id: key.id,
@@ -86,6 +118,7 @@ export async function tryHandleVaultSshKeys(ctx: RouteContext): Promise<boolean>
 
   // POST /api/vault/ssh-keys
   if (path === '/api/vault/ssh-keys' && method === 'POST') {
+    if (sshWriteRefused(ctx, 'Creating an SSH key')) return true
     try {
       const body = await readBody(req)
       const data = JSON.parse(body.toString())
@@ -97,6 +130,7 @@ export async function tryHandleVaultSshKeys(ctx: RouteContext): Promise<boolean>
         json(res, { error: 'label and username are required' }, 400)
         return true
       }
+      if (sshKeyLabelTaken(label)) { labelTakenReply(res, label); return true }
 
       const id = randomBytes(8).toString('hex')
       const comment = `${username} (${label})`
@@ -117,6 +151,7 @@ export async function tryHandleVaultSshKeys(ctx: RouteContext): Promise<boolean>
 
   // POST /api/vault/ssh-keys/import
   if (path === '/api/vault/ssh-keys/import' && method === 'POST') {
+    if (sshWriteRefused(ctx, 'Importing an SSH key')) return true
     try {
       const body = await readBody(req)
       const data = JSON.parse(body.toString())
@@ -129,6 +164,7 @@ export async function tryHandleVaultSshKeys(ctx: RouteContext): Promise<boolean>
         json(res, { error: 'label, username and privateKey are required' }, 400)
         return true
       }
+      if (sshKeyLabelTaken(label)) { labelTakenReply(res, label); return true }
 
       // Restore the closing newline ONCE, before validation, and use this
       // normalized value for BOTH validation and storage -- ssh-keygen needs
@@ -192,6 +228,7 @@ export async function tryHandleVaultSshKeys(ctx: RouteContext): Promise<boolean>
   // DELETE /api/vault/ssh-keys/:id
   const delMatch = path.match(/^\/api\/vault\/ssh-keys\/([^/]+)$/)
   if (delMatch && method === 'DELETE') {
+    if (sshWriteRefused(ctx, 'Deleting an SSH key')) return true
     const id = decodeURIComponent(delMatch[1])
     const key = getVaultSshKey(id)
     if (!key) { json(res, { error: `Key "${id}" not found` }, 404); return true }

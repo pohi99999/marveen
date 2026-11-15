@@ -42,6 +42,8 @@ export const MODEL_ALIASES: Record<string, string> = {
   'fable': 'claude-fable-5',
   'fable-5': 'claude-fable-5',
   'fable5': 'claude-fable-5',
+  'fable-5-2': 'claude-fable-5-2',
+  'fable52': 'claude-fable-5-2',
   'inherit': DEFAULT_MODEL,
 }
 
@@ -227,6 +229,30 @@ export function writeAgentDisplayName(name: string, displayName: string): void {
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
   config.displayName = displayName
+  atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+}
+
+// A short, owner-written role line ("P+R", "JIRA ügyintéző") shown under the
+// agent's name in the team graph. The CLAUDE.md description is a full sentence
+// and does not fit a graph node; the role label (leader/member) says where the
+// agent sits, not what it does.
+export const AGENT_TAGLINE_MAX = 60
+
+export function readAgentTagline(name: string): string {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    if (typeof config.tagline === 'string') return config.tagline.trim().slice(0, AGENT_TAGLINE_MAX)
+  } catch { /* fall through */ }
+  return ''
+}
+
+export function writeAgentTagline(name: string, tagline: string): void {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  const config = readJsonObjectForWrite(configPath)
+  const clean = tagline.trim().slice(0, AGENT_TAGLINE_MAX)
+  if (clean) config.tagline = clean
+  else delete config.tagline
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }
 

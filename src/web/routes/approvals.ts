@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT, MAIN_AGENT_ID, TELEGRAM_BOT_TOKEN, CHANNEL_PROVIDER, APP_TZ, DASHBOARD_PUBLIC_URL, WEB_PORT } from '../../config.js'
+import { PROJECT_ROOT, MAIN_AGENT_ID, TELEGRAM_BOT_TOKEN, CHANNEL_PROVIDER, DASHBOARD_PUBLIC_URL, WEB_PORT } from '../../config.js'
 import {
   consumeApproval, consumeCategoryApproval,
   CATEGORY_CONSUME_DEFAULT_WINDOW_S, CATEGORY_CONSUME_MAX_WINDOW_S,
@@ -12,14 +12,16 @@ import {
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { approvalGranteeOf, approvalNotGrantedReason, identityDenialBody } from '../auth-gate.js'
-import { resolveOwnerChatId } from '../../owner-chat.js'
+import { ownerAlertChatOverride, resolveOwnerChatId } from '../../owner-chat.js'
 import { sendOwnerMessage, sendOwnerSlackDm, slackTargetFor, noticeTargetDrift } from '../../notify.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import { mainBotToken, ownerDmVerdict, SLACK_CHUNK } from '../../slack-notify.js'
-import { reactionRoute, reactionsOn, dashboardOnlyLine, postReactionPrompt, startApprovalSlackSweeper, type RouteDeps } from '../approval-slack-route.js'
+import { reactionRoute, reactionsOn, repliesOn, dashboardOnlyLine, postReactionPrompt, startApprovalSlackSweeper, type RouteDeps } from '../approval-slack-route.js'
+import { OWNER_TEXT, formatExpiry, type ApprovalLang } from '../approval-texts.js'
+import { approvalTextLang } from '../agent-text-lang.js'
 import { sendTelegramMessage, editTelegramMessageText } from '../telegram.js'
 import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, OWNER_RESOLVER, namesOwnerResolver, isButtonOnlyCategory, type OwnerDecision, type OwnerDecisionVia } from '../telegram-approval.js'
-import { mayIssueCredentials, mayActAsOwner, OWNER_SESSION_REQUIRED } from './auth.js'
+import { mayActAsOwner, OWNER_SESSION_REQUIRED, refuseOwner } from './auth.js'
 import { supersededApprovals, supersededResolver, SUPERSEDED_NOTE } from '../approval-supersede.js'
 import type { RouteContext } from './types.js'
 
@@ -29,13 +31,13 @@ import type { RouteContext } from './types.js'
 // the real email-approval-gate then let its letter through; through STANDING_CATEGORY the same
 // row made every later letter to an address approval-free. The self-declared agent_id and
 // resolved_by checks below stay, but they were never what stopped this.
-// Who counts as the owner is the predicate that guards issuing credentials (mayIssueCredentials,
-// #2163): the owner's session, also when the browser sends the stored token alongside it; the
-// bare token only before the first dashboard login exists.
+// Who counts as the owner is the owner gate (mayActAsOwner, #2163): the owner's session, also when
+// the browser sends the stored token alongside it; the bare token never, not even before the first
+// dashboard login exists (OWNERGATE4-1104: every agent holds it, and could approve its own request).
+// With no login yet, refuseOwner answers setup_required and says to create one.
 const OWNER_ONLY = {
   ...OWNER_SESSION_REQUIRED,
-  error: 'Approving needs the dashboard login (an owner session); the shared dashboard token can file, reject or time out a request, not approve one. ' +
-    'The token alone approves only before the first login exists.',
+  error: 'Approving needs the dashboard login (an owner session); the shared dashboard token can file, reject or time out a request, not approve one.',
 }
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -79,12 +81,14 @@ export function computeTimeoutAt(category: string, timeoutSeconds: unknown, nowM
 }
 
 // f2c5edb0: the window inside which an approved letter may still be consumed,
-// counted from resolved_at. The SAME variable and default as the gate
-// (EMAIL_APPROVAL_WINDOW_S, 1800 s in scripts/hooks/email-approval-gate.py), so
-// the two consume paths agree on when an approval has gone stale.
-export function approvalWindowSeconds(env: NodeJS.ProcessEnv = process.env): number {
-  const v = Number.parseInt(env.EMAIL_APPROVAL_WINDOW_S ?? '', 10)
-  return Number.isFinite(v) && v > 0 ? v : 1800
+// counted from resolved_at. The SAME fixed value as the gate (APPROVAL_WINDOW_S
+// in scripts/hooks/email-approval-gate.py; a test pins the two), so the two
+// consume paths agree on when an approval has gone stale. No environment
+// override on either side (ENVRELAXGATE1104): the hook cannot see the
+// dashboard's launch environment, so an override here would split the two.
+export const APPROVAL_WINDOW_S = 1800
+export function approvalWindowSeconds(): number {
+  return APPROVAL_WINDOW_S
 }
 
 // The consumer names the sending tool in the audit trail. Printable only (no
@@ -153,22 +157,23 @@ export function approvalsPageUrl(publicUrl: string = DASHBOARD_PUBLIC_URL, port:
 // Owner-facing text (Slack DM or the channel provider). Pure + exported for
 // tests. Plain text (no markdown escaping concerns), proper accents: this is
 // outgoing copy.
-export function buildOwnerApprovalText(approval: Approval): string {
-  const expires = approval.timeout_at
-    ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: APP_TZ })
-    : 'nincs'
+// APPROVALTAGEN1108 (upstream): in [lang] (approval-texts.ts), the install's AGENT_TEXT_LANG by default (hu).
+// Fork card 3558 stays: the e-mail summary, and the Telegram decision line with this approval's nonce.
+export function ownerDecisionLine(nonce: string, lang: ApprovalLang): string {
+  return lang === 'en'
+    ? `Decide: with the buttons below, or: /approvals <n> approve|reject ${nonce} (n: the number in the /approvals list)`
+    : `Döntés: a gombokkal lent, vagy: /approvals <n> approve|reject ${nonce} (n: a sorszám a /approvals listában)`
+}
+export function buildOwnerApprovalText(approval: Approval, lang: ApprovalLang = approvalTextLang()): string {
+  const t = OWNER_TEXT[lang]
   const lines = [
-    `[JÓVÁHAGYÁS KELL] ${approval.agent_id} | ${approval.category}`,
+    `${t.requestTag} ${approval.agent_id} | ${approval.category}`,
     approval.action_description,
     ...(approval.category === 'email_send' ? emailSummaryLines(approval) : []),
-    `Lejárat: ${expires}`,
+    `${t.expires}: ${formatExpiry(approval.timeout_at, lang)}`,
   ]
-  // Card 3558: the owner decides here, on Telegram -- with the buttons under this message, or
-  // with the command that carries this approval's nonce. The dashboard stays as the third way.
-  if (approval.owner_nonce) {
-    lines.push(`Döntés: a gombokkal lent, vagy: /approvals <n> approve|reject ${approval.owner_nonce} (n: a sorszám a /approvals listában)`)
-  }
-  lines.push(`Dashboard -> Jóváhagyások (id: ${approval.id})`, approvalsPageUrl())
+  if (approval.owner_nonce) lines.push(ownerDecisionLine(approval.owner_nonce, lang))
+  lines.push(t.decideOnDashboard(approval.id), approvalsPageUrl())
   return lines.join('\n')
 }
 
@@ -241,13 +246,14 @@ export function ownerDecisionRefusalText(reason: string): string {
 // question -- the owner answering "mehet" a second time to a done deal is
 // exactly the noise this replaces -- but it keeps the action visible in the
 // owner's chat.
-export function buildOwnerChatApprovedText(approval: Approval, ownerMessageId: number | string): string {
+export function buildOwnerChatApprovedText(approval: Approval, ownerMessageId: number | string, lang: ApprovalLang = approvalTextLang()): string {
+  const t = OWNER_TEXT[lang]
   return [
-    `[JÓVÁHAGYVA A CHATBEN] ${approval.agent_id} | ${approval.category}`,
+    `${t.chatApprovedTag} ${approval.agent_id} | ${approval.category}`,
     approval.action_description,
-    `Jóváhagyás: a chat-üzeneted (üzenet-azonosító: ${ownerMessageId})`,
-    `Nincs további teendőd, ez csak tájékoztatás.`,
-    `Napló: Dashboard -> Jóváhagyások (id: ${approval.id})`,
+    t.chatApprovedBy(String(ownerMessageId)),
+    t.nothingToDo,
+    t.logOnDashboard(approval.id),
   ].join('\n')
 }
 
@@ -297,21 +303,27 @@ export const reactionDeps: RouteDeps = {
   verdict: (channel, owner) => ownerDmVerdict(channel, owner),
   drift: (current) => noticeTargetDrift(current),
   chunk: SLACK_CHUNK,
+  lang: () => approvalTextLang(),
 }
 
-function notifyOwner(approval: Approval, chatApprovedMessageId: number | string | null = null, serverFiled = false): void {
+function notifyOwner(approval: Approval, chatApprovedMessageId: number | string | null = null, serverFiled = false, filedLang?: ApprovalLang): void {
   const informative = chatApprovedMessageId != null
+  // APPROVALTAGEN1108: the language is read ONCE per request: the text, the Slack DM, its expiry and the language
+  // stored with the post (the words its replies are checked with) are the same one. A server-filed request passes the
+  // language its description was worded in (Samu 73350), so the description and the post never differ.
+  const lang = filedLang ?? (reactionDeps.lang ?? approvalTextLang)()
   let text = informative
-    ? buildOwnerChatApprovedText(approval, chatApprovedMessageId)
-    : buildOwnerApprovalText(approval)
+    ? buildOwnerChatApprovedText(approval, chatApprovedMessageId, lang)
+    : buildOwnerApprovalText(approval, lang)
   void (async () => {
     // APPROVALSLACK1030 (2): the owner decides with a Slack reaction the server itself checks, when this request may
     // (approval-slack-route.ts); otherwise the normal DM below, saying the decision is on the dashboard.
-    if (!informative && reactionsOn(reactionDeps.setting)) {
-      const expires = approval.timeout_at ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: APP_TZ }) : 'nincs'
-      const route = await reactionRoute(approval, serverFiled, reactionDeps, expires, approvalsPageUrl())
+    // APPROVALSLACK1030 B: with APPROVAL_SLACK_REPLIES on, the same one-message path, and the owner's typed reply decides.
+    if (!informative && (reactionsOn(reactionDeps.setting) || repliesOn(reactionDeps.setting))) {
+      const expires = formatExpiry(approval.timeout_at, lang)
+      const route = await reactionRoute(approval, serverFiled, reactionDeps, expires, approvalsPageUrl(), lang)
       if (route.ok && await postReactionPrompt(approval, route)) return
-      text += '\n' + dashboardOnlyLine(route.ok ? 'slack_post_failed' : route.reason)
+      text += '\n' + dashboardOnlyLine(route.ok ? 'slack_post_failed' : route.reason, lang)
     }
     // APPROVALSLACK1030: an owner who moved to Slack (NOTIFY_SLACK_TARGET set) while the channel provider stays
     // Telegram got the request on Telegram (measured 2026-10-30: both of the day's requests logged this function's
@@ -353,7 +365,7 @@ function notifyOwner(approval: Approval, chatApprovedMessageId: number | string 
     // provider goes through sendOwnerMessage, which resolves provider, token
     // and owner chat the same way every other owner message does.
     if (CHANNEL_PROVIDER === 'telegram' && TELEGRAM_BOT_TOKEN) {
-      const ownerChat = resolveOwnerChatId()
+      const ownerChat = ownerAlertChatOverride('telegram') ?? resolveOwnerChatId()
       if (!ownerChat) {
         logger.warn({ approvalId: approval.id, informative }, 'approval owner notification suppressed: no owner chat')
         if (!informative) fallbackInBand(approval, 'no-owner-chat')
@@ -437,31 +449,35 @@ function notifyMainAgent(approval: Approval): void {
 export function fileServerApproval(params: {
   agent_id: string
   category: string
-  action_description: string
+  /** APPROVALTAGEN1108 (Samu 73350): a function words it in the language the owner's post goes out in, read once here. */
+  action_description: string | ((lang: ApprovalLang) => string)
   action_payload?: string | null
   content_hash: string
 }): Approval {
+  const lang = (reactionDeps.lang ?? approvalTextLang)()
+  const description = typeof params.action_description === 'function' ? params.action_description(lang) : params.action_description
   const approval = createApproval({
     id: randomUUID(),
     agent_id: params.agent_id,
     category: params.category,
-    action_description: params.action_description,
+    action_description: description,
     action_payload: params.action_payload ?? null,
     timeout_at: computeTimeoutAt(params.category, undefined),
     content_hash: params.content_hash,
   })
   // serverFiled: the description is the server's own words, so the reaction path may show it (APPROVALSLACK1030 (2)).
-  notifyOwner(approval, null, true)
+  notifyOwner(approval, null, true, lang)
   notifyMainAgent(approval)
   logger.info({ id: approval.id, agent_id: approval.agent_id, category: approval.category }, 'Approval request filed by the server')
   return approval
 }
 
-/** APPROVALSLACK1030 (2): the owner's Slack reactions, read by the server (idle while the switch is off). */
+/** APPROVALSLACK1030 (2) and B: the owner's Slack reactions and typed replies, read by the server (idle while both switches are off). */
 export function startApprovalReactionSweeper(): NodeJS.Timeout {
   return startApprovalSlackSweeper({
     setting: reactionDeps.setting,
     token: reactionDeps.token,
+    pageUrl: approvalsPageUrl(),
     alert: (t) => { void sendOwnerSlackDm(t).catch(() => {}) },
   })
 }
@@ -624,7 +640,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     if (owner_approved_message_id !== undefined && owner_approved_message_id !== null) {
       if (!mayActAsOwner(ctx.auth, req)) {
         logger.warn({ agent_id, category, auth: ctx.auth?.kind, agent: ctx.auth?.agent }, 'born-approved approval refused: no owner session')
-        json(res, OWNER_ONLY, 403)
+        refuseOwner(res, OWNER_ONLY.error)
         return true
       }
       if (agent_id.trim() !== MAIN_AGENT_ID) {
@@ -808,7 +824,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     // an agent that cancels a request gains nothing by it.
     if (status === 'approved' && !mayActAsOwner(ctx.auth, req)) {
       logger.warn({ id: idMatch[1], resolved_by, auth: ctx.auth?.kind, agent: ctx.auth?.agent }, 'approval approve refused: no owner session')
-      json(res, OWNER_ONLY, 403)
+      refuseOwner(res, OWNER_ONLY.error)
       return true
     }
 

@@ -47,26 +47,28 @@
 //     have their own paths;
 //   - editing a LIVE skill's SKILL.md through PUT /api/skills/:name;
 //   - who approves: since kanban 2c72e07c the approve and reject routes take
-//     the owner's session (mayIssueCredentials, the #2163 predicate), not the
-//     shared dashboard token every agent holds; the bare token only before the
-//     first dashboard login exists. That makes "only a human approves" hold as
+//     the owner's session (mayActAsOwner, the #2163 predicate), not the
+//     shared dashboard token every agent holds; not even before the first
+//     dashboard login exists (OWNERGATE4-1104). That makes "only a human approves" hold as
 //     far as the dashboard can tell a human apart; an agent able to hijack the
 //     owner's browser session is outside it (per-agent identity, #1985).
 
 import { createHash, randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import {
-  appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync,
+  appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, relative, sep } from 'node:path'
-import { MAIN_AGENT_ID, STORE_DIR } from '../config.js'
+import { MAIN_AGENT_ID, PROJECT_ROOT, STORE_DIR } from '../config.js'
 import { logger } from '../logger.js'
 import { getEffectiveSettingValue } from '../settings-store.js'
 import { agentDir } from './agent-config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 
-export type SkillTarget = { scope: 'global' } | { scope: 'agent'; agent: string }
+// 'project' (SKILLPROPOSESCOPE1104): the install's own <root>/.claude/skills. Every agent works below the root, so it
+// loads like the global one; a proposal of a name that lives there replaces it THERE (never a second, global copy).
+export type SkillTarget = { scope: 'global' } | { scope: 'project' } | { scope: 'agent'; agent: string }
 export type PendingSource = 'generate' | 'import' | 'propose'
 
 export interface PendingMeta {
@@ -160,7 +162,12 @@ export function normalizeTarget(target: SkillTarget): SkillTarget {
   return target.scope === 'agent' && target.agent === MAIN_AGENT_ID ? { scope: 'global' } : target
 }
 
+export function projectSkillsRoot(): string {
+  return join(PROJECT_ROOT, '.claude', 'skills')
+}
+
 export function targetRoot(target: SkillTarget): string {
+  if (target.scope === 'project') return projectSkillsRoot()
   if (target.scope === 'global' || target.agent === MAIN_AGENT_ID) return globalSkillsRoot()
   return join(agentDir(target.agent), '.claude', 'skills')
 }
@@ -179,7 +186,8 @@ function entryDir(id: string): string {
 
 function sameTarget(a: SkillTarget, b: SkillTarget): boolean {
   if (a.scope !== b.scope) return false
-  return a.scope === 'global' || (b.scope === 'agent' && a.agent === b.agent)
+  if (a.scope === 'agent') return b.scope === 'agent' && a.agent === b.agent
+  return true
 }
 
 function readMeta(id: string): PendingMeta | null {
@@ -289,7 +297,27 @@ export function parseProposedFiles(raw: unknown, skillMdBytes: number): { ok: tr
   return { ok: true, files }
 }
 
-// A complete SKILL.md proposed by an agent for the GLOBAL root. Never written into a skill root here.
+// Where a proposal of `name` goes (SKILLPROPOSESCOPE1104, Marveen 68194): the project root when the name lives there
+// (replaced in place, its scripts/ and references/ kept, the same hash binding), else the global root. A name that
+// lives in BOTH is refused: a proposal must not pick one of two live copies, nor make a third state; removing the
+// duplicate is the owner's or the main agent's decision.
+export function proposeTarget(name: string): { ok: true; target: SkillTarget } | { ok: false; status: number; error: string } {
+  const lives = (dir: string): boolean => { try { lstatSync(join(dir, name)); return true } catch { return false } }
+  // One directory under two names (the project root symlinked to the global one): one root, not a duplicate.
+  // Without this, every existing name would be "in both" and every proposal a 409 (Dani 68501).
+  const real = (dir: string): string | null => { try { return realpathSync(dir) } catch { return null } }
+  const pr = real(projectSkillsRoot())
+  if (pr !== null && pr === real(globalSkillsRoot())) return { ok: true, target: { scope: 'global' } }
+  const inProject = lives(projectSkillsRoot())
+  const inGlobal = lives(globalSkillsRoot())
+  if (inProject && inGlobal) {
+    return { ok: false, status: 409, error: `A skill named ${name} lives both in the global root and in the project root (.claude/skills); a proposal cannot pick one. Removing the duplicate is the owner's or the main agent's decision.` }
+  }
+  return { ok: true, target: inProject ? { scope: 'project' } : { scope: 'global' } }
+}
+
+// A complete SKILL.md proposed by an agent for the global root, or for the project root when the name lives there
+// (proposeTarget). Never written into a skill root here.
 // `mayReplacePending` (SKILLAPPROVALOFF1101 follow-up, Samu 65825, Dani 65845): when a proposal of this name is
 // already waiting and the caller lets this one supersede it, the new one is queued beside it and its id comes back as
 // `waiting`; the caller archives it (archiveSuperseded) only after the new one went live. Without it, or when it says
@@ -299,7 +327,9 @@ export function queueProposedSkill(
   skillMd: string,
   opts: { proposedBy?: string; reason?: string; files?: ProposedFiles; mayReplacePending?: (waiting: PendingMeta) => boolean } = {},
 ): ProposeResult {
-  const target: SkillTarget = { scope: 'global' }
+  const where = proposeTarget(name)
+  if (!where.ok) return { ok: false, status: where.status, error: where.error }
+  const target = where.target
   const files = opts.files ?? []
   // The same gate as the route, here too: this function is the one that writes.
   for (const f of files) {
@@ -951,6 +981,9 @@ export type ImportResult =
 // A top-level directory name of an archive becomes a skill name.
 const IMPORT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 
+// A symlink entry in `unzip -Z` (zipinfo) output: the Unix mode string starts with `l`.
+const SYMLINK_ENTRY_RE = /^l[rwxsStT-]{9}\s/
+
 // The zip import for both scopes: extract into a scratch dir inside the
 // pending area (never into a skill root), keep the structural checks the
 // routes had (path traversal, name clash, symlinks, a SKILL.md per skill),
@@ -985,6 +1018,19 @@ export function importArchiveToPending(target: SkillTarget, data: Buffer): Impor
       const clash = nameConflict(target, td)
       if (clash === 'live') return { ok: false, status: 409, error: `Skill already exists: ${td}. Delete it first if you want to overwrite.` }
       if (clash === 'pending') return { ok: false, status: 409, error: `A skill named ${td} is already waiting for approval.` }
+    }
+    // A symlink entry is refused from the listing, before anything is extracted. Apple's unzip
+    // on macOS 27.2 will not create a link to an absolute target and exits non-zero, which the
+    // extract step below would report as a 500. hasSymlink() stays as the check on what was
+    // actually extracted.
+    let longListing: string
+    try {
+      longListing = execFileSync('unzip', ['-Z', zip], { timeout: 5000, encoding: 'utf-8' })
+    } catch {
+      return { ok: false, status: 400, error: 'Failed to read the archive' }
+    }
+    if (longListing.split('\n').some((l) => SYMLINK_ENTRY_RE.test(l))) {
+      return { ok: false, status: 400, error: 'Invalid skill file: symlink entries rejected' }
     }
     try {
       execFileSync('unzip', ['-o', '-q', zip, '-d', out], { timeout: 10000 })

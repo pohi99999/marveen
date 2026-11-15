@@ -44,7 +44,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - Claude Code hookok (`.claude/settings.json`): **8** esemény, **54** bejegyzés, **36** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **10** -- channel-image, commit-identity, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **65**, ebből a fenti táblázat linkel **22**
+- Dokumentációs lapok a `docs/` alatt: **66**, ebből a fenti táblázat linkel **22**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
@@ -63,6 +63,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [db-write-gate](db-write-gate.md)
 - [destruktiv-kapu-hamis-pozitiv-meres](destruktiv-kapu-hamis-pozitiv-meres.md)
 - [disk-modal-guards](disk-modal-guards.md)
+- [docker](docker.md)
 - [external-skill-catalog](external-skill-catalog.md)
 - [flotta-migracio](flotta-migracio.md)
 - [google-calendar-drive-service-account](google-calendar-drive-service-account.md)

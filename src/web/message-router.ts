@@ -37,6 +37,7 @@ import {
   sessionExistsOnHost,
   capturePane,
   clearFeedbackModalAndRecheck,
+  withTmuxBatch,
 } from './agent-process.js'
 import { sendPromptToCopilotSession, formatCopilotInboundMessage } from './copilot-agent-process.js'
 import { sendPromptToAntigravitySession, formatAntigravityInboundMessage } from './antigravity-agent-process.js'
@@ -48,6 +49,7 @@ import { composeBatchInjection, batchInjectCapFor } from './batch-inject.js'
 import { maybeWakeSubAgentsForTelegram } from './telegram-inbox-wake.js'
 import { isStopMessage, isUrgentDelivery, selectTickWindow } from './message-router-window.js'
 import { deliveryHoldFor, type DeliveryHold } from './delivery-hold.js'
+import { shouldInterruptForUnblock, buildUnblockInterruptContent } from './unblocks-interrupt.js'
 
 import { MESSAGE_ABANDON_WINDOW_MS } from './message-abandon.js'
 import { whileNotFrozen } from './fleet-freeze.js'
@@ -855,20 +857,27 @@ export async function runMessageRouterTick(): Promise<void> {
     const presentNow = new Set<string>()
     // agent -> {exists: bool, host, session} cached lookup for the main loop.
     const agentSessionCache = new Map<string, {host: string | null, session: string, exists: boolean, worksource: boolean}>()
-    for (const agent of receiversInTick) {
-      const host = readAgentRemoteHost(agent)
-      const session = agentSessionName(agent)
-      const exists = sessionExistsOnHost(host, session)
-      // Read once per receiver per tick, not once per message: the flag decides
-      // the whole delivery path below and a per-message read would re-open the
-      // same config file for every queued item.
-      agentSessionCache.set(agent, { host, session, exists, worksource: readAgentWorksourceChannel(agent) })
-      if (exists) {
-        presentNow.add(agent)
-      } else {
-        absentNow.add(agent)
+    // One list-sessions for the whole receiver pass: every local receiver's
+    // sessionExistsOnHost() asks the identical read-only query, and
+    // withTmuxBatch answers all of them from one memoized spawn while this
+    // (synchronous) loop runs. The per-agent answer is unchanged -- each agent
+    // is classified from the same session list the spawns would have returned.
+    withTmuxBatch(() => {
+      for (const agent of receiversInTick) {
+        const host = readAgentRemoteHost(agent)
+        const session = agentSessionName(agent)
+        const exists = sessionExistsOnHost(host, session)
+        // Read once per receiver per tick, not once per message: the flag decides
+        // the whole delivery path below and a per-message read would re-open the
+        // same config file for every queued item.
+        agentSessionCache.set(agent, { host, session, exists, worksource: readAgentWorksourceChannel(agent) })
+        if (exists) {
+          presentNow.add(agent)
+        } else {
+          absentNow.add(agent)
+        }
       }
-    }
+    })
     // Reconnect detection: agent was absent on the last tick, now present.
     for (const agent of presentNow) {
       // Worksource agents are exempt: backlog batching exists because a tmux
@@ -1069,10 +1078,14 @@ export async function runMessageRouterTick(): Promise<void> {
       // Card 795d1f48 (a): an authenticated urgent row takes the same path (isUrgentDelivery),
       // with the same pane checks.
       const isStop = isUrgentDelivery(msg, MAIN_AGENT_ID)
-      const urgentLabel = isStopMessage(msg, MAIN_AGENT_ID) ? 'STOP' : 'URGENT'
       const paneNotReady = usesClaudeTuiDelivery && !worksourceServing && !(await isSessionReadyForPrompt(session, host))
+      // UNBLOCKS925: the one named case besides STOP/urgent that may reach a busy pane: a row the main agent
+      // flagged affects_current_work = 'unblocks'. It takes the urgent path below (same pane-hold check, same
+      // last look before the first key), but sends a SHORT notice instead of the full text.
+      const unblockPass = !isStop && shouldInterruptForUnblock(msg, !paneNotReady, MAIN_AGENT_ID)
+      const urgentLabel = isStopMessage(msg, MAIN_AGENT_ID) ? 'STOP' : unblockPass ? 'UNBLOCK' : 'URGENT'
       let stopPassesBusyPane = false
-      if (isStop && !worksourceServing && usesClaudeTuiDelivery) {
+      if ((isStop || unblockPass) && !worksourceServing && usesClaudeTuiDelivery) {
         const stopPane = capturePane(session, host)
         const hold = detectUrgentPaneHold(stopPane)
         if (hold) {
@@ -1301,7 +1314,7 @@ export async function runMessageRouterTick(): Promise<void> {
         // channel-inbound carries the STT-applied deliveryContent; the agent
         // wrap (trusted/untrusted) carries the raw content. Single-source frame.
         // msgId passed so receiving agents can write back via PUT /api/messages/:id.
-        const content = isChannelInbound ? deliveryContent : msg.content
+        const content = isChannelInbound ? deliveryContent : unblockPass ? buildUnblockInterruptContent(msg.content, msg.id) : msg.content
         // Freshness/supersession signal: only meaningful for inter-agent
         // messages (channel-inbound are user messages with no sender-supersede
         // concept). Skip the DB count for channel-inbound to avoid needless work.
@@ -1387,7 +1400,10 @@ export async function runMessageRouterTick(): Promise<void> {
           // own envelope. Opt-in per recipient (ROUTER_BATCH_INJECT_AGENTS), so
           // it is measured on one agent before it is widened. Channel-inbound
           // rows (user messages, possibly voice/STT) stay on the serial path.
-          const mates = collectBatchMates(pending, msg, now, agentSessionCache)
+          // An unblock notice goes alone, like a STOP: its mates must keep waiting for an idle pane.
+          const mates = unblockPass
+            ? { items: [], rows: [], remaining: 0, lastTraceCtx: null }
+            : collectBatchMates(pending, msg, now, agentSessionCache)
           if (mates.items.length > 0) {
             const text = composeBatchInjection([{ prefix, wrapped }, ...mates.items], mates.remaining)
             await sendPromptToSession(session, text, host)
@@ -1416,7 +1432,7 @@ export async function runMessageRouterTick(): Promise<void> {
             // right before the first key and again right before the submitting Enter (#2143):
             // a running turn can open a permission prompt between the check above and either
             // of them (urgentEmitRefusal).
-            if (isStop) {
+            if (isStop || unblockPass) {
               const outcome = await sendPromptToSession(session, prefix + wrapped, host, { waitForIdle: false, emitGuard: urgentEmitRefusal })
               if (outcome === 'aborted-guard' || outcome === 'aborted-guard-typed') {
                 const typed = outcome === 'aborted-guard-typed'
@@ -1427,7 +1443,7 @@ export async function runMessageRouterTick(): Promise<void> {
                 if (hold) noticeUrgentHold(msg, session, hold, urgentLabel, now, typed)
                 continue
               }
-              logger.info({ id: msg.id, to: msg.to_agent, urgent: msg.urgent === 1 }, 'message-router: urgent or STOP row sent without waiting for an idle pane')
+              logger.info({ id: msg.id, to: msg.to_agent, urgent: msg.urgent === 1, unblock: unblockPass }, 'message-router: urgent, STOP or unblock row sent without waiting for an idle pane')
             } else {
               await sendPromptToSession(session, prefix + wrapped, host)
             }
