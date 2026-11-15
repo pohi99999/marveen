@@ -1884,10 +1884,11 @@ export function resolveProviderEnv(
       // window, so auto-compact would wait for a limit the model never had and,
       // per the 2.1.323 changelog, such a session "can fail every turn until
       // /clear". Two exports, on purpose:
-      // - CLAUDE_CODE_MAX_CONTEXT_TOKENS tells the CLI the window the local server
-      //   really loads the model with (AGENT_LOCAL_CONTEXT_TOKENS, default 32768:
-      //   measured 2026-11-15 on CLI 2.1.325, the reported contextWindow then IS
-      //   that number). The minimax and openrouter branches use the same variable.
+      // - CLAUDE_CODE_MAX_CONTEXT_TOKENS tells the CLI the window to work with
+      //   (AGENT_LOCAL_CONTEXT_TOKENS, default 200000; see config.ts for why it
+      //   is not the 32768 ollama prints). Measured on CLI 2.1.325: the reported
+      //   contextWindow IS this number, and it wins over the next variable. The
+      //   minimax and openrouter branches use the same variable.
       // - CLAUDE_CODE_DISABLE_1M_CONTEXT=1 is the safety net: if a later CLI stops
       //   honouring the first variable for these ids, the window is 200K, not 1M.
       exportsStr: `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${AGENT_LOCAL_BASE_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && export CLAUDE_CODE_MAX_CONTEXT_TOKENS=${AGENT_LOCAL_CONTEXT_TOKENS} && export CLAUDE_CODE_DISABLE_1M_CONTEXT=1 && `,

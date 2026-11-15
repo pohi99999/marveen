@@ -92,7 +92,7 @@ describe('resolveProviderEnv', () => {
     expect(r.exportsStr).not.toContain('CLAUDE_CODE_DISABLE_1M_CONTEXT')
   })
 
-  it('tells the CLI the real context window of an Ollama tag with CLAUDE_CODE_MAX_CONTEXT_TOKENS -- the 1M the CLI assumes, and the 200K of the safety net, are both far above what the local server loads', () => {
+  it('tells the CLI the context window of an Ollama tag with CLAUDE_CODE_MAX_CONTEXT_TOKENS -- the 1M the CLI assumes for an unrecognized id is not a window a local model has', () => {
     const r = resolveProviderEnv('gemma4:12b', () => null)
     expect(r.provider).toBe('ollama')
     // Exact token, chained like the other exports: a dropped export, a typo or a dropped `&&` fails.
@@ -106,7 +106,7 @@ describe('resolveProviderEnv', () => {
   })
 
   it('the exported number comes from the setting, it is not baked into the launcher', () => {
-    // On an install that keeps the default, a literal 32768 in the launcher would pass every value check
+    // On an install that keeps the default, a literal 200000 in the launcher would pass every value check
     // above. So this one reads what the ollama line is built from, the way agent-local-base-url.test.ts
     // does for the base URL: the same line that sets the ollama auth token and the base URL.
     const src = readFileSync(join(PROJECT_ROOT, 'src', 'web', 'agent-process.ts'), 'utf8')
@@ -133,26 +133,29 @@ describe('resolveProviderEnv', () => {
     const def = SETTINGS_REGISTRY.find(s => s.key === 'AGENT_LOCAL_CONTEXT_TOKENS')
     expect(def, 'AGENT_LOCAL_CONTEXT_TOKENS missing from SETTINGS_REGISTRY').toBeDefined()
     expect(def!.type).toBe('int')
-    expect(def!.default).toBe(32768)
+    // 200000 is the window of the measured, working state. 32768 (what ollama prints as context_length)
+    // was the first default and broke the first turn of the local agent: its start-up prompt is larger.
+    expect(def!.default).toBe(200000)
     expect(def!.requiresRestart).toBe(true)
-    expect(AGENT_LOCAL_CONTEXT_TOKENS_DEFAULT).toBe(32768)
+    expect(AGENT_LOCAL_CONTEXT_TOKENS_DEFAULT).toBe(200000)
     // Good values pass through.
-    expect(parseLocalContextTokens('32768')).toBe(32768)
+    expect(parseLocalContextTokens('200000')).toBe(200000)
     expect(parseLocalContextTokens('131072')).toBe(131072)
-    expect(parseLocalContextTokens(' 8192 ')).toBe(8192)
-    expect(parseLocalContextTokens('2048')).toBe(2048)
+    expect(parseLocalContextTokens(' 65536 ')).toBe(65536)
+    expect(parseLocalContextTokens('16384')).toBe(16384)
     expect(parseLocalContextTokens('2000000')).toBe(2000000)
     // Missing, empty, out of range, not a whole number, or shell text: the default.
-    for (const bad of [undefined, '', '0', '-1', '2047', '2000001', '32768.5', '32k', '1e6', '0x8000', '32768; rm -rf /', '$(id)', '`id`', '32768 && echo x', '99999999']) {
-      expect(parseLocalContextTokens(bad), String(bad)).toBe(32768)
+    for (const bad of [undefined, '', '0', '-1', '2048', '16383', '2000001', '131072.5', '200k', '1e6', '0x8000', '131072; rm -rf /', '$(id)', '`id`', '131072 && echo x', '99999999']) {
+      expect(parseLocalContextTokens(bad), String(bad)).toBe(200000)
     }
     // A value that only STARTS with a usable number is not read up to where it stops being one:
-    // these would give 4096, 8192, 65536 and 131072 if the leading digits were taken.
-    for (const bad of ['4096abc', '8192; rm -rf /', '65536.5', '131072 && echo x', '4096 8192', '+4096']) {
-      expect(parseLocalContextTokens(bad), bad).toBe(32768)
+    // these would give 65536 or 131072 if the leading digits were taken.
+    for (const bad of ['65536abc', '131072; rm -rf /', '65536.5', '131072 && echo x', '65536 131072', '+65536']) {
+      expect(parseLocalContextTokens(bad), bad).toBe(200000)
     }
-    // The registry's range and the parser's range are the same range.
-    expect((def as { min?: number }).min).toBe(2048)
+    // The registry's range and the parser's range are the same range. Below the lower bound no session
+    // can work: an empty run of the CLI already reads about 10,400 tokens.
+    expect((def as { min?: number }).min).toBe(16384)
     expect((def as { max?: number }).max).toBe(2000000)
   })
 
