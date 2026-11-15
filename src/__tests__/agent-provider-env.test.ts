@@ -129,6 +129,64 @@ describe('resolveProviderEnv', () => {
     expect(resolveProviderEnv('minimax-m3', () => null).exportsStr).toContain('CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000')
   })
 
+  // The two exports belong to the Ollama branch only. Each of the cases below was measured to stay
+  // green when the branch next to it was given the exports by mistake, so each is pinned by name.
+  it('the DeepSeek branch gets neither context export -- its window is the provider\'s business, not the local setting\'s', () => {
+    for (const model of ['deepseek-v4-pro', 'deepseek-chat']) {
+      const chain = resolveProviderEnv(model, () => null).exportsStr
+      expect(chain, model).not.toContain('CLAUDE_CODE_MAX_CONTEXT_TOKENS')
+      expect(chain, model).not.toContain('CLAUDE_CODE_DISABLE_1M_CONTEXT')
+    }
+  })
+
+  it('no hosted branch gets the 200K safety net: a blanket CLAUDE_CODE_DISABLE_1M_CONTEXT would cap a real 1M model', () => {
+    for (const model of ['claude-opus-5-5', 'claude-opus-5-5[1m]', 'deepseek-v4-pro', 'minimax-m3', 'deepseek/deepseek-v4-pro', 'qwen/qwen3-coder', 'anthropic/claude-sonnet-5']) {
+      expect(resolveProviderEnv(model, () => null).exportsStr, model).not.toContain('CLAUDE_CODE_DISABLE_1M_CONTEXT')
+    }
+  })
+
+  it('a custom provider gets neither context export, whatever its auth mode and even with a local-looking model tag', () => {
+    // Deliberate: the right window differs per custom provider and CustomProviderDef has no field for
+    // it. Giving this branch the local number would shrink a hosted model to the local window, and a
+    // blanket safety net would cap a 1M one. If a per-provider window is added, this test is where
+    // the new rule gets written down.
+    const none: CustomProviderDef = { id: 'p-none', label: 'No auth', baseUrl: 'http://localhost:8000', authHeader: 'none', vaultKey: null }
+    const apiKey: CustomProviderDef = { id: 'p-key', label: 'API key', baseUrl: 'https://api.example.com', authHeader: 'x-api-key', vaultKey: 'p-key-secret' }
+    const bearer: CustomProviderDef = { id: 'p-bearer', label: 'Bearer', baseUrl: 'https://api.example.com', authHeader: 'Bearer', vaultKey: 'p-bearer-secret' }
+    for (const def of [none, apiKey, bearer]) {
+      for (const model of ['some-model', 'gemma4:12b', 'claude-opus-5-5']) {
+        const r = resolveProviderEnv(model, () => '"$(cat /nonexistent/secret-ref)"', def)
+        expect(r.provider, `${def.id} ${model}`).toBe('custom')
+        expect(r.exportsStr, `${def.id} ${model}`).not.toContain('CLAUDE_CODE_MAX_CONTEXT_TOKENS')
+        expect(r.exportsStr, `${def.id} ${model}`).not.toContain('CLAUDE_CODE_DISABLE_1M_CONTEXT')
+      }
+    }
+  })
+
+  // SOURCE invariant, not a behaviour measurement (startAgentProcess touches the host's Claude
+  // config before it gets this far, so it is not run here). What it pins: an agent on another engine
+  // never reaches resolveProviderEnv. Such an agent's model id (e.g. `gemini-3.7-flash-medium` on the
+  // antigravity engine) has no claude-/deepseek-/minimax- prefix and no "/", so the pure function
+  // WOULD class it as Ollama and hand it the local context window. It does not get it only because
+  // the launcher returns into the engine's own launcher first. The launch command those launchers
+  // build is measured in antigravity-agent-process.test.ts.
+  it('an agent on the copilot or antigravity engine is handed to its own launcher before the provider env is resolved', () => {
+    const src = readFileSync(join(PROJECT_ROOT, 'src', 'web', 'agent-process.ts'), 'utf8')
+    const start = src.search(/export (?:async )?function startAgentProcess\(/)
+    expect(start, 'startAgentProcess not found').toBeGreaterThan(-1)
+    const body = src.slice(start)
+    const resolved = body.indexOf('resolveProviderEnv(')
+    expect(resolved, 'startAgentProcess no longer calls resolveProviderEnv').toBeGreaterThan(-1)
+    for (const engine of ['copilot', 'antigravity']) {
+      const m = new RegExp(String.raw`if \(readAgentEngine\(name\) === '${engine}'\) \{\s*return start[A-Za-z]+AgentProcess\(name, opts\)\s*\}`).exec(body)
+      expect(m, `${engine}: the early return is gone`).not.toBeNull()
+      expect(m!.index, `${engine}: the engine check comes after the provider env`).toBeLessThan(resolved)
+    }
+    // And resolveProviderEnv has exactly one caller in the launch code.
+    const calls = [...src.matchAll(/\bresolveProviderEnv\(/g)].length
+    expect(calls, 'definition + one call site').toBe(2)
+  })
+
   it('AGENT_LOCAL_CONTEXT_TOKENS is a registered setting with the measured default, and a bad value never reaches the shell line', () => {
     const def = SETTINGS_REGISTRY.find(s => s.key === 'AGENT_LOCAL_CONTEXT_TOKENS')
     expect(def, 'AGENT_LOCAL_CONTEXT_TOKENS missing from SETTINGS_REGISTRY').toBeDefined()
