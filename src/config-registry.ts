@@ -527,6 +527,17 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     requiresRestart: true,
   },
   {
+    key: 'AGENT_LOCAL_CONTEXT_TOKENS',
+    type: 'int',
+    default: 32768,
+    min: 2048,
+    max: 2000000,
+    description: 'A lokál modellen futó ágensek kontextusablaka tokenben: ennyit mond a rendszer a Claude Code-nak (CLAUDE_CODE_MAX_CONTEXT_TOKENS), és ehhez igazodik az automatikus tömörítés. Annyi legyen, amennyivel a helyi kiszolgáló a modellt TÉNYLEGESEN betölti (ollama: /api/ps context_length), ne a modell elvi maximuma. Ok: a Claude Code 2.1.323 óta az ismeretlen modell-azonosítót 1M-esnek veszi, így a tömörítés olyan határra várna, ami a helyi modellnek nincs.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
     key: 'AGENT_LOCAL_BASE_URL',
     type: 'string',
     default: '',

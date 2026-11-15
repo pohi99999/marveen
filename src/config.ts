@@ -713,3 +713,21 @@ export const EMBED_DIMS = Number.isFinite(rawEmbedDims) && rawEmbedDims > 0 ? ra
 // Anthropic-compatible proxy does not serve at all. Empty = fall back to
 // OLLAMA_URL, so an install whose local agent really is ollama is unaffected.
 export const AGENT_LOCAL_BASE_URL = cfg('AGENT_LOCAL_BASE_URL') || OLLAMA_URL
+
+// The context window, in tokens, that the local (ollama-classed) agent's model REALLY has: what the
+// local server loads the model with, not the model's theoretical maximum. Measured on this install
+// 2026-11-15: ollama loads gemma4:12b with context_length 32768 (/api/ps), while Claude Code from
+// 2.1.323 assumes 1,000,000 for a model id it does not recognize, and 200,000 with
+// CLAUDE_CODE_DISABLE_1M_CONTEXT=1. Neither is the model's window, so auto-compact would wait for a
+// limit the model never reaches. agent-process.ts exports this number as
+// CLAUDE_CODE_MAX_CONTEXT_TOKENS.
+//
+// A value that is not a whole number inside the registry's range falls back to the default instead
+// of reaching the launch command: the number is written into a shell line.
+export const AGENT_LOCAL_CONTEXT_TOKENS_DEFAULT = 32768
+export function parseLocalContextTokens(raw: string | undefined): number {
+  if (raw === undefined || !/^[0-9]{1,7}$/.test(raw.trim())) return AGENT_LOCAL_CONTEXT_TOKENS_DEFAULT
+  const n = parseInt(raw.trim(), 10)
+  return n >= 2048 && n <= 2000000 ? n : AGENT_LOCAL_CONTEXT_TOKENS_DEFAULT
+}
+export const AGENT_LOCAL_CONTEXT_TOKENS = parseLocalContextTokens(cfg('AGENT_LOCAL_CONTEXT_TOKENS'))
