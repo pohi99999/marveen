@@ -713,3 +713,29 @@ export const EMBED_DIMS = Number.isFinite(rawEmbedDims) && rawEmbedDims > 0 ? ra
 // Anthropic-compatible proxy does not serve at all. Empty = fall back to
 // OLLAMA_URL, so an install whose local agent really is ollama is unaffected.
 export const AGENT_LOCAL_BASE_URL = cfg('AGENT_LOCAL_BASE_URL') || OLLAMA_URL
+
+// The context window, in tokens, that Claude Code is told the local (ollama-classed) agent has.
+// agent-process.ts exports it as CLAUDE_CODE_MAX_CONTEXT_TOKENS. From Claude Code 2.1.323 a model id
+// the CLI does not recognize is assumed to have 1,000,000, so auto-compact would wait for a limit a
+// local model never reaches.
+//
+// The default is 200,000: the window the measured, working state has (2026-11-15, CLI 2.1.325,
+// gemma4:12b on ollama; it is also what CLAUDE_CODE_DISABLE_1M_CONTEXT=1 gives and what
+// contextLimitForModel in context-guard.ts assumes for such a model, so the three agree).
+//
+// It is NOT the number ollama prints as context_length. That was tried first (32768, from /api/ps)
+// and was wrong twice over: the local agent's start-up prompt alone is 32,000 to 38,000 tokens
+// without its MCP tools, so the first turn failed with "Prompt is too long"; and ollama did not cut
+// the context at that number at all (a 103,590-token input came through whole). Set it below the
+// model's real limit and well above the agent's start-up prompt.
+//
+// A value that is not a whole number inside the registry's range falls back to the default instead
+// of reaching the launch command: the number is written into a shell line. The lower bound is where
+// no session can work: an empty run of the CLI already reads about 10,400 tokens.
+export const AGENT_LOCAL_CONTEXT_TOKENS_DEFAULT = 200000
+export function parseLocalContextTokens(raw: string | undefined): number {
+  if (raw === undefined || !/^[0-9]{1,7}$/.test(raw.trim())) return AGENT_LOCAL_CONTEXT_TOKENS_DEFAULT
+  const n = parseInt(raw.trim(), 10)
+  return n >= 16384 && n <= 2000000 ? n : AGENT_LOCAL_CONTEXT_TOKENS_DEFAULT
+}
+export const AGENT_LOCAL_CONTEXT_TOKENS = parseLocalContextTokens(cfg('AGENT_LOCAL_CONTEXT_TOKENS'))

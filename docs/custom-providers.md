@@ -85,6 +85,7 @@ Minden végpont Bearer tokenes hitelesítést igényel (`store/.dashboard-token`
 - Modell azonosítóban csak `a-zA-Z0-9._/:+-` karakterek engedélyeztek, hogy megakadályozzuk a shell-injekciót az egyéni provider ágakban.
 - Megosztott config-gyökér esetén (nincs izolált `CLAUDE_CONFIG_DIR` az ágenshez) az `x-api-key` jóváhagyási stamp az operátor saját `~/.claude.json` fájljába kerül, nem egy ágens-specifikus fájlba.
 - Az `ollama` ág a telepítés-szintű `AGENT_LOCAL_BASE_URL` környezeti változót olvassa a base URL-hez, az egyéni provider ág viszont a `store/custom-providers.json`-ban tárolt, per-provider `baseUrl` bejegyzést: a kettő egymástól függetlenül, egyszerre él.
+- Az `ollama` ág a kontextusablakot is megmondja a Claude Code-nak: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` = a telepítés-szintű `AGENT_LOCAL_CONTEXT_TOKENS` (alapérték 200000; legyen a modell valódi határa alatt és jóval az ágens induló promptja fölött, NEM az ollama `/api/ps` `context_length` értéke: a 32768-cal az első kör „Prompt is too long” hibával elbukott), mellette `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` biztonsági hálónak. Az egyéni provider ág NEM kap ilyen exportot: ott a helyes szám providerenként és modellenként más (egy hosztolt modellnek más az ablaka, mint a helyinek), és a provider-definíciónak ma nincs erre mezője. Amíg nincs, az egyéni provider ismeretlen modell-azonosítóját a Claude Code 2.1.323 óta 1M-esnek veszi.
 
 ---
 

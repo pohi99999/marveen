@@ -3,7 +3,7 @@ import { encodeClaudeProjectDir } from '../claude-project-dir.js'
 import { join, dirname, resolve } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { AGENT_LOCAL_BASE_URL } from '../config.js'
+import { AGENT_LOCAL_BASE_URL, AGENT_LOCAL_CONTEXT_TOKENS } from '../config.js'
 import { makeLazyBinResolver } from '../platform.js'
 import { logger } from '../logger.js'
 import {
@@ -1878,7 +1878,20 @@ export function resolveProviderEnv(
       // the native ollama API. Empty AGENT_LOCAL_BASE_URL falls back to
       // OLLAMA_URL, so nothing changes for an install whose local agent really
       // is ollama.
-      exportsStr: `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${AGENT_LOCAL_BASE_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && `,
+      //
+      // The context window. From Claude Code 2.1.323 a model id the CLI does not
+      // recognize (every local tag, e.g. `gemma4:12b`) is assumed to have a 1M
+      // window, so auto-compact would wait for a limit the model never had and,
+      // per the 2.1.323 changelog, such a session "can fail every turn until
+      // /clear". Two exports, on purpose:
+      // - CLAUDE_CODE_MAX_CONTEXT_TOKENS tells the CLI the window to work with
+      //   (AGENT_LOCAL_CONTEXT_TOKENS, default 200000; see config.ts for why it
+      //   is not the 32768 ollama prints). Measured on CLI 2.1.325: the reported
+      //   contextWindow IS this number, and it wins over the next variable. The
+      //   minimax and openrouter branches use the same variable.
+      // - CLAUDE_CODE_DISABLE_1M_CONTEXT=1 is the safety net: if a later CLI stops
+      //   honouring the first variable for these ids, the window is 200K, not 1M.
+      exportsStr: `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${AGENT_LOCAL_BASE_URL} && export ANTHROPIC_MODEL=${shSingleQuote(model)} && export CLAUDE_CODE_MAX_CONTEXT_TOKENS=${AGENT_LOCAL_CONTEXT_TOKENS} && export CLAUDE_CODE_DISABLE_1M_CONTEXT=1 && `,
     }
   }
   return { provider: 'claude', exportsStr: '' }

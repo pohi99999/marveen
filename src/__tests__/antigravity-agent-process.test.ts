@@ -184,6 +184,23 @@ describe('startAntigravityAgentProcess', () => {
   })
 })
 
+describe('an antigravity agent gets none of the Claude Code provider environment', () => {
+  beforeEach(() => {
+    runTmuxMock.mockReset()
+  })
+
+  // The model id of such an agent (measured on this fleet: `gemini-3.7-flash-medium`) is one the
+  // Claude launcher's provider resolver would class as a local Ollama tag. This launcher does not
+  // call it: what runs in the pane is the Antigravity CLI, which reads none of these variables.
+  it('the launch command carries no ANTHROPIC_* or CLAUDE_CODE_* export, in particular no local context window', () => {
+    const cmd = buildAntigravityLaunchCommand({ resume: false, model: 'gemini-3.7-flash-medium' })
+    expect(cmd).toBe("agy --dangerously-skip-permissions --model 'gemini-3.7-flash-medium'")
+    for (const name of ['ANTHROPIC_', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDE_CODE_']) {
+      expect(cmd, name).not.toContain(name)
+    }
+  })
+})
+
 describe('formatAntigravityInboundMessage', () => {
   it('frames a trusted-peer message the same way the Claude path does', () => {
     expect(formatAntigravityInboundMessage('marveen', 'Fix the login bug', 'trusted-peer')).toBe(

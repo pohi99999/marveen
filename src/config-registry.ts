@@ -527,6 +527,17 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     requiresRestart: true,
   },
   {
+    key: 'AGENT_LOCAL_CONTEXT_TOKENS',
+    type: 'int',
+    default: 200000,
+    min: 16384,
+    max: 2000000,
+    description: 'A lokál modellen futó ágensek kontextusablaka tokenben: ennyit mond a rendszer a Claude Code-nak (CLAUDE_CODE_MAX_CONTEXT_TOKENS), ehhez igazodik az automatikus tömörítés. Legyen a modell valódi határa ALATT, és jóval az ágens induló promptja FÖLÖTT. Mérve 2026-11-15 (CLI 2.1.325, gemma4:12b): a LokálisAdmirális induló promptja MCP-eszközök nélkül 32-38 ezer token, 32768-as ablakkal az első kör „Prompt is too long” hibával elbukott; 200000-rel sikeres. Az ollama /api/ps context_length értéke NEM a tényleges plafon (ott 32768 állt, miközben egy 103 590 tokenes bemenet csonkolás nélkül átment). Ok a kulcsra: a Claude Code 2.1.323 óta az ismeretlen modell-azonosítót 1M-esnek veszi.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
     key: 'AGENT_LOCAL_BASE_URL',
     type: 'string',
     default: '',
