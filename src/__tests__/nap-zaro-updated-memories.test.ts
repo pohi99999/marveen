@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { spawn } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
+import { lookup } from 'node:dns/promises'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { lookup } from 'node:dns/promises'
 
 // NAPZAROFRISS918: the nap-zaro SKILL.md's step-2 Python block (heredoc `<<'PY'`)
 // now reports updated memories separately from new ones (spec 17-18. döntés). This
