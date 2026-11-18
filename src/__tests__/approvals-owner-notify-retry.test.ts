@@ -163,6 +163,16 @@ describe('sendWithRetry: which failure is sent again, and how long it waits', ()
     expect(calls).toBe(1)
   })
 
+  it('a log line that cannot be written does not stop the sending', async () => {
+    const script: (Error | number)[] = [RESET(), 5]
+    const r = await sendWithRetry(
+      async () => { const n = script.shift(); if (n instanceof Error) throw n; return n },
+      deps([10]),
+      { onRetry: () => { throw new TypeError('Value of "this" must be of DOMException') } },
+    )
+    expect(r).toEqual({ ok: true, value: 5, attempts: 2 })
+  })
+
   it('tells about every failed attempt that is followed by another', async () => {
     const told: [number, number][] = []
     await sendWithRetry(async () => { throw RESET() }, deps([10, 20]), { onRetry: (_e, attempt, waitMs) => told.push([attempt, waitMs]) })

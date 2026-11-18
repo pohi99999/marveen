@@ -71,7 +71,13 @@ export async function sendWithRetry<T>(
     const planned = deps.delaysMs[attempts - 1]
     if (planned === undefined) return { ok: false, why: 'exhausted', err, attempts }
     const waitMs = Math.min(MAX_WAIT_MS, Math.max(planned, retryAfterMs(err) ?? 0))
-    opts.onRetry?.(err, attempts, waitMs)
+    // Telling about the failed attempt is a log line: if it cannot be written, the sending still goes on. (A
+    // logger that threw here made a timeout look like an owner who cannot be reached, second review of PR #56.)
+    try {
+      opts.onRetry?.(err, attempts, waitMs)
+    } catch {
+      // nothing to do: the next attempt is what matters
+    }
     await deps.sleep(waitMs)
     if (opts.stillWanted && !opts.stillWanted()) return { ok: false, why: 'unwanted', err, attempts }
   }
