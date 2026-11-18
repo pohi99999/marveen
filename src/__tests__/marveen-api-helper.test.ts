@@ -180,6 +180,17 @@ describe('marveen-api.sh: what each verb sends', () => {
     expect(JSON.parse(seen[4].body)).toEqual({ category: 'memory_maintenance', consumer: 'dani' })
   })
 
+  it('approval-renotify: POST to the request\'s own notify route, and a made-up id never leaves the route (APPROVALNOTIFYRETRY1118)', async () => {
+    const r = await run(['approval-renotify', 'ab12'])
+    expect(r.code).toBe(0)
+    expect(seen.map((s) => `${s.method} ${s.url}`)).toEqual(['POST /api/approvals/ab12/notify'])
+    expect(JSON.parse(seen[0].body)).toEqual({})
+    seen.length = 0
+    const bad = await run(['approval-renotify', 'ab12/../x'])
+    expect(bad.code).toBe(2)
+    expect(seen).toHaveLength(0)
+  })
+
   it('taskstate-save: POST to the agent\'s own record with X-Agent-Id, the JSON object from the file (#2338)', async () => {
     const rec = { summary: 'mit csinálok `x` $(nem fut)', doneSteps: ['kész'], alreadyDelegated: [], nextAction: 'következő', pendingDecision: '' }
     const r = await run(['taskstate-save', 'dani', file('t.json', JSON.stringify(rec))])
@@ -477,7 +488,7 @@ describe('marveen-api.sh: schedules are read only', () => {
     '        "message-close": ["7", "--result-file", f], "directive-verify": ["1"], "memory-search": ["dani", "q"],',
     '        "memory-save": ["dani", "warm", "k", f], "memory-list": ["dani", "hot"], "memory-move": ["5", "cold", "dani"],',
     '        "memory-update": ["5", "dani", f], "daily-log": ["dani", f], "taskstate-save": ["dani", j],',
-    '        "approval-request": ["dani", "memory_maintenance", "60", f], "approval-status": ["ap-1"],',
+    '        "approval-request": ["dani", "memory_maintenance", "60", f], "approval-status": ["ap-1"], "approval-renotify": ["ap-1"],',
     '        "approval-consume": ["ap-1", "memory_maintenance", "dani"], "skill-propose": ["my-skill", f],',
     '        "kanban-list": [], "schedules-list": [], "kanban-create": ["dani", "normal", f],',
     '        "kanban-move": ["c-1", "done"], "kanban-claim": ["c-1", "dani"], "kanban-release": ["c-1", "dani"],',

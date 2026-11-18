@@ -184,7 +184,45 @@ export function maskError(err: Error, path: Set<object> = new Set(), depth = 0):
     const value = maskByKey(key, raw) ?? redactValue(raw, path, depth + 1)
     Object.defineProperty(copy, key, { value, writable: true, enumerable: d.enumerable, configurable: true })
   }
-  return copy
+  return readsLikeAnError(copy) ? copy : plainErrorCopy(err, copy)
+}
+
+// A DOMException keeps `name`, `message` and `code` as getters on its PROTOTYPE, and they answer only for a real
+// DOMException: on a copy made with Object.create they throw "Value of "this" must be of DOMException". That is the
+// error AbortSignal.timeout() and an aborted fetch reject with, so every `logger.warn({ err })` in a catch block of a
+// request with a timeout THREW instead of logging (measured 2026-11-18 on the approval notification: the throw fell
+// out of the retry, and a timeout was written off as OWNER_UNREACHED without a second send).
+function readsLikeAnError(copy: Error): boolean {
+  try {
+    void copy.name
+    void copy.message
+    void copy.stack
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** For an error whose own prototype cannot be copied: a plain Error with the same name, message, code and stack (masked),
+ *  and whatever own fields the first copy got. `instanceof` of the original class is lost; nothing else is. */
+function plainErrorCopy(err: Error, copied: Error): Error {
+  const read = (key: 'name' | 'message' | 'stack' | 'code'): unknown => {
+    try { return (err as unknown as Record<string, unknown>)[key] } catch { return undefined }
+  }
+  const message = read('message')
+  const plain = new Error(typeof message === 'string' ? redactLogMessage(message) : '')
+  const name = read('name')
+  // enumerable, so pino's error serializer (own enumerable fields) writes it: the class is gone, the name must not be
+  Object.defineProperty(plain, 'name', { value: typeof name === 'string' ? name : 'Error', writable: true, enumerable: true, configurable: true })
+  const stack = read('stack')
+  Object.defineProperty(plain, 'stack', { value: typeof stack === 'string' ? redactLogMessage(stack) : undefined, writable: true, enumerable: false, configurable: true })
+  const code = read('code')
+  if (code !== undefined) Object.defineProperty(plain, 'code', { value: code, writable: true, enumerable: true, configurable: true })
+  for (const key of Reflect.ownKeys(copied)) {
+    const d = Object.getOwnPropertyDescriptor(copied, key)
+    if (d && !Object.prototype.hasOwnProperty.call(plain, key)) Object.defineProperty(plain, key, d)
+  }
+  return plain
 }
 
 /** The final log object / child bindings with every string value masked (a copy). */

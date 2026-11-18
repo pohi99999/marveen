@@ -20,6 +20,7 @@ import { reactionRoute, reactionsOn, repliesOn, dashboardOnlyLine, postReactionP
 import { OWNER_TEXT, formatExpiry, type ApprovalLang } from '../approval-texts.js'
 import { approvalTextLang } from '../agent-text-lang.js'
 import { sendTelegramMessage, editTelegramMessageText } from '../telegram.js'
+import { sendWithRetry, type RetryDeps } from '../approval-notify-retry.js'
 import { newApprovalNonce, ownerApprovalKeyboard, emailSummaryLines, decisionText, OWNER_RESOLVER, namesOwnerResolver, isButtonOnlyCategory, type OwnerDecision, type OwnerDecisionVia } from '../telegram-approval.js'
 import { mayActAsOwner, OWNER_SESSION_REQUIRED, refuseOwner } from './auth.js'
 import { supersededApprovals, supersededResolver, SUPERSEDED_NOTE } from '../approval-supersede.js'
@@ -306,8 +307,46 @@ export const reactionDeps: RouteDeps = {
   lang: () => approvalTextLang(),
 }
 
-function notifyOwner(approval: Approval, chatApprovedMessageId: number | string | null = null, serverFiled = false, filedLang?: ApprovalLang): void {
+// APPROVALNOTIFYRETRY1118: the re-send route's brake, per request. The route puts a message in front of the owner, so
+// a caller in a loop must not be able to fill the owner's chat: one attempt in RESEND_MIN_GAP_MS whatever came of it,
+// and RESEND_MAX_SENT delivered re-sends for one request. In memory: a restart forgets it, and a request lives for
+// hours at most.
+export const RESEND_MIN_GAP_MS = 30_000
+export const RESEND_MAX_SENT = 5
+const resendLog = new Map<string, { lastAt: number; sent: number }>()
+
+function noteResent(id: string): void {
+  const seen = resendLog.get(id)
+  if (seen) seen.sent += 1
+}
+
+/** Why a re-send is refused now, or null when it may go. An attempt that may go is noted at once. */
+export function resendRefusal(id: string, now: number): { error: 'too_soon'; retry_after_s: number } | { error: 'too_many'; sent: number } | null {
+  const seen = resendLog.get(id) ?? { lastAt: 0, sent: 0 }
+  if (seen.sent >= RESEND_MAX_SENT) return { error: 'too_many', sent: seen.sent }
+  const waitMs = seen.lastAt + RESEND_MIN_GAP_MS - now
+  if (waitMs > 0) return { error: 'too_soon', retry_after_s: Math.ceil(waitMs / 1000) }
+  resendLog.set(id, { ...seen, lastAt: now })
+  if (resendLog.size > 2000) for (const [key, value] of resendLog) if (now - value.lastAt > 24 * 3_600_000) resendLog.delete(key)
+  return null
+}
+
+/** APPROVALNOTIFYRETRY1118: when the Telegram send is repeated after a passing failure (approval-notify-retry.ts has
+ *  the why): three more attempts, 13 seconds of waiting in all. Tests replace it. */
+export const ownerNotifyRetry: RetryDeps = {
+  delaysMs: [1_000, 3_000, 9_000],
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}
+
+/**
+ * Resolves true when the owner's notification went out, false on every other path. Fire-and-forget for a request
+ * that was just filed (the POST answer does not wait for the channel); the re-send route awaits it.
+ * `resend` (APPROVALNOTIFYRETRY1118) is that route's one more send of a pending request's question: one attempt,
+ * answered to the caller, with no in-band OWNER_UNREACHED message on a failure (the caller reads the answer).
+ */
+function notifyOwner(approval: Approval, chatApprovedMessageId: number | string | null = null, serverFiled = false, filedLang?: ApprovalLang, resend = false): Promise<boolean> {
   const informative = chatApprovedMessageId != null
+  const inBand = !informative && !resend
   // APPROVALTAGEN1108: the language is read ONCE per request: the text, the Slack DM, its expiry and the language
   // stored with the post (the words its replies are checked with) are the same one. A server-filed request passes the
   // language its description was worded in (Samu 73350), so the description and the post never differ.
@@ -315,14 +354,14 @@ function notifyOwner(approval: Approval, chatApprovedMessageId: number | string 
   let text = informative
     ? buildOwnerChatApprovedText(approval, chatApprovedMessageId, lang)
     : buildOwnerApprovalText(approval, lang)
-  void (async () => {
+  return (async (): Promise<boolean> => {
     // APPROVALSLACK1030 (2): the owner decides with a Slack reaction the server itself checks, when this request may
     // (approval-slack-route.ts); otherwise the normal DM below, saying the decision is on the dashboard.
     // APPROVALSLACK1030 B: with APPROVAL_SLACK_REPLIES on, the same one-message path, and the owner's typed reply decides.
     if (!informative && (reactionsOn(reactionDeps.setting) || repliesOn(reactionDeps.setting))) {
       const expires = formatExpiry(approval.timeout_at, lang)
       const route = await reactionRoute(approval, serverFiled, reactionDeps, expires, approvalsPageUrl(), lang)
-      if (route.ok && await postReactionPrompt(approval, route)) return
+      if (route.ok && await postReactionPrompt(approval, route)) return true
       text += '\n' + dashboardOnlyLine(route.ok ? 'slack_post_failed' : route.reason, lang)
     }
     // APPROVALSLACK1030: an owner who moved to Slack (NOTIFY_SLACK_TARGET set) while the channel provider stays
@@ -333,22 +372,22 @@ function notifyOwner(approval: Approval, chatApprovedMessageId: number | string 
     if (slack.attempted) {
       if (slack.sent) {
         logger.info({ approvalId: approval.id, provider: 'slack', informative }, 'approval owner notification sent')
-        return
+        return true
       }
       if (slack.error === 'no_slack_token') {
         logger.warn({ approvalId: approval.id, provider: 'slack', informative }, 'approval owner notification suppressed: no channel token')
-        if (!informative) fallbackInBand(approval, 'no-token')
-        return
+        if (inBand) fallbackInBand(approval, 'no-token')
+        return false
       }
       if (slack.error?.startsWith('unresolved_target')) {
         logger.warn({ approvalId: approval.id, provider: 'slack', informative }, 'approval owner notification suppressed: no owner chat')
-        if (!informative) fallbackInBand(approval, 'no-owner-chat')
-        return
+        if (inBand) fallbackInBand(approval, 'no-owner-chat')
+        return false
       }
       logger.warn({ approvalId: approval.id, provider: 'slack', error: slack.error, informative },
         'approval owner notification FAILED -- the request is only visible on the dashboard')
-      if (!informative) fallbackInBand(approval, 'send-failed')
-      return
+      if (inBand) fallbackInBand(approval, 'send-failed')
+      return false
     }
 
     // APPROVALVAK821 fixed this path so the request reaches the OWNER and not
@@ -368,21 +407,43 @@ function notifyOwner(approval: Approval, chatApprovedMessageId: number | string 
       const ownerChat = ownerAlertChatOverride('telegram') ?? resolveOwnerChatId()
       if (!ownerChat) {
         logger.warn({ approvalId: approval.id, informative }, 'approval owner notification suppressed: no owner chat')
-        if (!informative) fallbackInBand(approval, 'no-owner-chat')
-        return
+        if (inBand) fallbackInBand(approval, 'no-owner-chat')
+        return false
       }
       try {
         // the fork's one-tap owner decision (PR #18): the Approve / Reject buttons ride on the Telegram message,
         // but not on the informative note (that row was already approved in the chat, nothing is left to press)
         const extra = !informative && approval.owner_nonce ? { reply_markup: ownerApprovalKeyboard(approval.id, approval.owner_nonce) } : {}
-        const messageId = await sendTelegramMessage(TELEGRAM_BOT_TOKEN, ownerChat, text, extra)
-        if (!informative && messageId != null) setApprovalTelegramMessageId(approval.id, messageId)
-        logger.info({ approvalId: approval.id, messageId, informative }, 'approval owner notification sent')
+        // APPROVALNOTIFYRETRY1118: a passing failure (a reset connection, a timeout, 429, 5xx) is sent again a few
+        // times before the request is written off as OWNER_UNREACHED. Before each further send the row is read
+        // again: a request decided on the dashboard in the meantime gets no late question.
+        const outcome = await sendWithRetry(
+          () => sendTelegramMessage(TELEGRAM_BOT_TOKEN, ownerChat, text, extra),
+          resend ? { ...ownerNotifyRetry, delaysMs: [] } : ownerNotifyRetry,
+          {
+            stillWanted: () => informative || getApproval(approval.id)?.status === 'pending',
+            onRetry: (err, attempt, waitMs) =>
+              logger.warn({ err, approvalId: approval.id, informative, attempt, waitMs }, 'approval owner notification attempt failed -- sending again'),
+          },
+        )
+        if (outcome.ok) {
+          const messageId = outcome.value
+          if (!informative && messageId != null) setApprovalTelegramMessageId(approval.id, messageId)
+          logger.info({ approvalId: approval.id, messageId, informative, attempts: outcome.attempts }, 'approval owner notification sent')
+          return true
+        }
+        if (outcome.why === 'unwanted') {
+          logger.info({ approvalId: approval.id, attempts: outcome.attempts }, 'approval owner notification dropped: the request was decided while the send was being repeated')
+          return false
+        }
+        logger.warn({ err: outcome.err, approvalId: approval.id, informative, attempts: outcome.attempts, why: outcome.why },
+          'approval owner notification FAILED -- the request is only visible on the dashboard')
+        if (inBand) fallbackInBand(approval, 'send-failed')
       } catch (err) {
         logger.warn({ err, approvalId: approval.id, informative }, 'approval owner notification FAILED -- the request is only visible on the dashboard')
-        if (!informative) fallbackInBand(approval, 'send-failed')
+        if (inBand) fallbackInBand(approval, 'send-failed')
       }
-      return
+      return false
     }
 
     // sendOwnerMessage REPORTS whether it went out (PR1655 review, ask 2). The
@@ -397,23 +458,24 @@ function notifyOwner(approval: Approval, chatApprovedMessageId: number | string 
     const r = await sendOwnerMessage(text)
     if (r.sent) {
       logger.info({ approvalId: approval.id, provider: CHANNEL_PROVIDER, informative }, 'approval owner notification sent')
-      return
+      return true
     }
     if (r.reason === 'no-token') {
       logger.warn({ approvalId: approval.id, provider: CHANNEL_PROVIDER, informative },
         'approval owner notification suppressed: no channel token')
-      if (!informative) fallbackInBand(approval, 'no-token')
-      return
+      if (inBand) fallbackInBand(approval, 'no-token')
+      return false
     }
     if (r.reason === 'no-owner-chat') {
       logger.warn({ approvalId: approval.id, provider: CHANNEL_PROVIDER, informative },
         'approval owner notification suppressed: no owner chat')
-      if (!informative) fallbackInBand(approval, 'no-owner-chat')
-      return
+      if (inBand) fallbackInBand(approval, 'no-owner-chat')
+      return false
     }
     logger.warn({ approvalId: approval.id, provider: CHANNEL_PROVIDER, reason: r.reason, informative },
       'approval owner notification FAILED -- the request is only visible on the dashboard')
-    if (!informative) fallbackInBand(approval, 'send-failed')
+    if (inBand) fallbackInBand(approval, 'send-failed')
+    return false
   })()
 }
 
@@ -466,7 +528,7 @@ export function fileServerApproval(params: {
     content_hash: params.content_hash,
   })
   // serverFiled: the description is the server's own words, so the reaction path may show it (APPROVALSLACK1030 (2)).
-  notifyOwner(approval, null, true, lang)
+  void notifyOwner(approval, null, true, lang)
   notifyMainAgent(approval)
   logger.info({ id: approval.id, agent_id: approval.agent_id, category: approval.category }, 'Approval request filed by the server')
   return approval
@@ -678,7 +740,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     }
 
     closeSupersededApprovals(approval, typeof body.supersedes === 'string' ? body.supersedes : null)
-    notifyOwner(approval, chatApprovedMessageId)
+    void notifyOwner(approval, chatApprovedMessageId)
     notifyMainAgent(approval)
     logger.info({ id, agent_id, category, chatApprovedMessageId, forAgent }, chatApprovedMessageId != null ? 'Approval created as already approved in chat' : 'Approval request created')
     json(res, redactOwnerNonce(approval), 201)
@@ -796,6 +858,38 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
   if (decMatch && method === 'POST') {
     logger.warn({ id: decMatch[1], auth: ctx.auth?.kind, agent: ctx.auth?.agent }, 'telegram-decision refused: this route does not decide')
     json(res, { error: 'owner_decision_only_from_telegram', text: 'A döntés csak Péter Telegram-gombjáról vagy parancsából jöhet.' }, 403)
+    return true
+  }
+
+  // POST /api/approvals/:id/notify -- APPROVALNOTIFYRETRY1118: the owner's question for a request that is still
+  // pending goes out once more, with its buttons. For the request whose first notification was lost (measured
+  // 2026-11-18: a reset connection, and the owner asked why there was no button). It decides nothing and returns no
+  // nonce; the message goes where the first one went. An earlier message that did arrive keeps its buttons: the first
+  // press decides, a press on the other one is answered as already resolved (telegram-approval.ts).
+  const notifyMatch = path.match(/^\/api\/approvals\/([^/]+)\/notify$/)
+  if (notifyMatch && method === 'POST') {
+    const approval = getApproval(notifyMatch[1]!)
+    if (!approval) {
+      json(res, { error: 'Not found' }, 404)
+      return true
+    }
+    if (approval.status !== 'pending') {
+      json(res, { error: 'not_pending', status: approval.status }, 409)
+      return true
+    }
+    if (approval.timeout_at != null && approval.timeout_at * 1000 <= Date.now()) {
+      json(res, { error: 'expired' }, 409)
+      return true
+    }
+    const refusal = resendRefusal(approval.id, Date.now())
+    if (refusal) {
+      json(res, refusal, 429)
+      return true
+    }
+    const sent = await notifyOwner(approval, null, false, undefined, true)
+    if (sent) noteResent(approval.id)
+    logger.info({ approvalId: approval.id, sent, auth: ctx.auth?.kind, agent: ctx.auth?.agent }, 'approval owner notification re-send asked for')
+    json(res, { ok: sent, sent }, sent ? 200 : 502)
     return true
   }
 

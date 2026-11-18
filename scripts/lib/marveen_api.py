@@ -60,6 +60,8 @@ USAGE = """usage: bash scripts/marveen-api.sh <verb> [args]
   taskstate-save <agent> <json-file>
   approval-request <agent> <category-key> <timeout-seconds> <description-file> [--content-hash <h>] [--payload-file <json-file>]
   approval-status <approval-id>
+  approval-renotify <approval-id>
+                (sends the owner's question for a request that is still pending once more, with its buttons)
   approval-consume <approval-id> <category-key> <consumer> [--content-hash <h>]
   skill-propose <skill-name> <skill-md-file> [--reason-file <file>] [--ref-file <name.md> ...]
                 (each --ref-file goes as references/<its file name>, markdown only)
@@ -391,6 +393,12 @@ def build_request(verb, args):
         (approval_id,) = positional(args, 1, verb)
         check(approval_id, APPROVAL_ID_RE, 'approval id')
         return 'GET', f'/api/approvals/{approval_id}', None, headers, {}
+    if verb == 'approval-renotify':
+        # APPROVALNOTIFYRETRY1118: for the request whose first notification was lost; the server refuses it for a
+        # request that is not pending, and brakes repeats (routes/approvals.ts)
+        (approval_id,) = positional(args, 1, verb)
+        check(approval_id, APPROVAL_ID_RE, 'approval id')
+        return 'POST', f'/api/approvals/{approval_id}/notify', {}, headers, {}
     if verb == 'approval-consume':
         content_hash = take_opt(args, '--content-hash')
         approval_id, category, consumer = positional(args, 3, verb)

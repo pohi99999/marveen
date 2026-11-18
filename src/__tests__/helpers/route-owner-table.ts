@@ -19,6 +19,7 @@ export const UNGATED_ROUTES: ReadonlyArray<{ key: string; cls: RouteClass; why: 
   { key: "agents.ts POST <redeliverMatch>", cls: "agent", why: "agent lifecycle: the watchdog asks the server to put a restarted sub-agent's delivered, not closed rows back for the router; takes only the name" },
   { key: "agents.ts POST <restartMatch>", cls: "agent", why: "agent lifecycle: the main agent restarts agents" },
   { key: "approvals.ts POST <consumeMatch>", cls: "agent", why: "an agent consumes its own approved request (single use, bound to the grantee)" },
+  { key: "approvals.ts POST <notifyMatch>", cls: "agent", why: "APPROVALNOTIFYRETRY1118: the main agent has the owner's question for a pending request sent once more; it decides nothing, returns no nonce, and is braked per request (30 s, 5 delivered)" },
   { key: "approvals.ts POST <decMatch>", cls: "by-design", why: "fork #50: refuses every caller with 403 and changes nothing; the owner decides only by the Telegram button or command" },
   { key: "auth.ts POST /api/auth/login", cls: "own-check", why: "the caller's own session or credential (login, logout); a password change refuses the token" },
   { key: "auth.ts POST /api/auth/logout", cls: "own-check", why: "the caller's own session or credential (login, logout); a password change refuses the token" },
