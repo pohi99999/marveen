@@ -14,6 +14,7 @@ Minden lap két szemszögből mutatja be a funkciót:
 | [Memória-rendszer](memory-system.md) | 3-tier (hot/warm/cold) FTS5 + napi salience decay + napi napló |
 | [Kanban + auto-breakdown](kanban.md) | Feladatkezelés LLM-es részfeladat-bontással |
 | [Ügynök-flotta + inter-agent kommunikáció](agent-fleet.md) | Több specializált ügynök közös üzenetsoron keresztül |
+| [Ügynök-létrehozás jóváhagyással](agent-create-approval.md) | Egy ügynök kérheti új ügynök létrehozását; a szerver tárolja és hash-eli a specifikációt, és csak a gazda jóváhagyása után hozza létre, ugyanazon a kódon, mint a dashboard (alapból KI) |
 | [Föderáció](federation.md) | Több Marveen-példány összekötése: rendszer-minősített címzés (`teodor/backend-dev`) + HTTPS-híd, dashboard-menü, per-társ tokenek, automatikus ügynök-felkészítés, **képesség-alapú auto-routing** (LLM-katalógus) + fő-ügynök auto-drain, beépített rollback — opt-in, fail-closed |
 | [Skill-factory (öntanulás)](skill-factory.md) | Visszatérő munkafolyamatokból újrahasznosítható skill-ek |
 | [Channels (Telegram / Slack)](channels.md) | Natív üzenetküldő-integráció proaktív értesítésekkel |
@@ -41,11 +42,11 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **66**, egyedi `/api/...` útvonal-literál bennük: **191**
+- Route-modulok (`src/web/routes/*.ts`): **67**, egyedi `/api/...` útvonal-literál bennük: **203**
 - Claude Code hookok (`.claude/settings.json`): **8** esemény, **58** bejegyzés, **37** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **10** -- channel-image, commit-identity, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **67**, ebből a fenti táblázat linkel **23**
+- Dokumentációs lapok a `docs/` alatt: **69**, ebből a fenti táblázat linkel **24**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
@@ -71,6 +72,7 @@ _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (d
 - [google-docs](google-docs.md)
 - [http-probe](http-probe.md)
 - [ideabox](ideabox.md)
+- [install-non-interactive](install-non-interactive.md)
 - [inter-agent-send-reliability](inter-agent-send-reliability.md)
 - [kutatas](kutatas.md)
 - [mcp-list-channel-plugin](mcp-list-channel-plugin.md)

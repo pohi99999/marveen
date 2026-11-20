@@ -25,6 +25,7 @@ describe('checkAgentPutFields', () => {
     expect(checkAgentPutFields('laci', { authMode: 'shared' }).ok).toBe(true)
     expect(checkAgentPutFields('laci', { memoryIsolation: true }).ok).toBe(true)
     expect(checkAgentPutFields('laci', { engine: 'copilot' }).ok).toBe(true)
+    expect(checkAgentPutFields('laci', { codeMode: true }).ok).toBe(true)
     expect(checkAgentPutFields('laci', {}).ok).toBe(true)
   })
 
@@ -66,7 +67,7 @@ describe('checkAgentPutFields', () => {
     expect([...AGENT_PUT_WRITABLE_FIELDS]).toEqual([
       'claudeMd', 'soulMd', 'mcpJson', 'model',
       'authMode', 'apiKey', 'claudePlan', 'memoryIsolation', 'engine',
-      'modelProfile', 'customProvider',
+      'modelProfile', 'customProvider', 'codeMode',
     ])
     expect(AGENT_PUT_WRITABLE_FIELDS).not.toContain('securityProfile')
   })

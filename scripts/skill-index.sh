@@ -20,6 +20,7 @@ command -v python3 >/dev/null 2>&1 || {
   echo "skill-index: python3 kell a leirasok karakter-szintu rovideteséhez, de nincs a PATH-on" >&2
   exit 1
 }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILLS_DIR="$ROOT/.claude/skills"
 OUTPUT="$SKILLS_DIR/.skill-index.md"
@@ -57,14 +58,13 @@ index_skills_dir() {
     fi
 
     local desc
-    # NE `cut -c1-120`: a GNU cut BAJTOKAT vag, nem karaktereket, ezert egy ekezetes
-    # karakter kozepen elvag, a fajl ervenytelen UTF-8 lesz, es a grep onnantol
-    # BINARISKENT kezeli -- nema talalat, exit 1, nulla hibauzenet. 2026-09-07-en
-    # pontosan ez tortent: az index "Non-ISO extended-ASCII"-va valt, es a heartbeat
-    # "keress meglevo skillt szoveges keresessel" lepese csendben semmit nem talalt.
-    # A python3 karakter-szinten vag (a telepito fuggosege, mindig van).
-    desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" | tr -d '\r' \
-      | python3 -c 'import sys; s=sys.stdin.readline().rstrip("\n"); print(s[:120])')
+    # `cut -c` is byte-oriented in GNU coreutils even under a UTF-8 locale, so
+    # a 120-byte cut lands mid-character on accented text and writes a broken
+    # byte into the index every agent reads. python3 counts characters.
+    # IDXBLOCK1118: a `grep "^description:"` also turned a YAML block scalar
+    # (`description: >` with the text below) into a lone ">"; skill-desc.py
+    # reads the frontmatter and joins it onto one line.
+    desc=$(python3 "$SCRIPT_DIR/skill-desc.py" "$skill_md" 2>/dev/null)
     if [ -z "$desc" ]; then
       desc="(nincs leírás)"
     fi

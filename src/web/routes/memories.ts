@@ -1,6 +1,6 @@
 import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
-  hybridSearch, backfillEmbeddings, backfillNeedsWarning, reembedEditedMemory,
+  hybridSearch, backfillEmbeddings, backfillNeedsWarning,
   searchMemories, getMemoriesForChat, getDb, touchMemoriesAccessed,
   recordMemoryUse, getMemoryUseSummaries, getMemoryUseTrackingStart,
   getMemoryById, deleteMemoryById, getMemoryVersions, consumeApproval, escapeLike,
@@ -974,11 +974,8 @@ Respond ONLY with JSON, nothing else:
     // handler), and the success body keeps develop's `version` (MEMVERSION930),
     // which the if_version flow reads back.
     if (updateMemory(id, effectiveContent, newCategory, agent_id, keywords, updated_by)) {
-      // MEMEDITEMBED1103: an edit that changed the embedded text left the row's
-      // vector NULL until a manual backfill or a restart. Re-embed THIS row now,
-      // as POST does for a new one: fire-and-forget (not awaited, cannot fail
-      // or delay this response), no-op when the embedding was kept.
-      reembedEditedMemory(id)
+      // MEMEDITEMBED1103 (fork) is now upstream's REEMBEDONUPDATE1117: updateMemory itself re-embeds the edited
+      // row, fire-and-forget, so this route no longer calls a second re-embed (two backend calls per edit).
       const version = memoryVersion(effectiveContent)
       if (effectiveContent !== before.content) recordReferenceUses(ctx, id, effectiveContent)
       json(res, mismatch ? { ok: true, version, owner_mismatch: ownerMismatchPayload(id, mismatch) } : { ok: true, version })
