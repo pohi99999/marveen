@@ -461,6 +461,23 @@ describe('8. the requester line and the ASCII-only command', () => {
     expect(scheduleApprovals()).toHaveLength(0)
   })
 
+  // Marveen 8586: the cron is printable ASCII too ("15<NBSP>7 * * *" was accepted).
+  it.each([
+    ['a no-break space', '15 7 * * *'],
+    ['an ideographic space', '15 7　* * *'],
+    ['a fullwidth digit', '１5 7 * * *'],
+    ['a figure space', '15 7 * * *'],
+  ])('%s in the schedule: 400, nothing stored', async (_n, schedule) => {
+    const r = await fileSpec({ ...SPEC, schedule })
+    expect(r.status).toBe(400)
+    expect(scheduleApprovals()).toHaveLength(0)
+  })
+
+  it('a plain ASCII cron with ranges, steps and lists is accepted', async () => {
+    const r = await fileSpec({ ...SPEC, schedule: '*/15 4-12 * * 1-5' })
+    expect(r.status).toBe(201)
+  })
+
   it('the description may still be Hungarian (it is not run)', async () => {
     const r = await fileSpec({ ...SPEC, description: 'Napi pályázat-betöltés, árvíztűrő' })
     expect(r.status).toBe(201)

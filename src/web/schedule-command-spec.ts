@@ -79,6 +79,10 @@ export function canonicalScheduleCommandSpec(body: unknown): ScheduleSpecResult 
   if (schedule !== schedule.trim() || !schedule || unshowableText(schedule) !== null || !isValidCronShape(schedule)) {
     return bad('schedule must be a valid five-field cron expression, without leading or trailing spaces')
   }
+  // Marveen 8586 (Ellenőr: "15<NBSP>7 * * *" was accepted): the cron is printable ASCII too, the same rule as the
+  // command, so the schedule the owner reads is the one the runner parses.
+  const sa = /[^\x20-\x7e]/u.exec(schedule)
+  if (sa) return bad(`schedule must be printable ASCII only (U+${sa[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')} is not)`)
   const command = body.command as string
   if (!command.trim()) return bad('command must not be empty')
   if (command !== command.trim()) return bad('command must not start or end with whitespace (it is shown verbatim)')

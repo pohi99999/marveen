@@ -26,7 +26,8 @@ Marker: SCHEDCMDAPPROVAL1121.
 - The fields are exactly what a command task's `task-config.json` carries for its run. An unknown field is refused with
   400. A missing `timeoutMs` or `failThreshold` gets the runner's defaults (10 s, 2), written into the spec, so the
   owner sees the real values.
-- `name` is a task name (lower-case letters, digits, single dashes, at most 64), `schedule` a five-field cron.
+- `name` is a task name (lower-case letters, digits, single dashes, at most 64), `schedule` a five-field cron in
+  printable ASCII (a no-break or fullwidth character in the cron is refused, so the owner reads what the runner parses).
 - `command` is one line of **printable ASCII** (0x20-0x7E), at most 2000 characters, without leading or trailing
   whitespace. A look-alike letter (Cyrillic `а`, Greek `ο`), a no-break or ideographic space, a variation selector or a
   control, bidi or zero-width character is refused: each would make the command the owner reads differ from the one
@@ -92,3 +93,13 @@ past its consume window is refused once (`consume_refused:expired` on the row) a
 answers 403. The setting is read only there. A request filed before the switch stays open, and approving it still
 creates the task (the consumer does not read the setting). To stop everything, switch it off and reject the open
 requests.
+
+## Rollback
+
+- **Stop new requests:** `SCHEDULE_COMMAND_VIA_APPROVAL=off`, then reject the open `schedule_command` approvals.
+- **A task created this way** is an ordinary command task: switch it off or delete it on the dashboard's schedules
+  page, as any other. Its spec row keeps the record (`outcome = created`, `created_task`).
+- **The code:** reverting the commit removes the route, the consumer and the sweep; the Telegram buttons of the other
+  categories keep their old format. The `schedule_command_specs` table stays in the database (it was created with
+  `CREATE TABLE IF NOT EXISTS` and nothing reads it after the revert); dropping it is not needed and, being a security
+  table, it is not writable by agents anyway.
