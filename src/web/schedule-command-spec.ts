@@ -1,5 +1,5 @@
 // SCHEDCMDAPPROVAL1121: the spec behind a schedule_command approval. The main agent files a REQUEST for a scheduled
-// shell command (a 'command' task: the runner starts it with `bash -lc` inside the dashboard process, outside every
+// shell command (a 'command' task: the dashboard starts it with `bash -lc` as its own detached child process, outside every
 // tool hook, on every tick of its cron); nothing is created until the owner approves it and the server's consumer
 // runs. The owner approves what the server stored, so the stored spec is canonical, versioned and hashed, the same
 // way as agent-create-spec.ts:
@@ -77,7 +77,7 @@ export function canonicalScheduleCommandSpec(body: unknown): ScheduleSpecResult 
   }
   const schedule = body.schedule as string
   if (schedule !== schedule.trim() || !schedule || unshowableText(schedule) !== null || !isValidCronShape(schedule)) {
-    return bad('schedule must be a valid five-field cron expression, without leading or trailing spaces')
+    return bad('schedule must be a valid five- or six-field cron expression (six: with seconds first), without leading or trailing spaces')
   }
   // Marveen 8586 (Ellenőr: "15<NBSP>7 * * *" was accepted): the cron is printable ASCII too, the same rule as the
   // command, so the schedule the owner reads is the one the runner parses.
@@ -139,8 +139,8 @@ export function renderScheduleCommandSpec(spec: ScheduleCommandSpecV1, hash: str
   return [
     hu ? 'Ütemezett shell-parancs létrehozása, jóváhagyásra:' : 'Create a scheduled shell command, for approval:',
     hu
-      ? 'A parancs a dashboard folyamatában fut (bash -lc), minden eszköz-kapun kívül, az ütemezés minden alkalmával, amíg ki nem kapcsolod vagy nem törlöd.'
-      : 'The command runs inside the dashboard process (bash -lc), outside every tool gate, on every occurrence of the schedule, until it is switched off or deleted.',
+      ? 'A parancsot a dashboard indítja, külön folyamatként (bash -lc), minden eszköz-kapun kívül, az ütemezés minden alkalmával, amíg ki nem kapcsolod vagy nem törlöd.'
+      : 'The dashboard starts the command as its own process (bash -lc), outside every tool gate, on every occurrence of the schedule, until it is switched off or deleted.',
     `- ${hu ? 'feladat neve' : 'task name'}: ${spec.name}`,
     `- ${hu ? 'ütemezés (cron)' : 'schedule (cron)'}: ${spec.schedule}`,
     `- ${hu ? 'parancs, szó szerint (a következő sor)' : 'command, verbatim (the next line)'}:`,
