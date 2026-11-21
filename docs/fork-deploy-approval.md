@@ -13,7 +13,8 @@ Other approvals keep their own buttons: a scheduled shell command (`schedule_com
 The SHA the owner approves must be the SHA that goes live, so the merge is a **fast-forward of one commit**, not a
 squash (a squash commit is born at the merge, after the press). Before asking for the review, the PR branch is brought
 to ONE commit whose only parent is the fork's `main`. The reviewer (Ellenőr) measures that commit, and the same SHA goes
-in the request. GitHub marks the PR merged when its head lands on `main`.
+in the request. Keep the PR open until the deploy: a PR closed before its head lands on `main` stays closed, not
+merged (measured on #62, the first live button deploy).
 
 ## The request
 
@@ -124,20 +125,26 @@ never re-run.
 
 ## Known limits
 
-Measured by the reviewer on #61 (Ellenőr 8634, 8642); none of them lets an unapproved SHA go live.
+Measured by the reviewer on #61, #62 and #63 (Ellenőr 8634, 8642, 8653, 8656); none of them lets an unapproved SHA go
+live.
 
-- **Two open requests for the same PR, pressed at the same time.** Both runs fetch into the same
-  `refs/remotes/fork/pr/<n>`. The stale one stops at once (`precheck_pr_head_moved`) and deletes that ref; the current
-  one then has no remote-tracking ref for its commit, so the hook-proof gate stops its push (`push_failed`): nothing
-  moves, nothing restarts, and the report says why. Pressed one after the other, both behave as described above. Card
-  3d970f6c puts the SHA into the ref name.
-- **`push_not_visible` has no test.** The branch for a push that succeeds while `fork/main` then reads back as another
-  SHA could not be produced in the sandbox; it goes back to the old SHA like every other failure before the restart.
+- **Two open requests for the same PR.** Both runs fetch into the same `refs/remotes/fork/pr/<n>`. If the stale one is
+  pressed while the current one is still running, before its push (on the first live run, #62: 17 s from the start to the push, 9 s of it the build; longer when
+  `npm ci` runs), the
+  stale one stops (`precheck_pr_head_moved`, or `precheck_install_moved` once the current run has merged) and deletes
+  that ref on its way out. The current one then has no remote-tracking ref for its commit, so the hook-proof gate stops
+  its push (`push_failed`): the install goes back to the old SHA, nothing restarts, and the report says why. Pressed
+  after the first run has finished, both behave as described above. Card 3d970f6c puts the SHA into the ref name.
+- **`push_not_visible` has no test in the PR's own suite.** It is reached when the fork accepts the push but
+  `fork/main` then reads back as another SHA. The PR's sandbox did not produce it; a post-receive hook on the fork that
+  moves `main` back does (Ellenőr, `zzEllenor62k` K4). The install goes back to the old SHA and nothing restarts; the
+  fork stays on whatever it reads back, and the report names that SHA.
 - **The hook-proof gate does not ask for a local pre-commit proof of the deployed commit.** The commit is already on
   the fork (it is the PR head, behind a remote-tracking ref), so the gate counts it as not leaving the machine; the
   push only moves `main`. The commit's own checks are the ones its author's clone and CI ran, and the reviewer's.
-- **A branch named `pr` on the fork** would make the fetch fail (`precheck_fetch_failed`, nothing moves). The fork has
-  none.
+- **A branch named `pr` on the fork**, once the install has fetched it (a plain `git fetch fork` creates
+  `refs/remotes/fork/pr`), makes the fetch fail (`precheck_fetch_failed`, nothing moves). Not fetched, it does not
+  matter. The fork has none.
 
 ## Turning it off
 
