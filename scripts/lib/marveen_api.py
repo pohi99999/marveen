@@ -69,6 +69,8 @@ USAGE = """usage: bash scripts/marveen-api.sh <verb> [args]
   approval-renotify <approval-id>
                 (sends the owner's question for a request that is still pending once more, with its buttons)
   approval-consume <approval-id> <category-key> <consumer> [--content-hash <h>]
+  fork-deploy-request <agent> <pr-number> <head-sha>
+                (the one-press deploy, main agent only: the server measures the rest in git and asks the owner)
   skill-propose <skill-name> <skill-md-file> [--reason-file <file>] [--ref-file <name.md> ...]
                 (each --ref-file goes as references/<its file name>, markdown only)
   kanban-list
@@ -446,6 +448,17 @@ def build_request(verb, args):
         if content_hash is not None:
             body['content_hash'] = check(content_hash, HASH_RE, 'content hash')
         return 'POST', f'/api/approvals/{approval_id}/consume', body, headers, {}
+    if verb == 'fork-deploy-request':
+        # FORKDEPLOY1121: the main agent asks for the one-press merge + deploy of a reviewed fork PR. Only the PR number
+        # and its full head SHA go; the server reads everything else from git and sends the owner the buttons.
+        agent, pr, sha = positional(args, 3, verb)
+        check(agent, NAME_RE, 'agent name')
+        if not re.fullmatch(r'[1-9][0-9]{0,6}', pr):
+            fail_usage('fork-deploy-request: the PR number must be a positive whole number')
+        if not re.fullmatch(r'[0-9a-f]{40}', sha):
+            fail_usage('fork-deploy-request: the head SHA must be the full 40-character lower-case SHA')
+        headers['X-Agent-Id'] = agent
+        return 'POST', '/api/fork-deploy-specs', {'spec_version': 1, 'pr': int(pr), 'sha': sha}, headers, {}
     if verb == 'skill-propose':
         reason_file = take_opt(args, '--reason-file')
         # SKILLSPLIT1101: a long skill split into SKILL.md + references/*.md; each file under its own name.

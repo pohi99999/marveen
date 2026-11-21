@@ -31,6 +31,7 @@ import { supersededApprovals, supersededResolver, SUPERSEDED_NOTE } from '../app
 import type { RouteContext } from './types.js'
 import { fileAgentSpecRequest } from '../agent-create-approval.js'
 import { fileScheduleCommandRequest, SCHEDULE_COMMAND_CATEGORY } from '../schedule-command-approval.js'
+import { fileForkDeployRequest, FORK_DEPLOY_CATEGORY } from '../fork-deploy-approval.js'
 import { readVaultAcl, isAgentReadableDecodedVaultId, claimedAgentOf } from '../vault-acl.js'
 
 // Kanban 80d0e3c6: APPROVING is the owner's decision, so the two routes that make a row approved
@@ -716,6 +717,30 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // POST /api/fork-deploy-specs -- FORKDEPLOY1121 (Péter GO 17701): the MAIN agent asks for the one-press merge + deploy
+  // of a reviewed fork PR: { spec_version: 1, pr, sha }. The server measures the rest in git (fork-deploy-approval.ts),
+  // stores the spec, opens an approval bound to its hash, and sends the owner the text rendered from it, with the
+  // buttons. Nothing is pushed, pulled or restarted here: only the owner's press (with the hash shown) starts the deploy.
+  // Who asked is self-declared, as on the schedule-command route. On unless FORK_DEPLOY_VIA_APPROVAL=off.
+  if (path === '/api/fork-deploy-specs' && method === 'POST') {
+    const raw = await readBodyOrRefuse(req, res, { maxBytes: 4 * 1024 })
+    if (!raw) return true
+    let body: unknown
+    try { body = JSON.parse(raw.toString()) } catch { json(res, { error: 'Invalid JSON' }, 400); return true }
+    const header = req.headers['x-agent-id']
+    const declared = typeof header === 'string' && /^[a-z0-9_-]{1,64}$/i.test(header) ? header : 'unknown'
+    const requestedBy = ctx.auth?.kind === 'token' ? (ctx.auth.tokenAgent ?? claimedAgentOf(ctx.auth) ?? declared) : declared
+    const lang = (reactionDeps.lang ?? approvalTextLang)()
+    const requesterSource = ctx.auth?.kind === 'token' && ctx.auth.tokenAgent ? 'agent-token' as const : 'self-declared' as const
+    const r = await fileForkDeployRequest(body, requestedBy, { setting: (k) => String(getEffectiveSettingValue(k) ?? ''), lang, requesterSource })
+    if (r.approval) {
+      void notifyOwner(r.approval, null, true, lang)
+      notifyMainAgent(r.approval)
+    }
+    json(res, r.body, r.status)
+    return true
+  }
+
   // POST /api/approvals -- create new approval request
   if (path === '/api/approvals' && method === 'POST') {
     let body: { supersedes?: unknown; agent_id?: unknown; category?: unknown; action_description?: unknown; action_payload?: unknown; timeout_seconds?: unknown; content_hash?: unknown; owner_approved_message_id?: unknown; for_agent?: unknown }
@@ -748,6 +773,11 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     // SCHEDCMDAPPROVAL1121: a schedule_command request is filed only with its stored spec (POST /api/schedule-command-specs).
     if (category.trim() === SCHEDULE_COMMAND_CATEGORY) {
       json(res, { error: 'category schedule_command is filed through POST /api/schedule-command-specs, with its spec' }, 403)
+      return true
+    }
+    // FORKDEPLOY1121: a fork_deploy request is filed only through POST /api/fork-deploy-specs (the server measures it).
+    if (category.trim() === FORK_DEPLOY_CATEGORY) {
+      json(res, { error: 'category fork_deploy is filed through POST /api/fork-deploy-specs, with the PR and its head SHA' }, 403)
       return true
     }
     if (typeof action_description !== 'string' || !action_description.trim()) {

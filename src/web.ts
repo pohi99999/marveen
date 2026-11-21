@@ -114,6 +114,7 @@ import { tryHandleAutonomy } from './web/routes/autonomy.js'
 import { tryHandleApprovals, startApprovalTimeoutSweeper, startApprovalReactionSweeper } from './web/routes/approvals.js'
 import { registerAgentCreateConsumer, sweepAgentCreateOnStart } from './web/agent-create-approval.js'
 import { registerScheduleCommandConsumer, sweepScheduleCommandOnStart } from './web/schedule-command-approval.js'
+import { registerForkDeployConsumer, sweepForkDeployOnStart, writeForkDeployBootStamp } from './web/fork-deploy-approval.js'
 import { tryHandleDesktopLock, sweepExpiredDesktopLock } from './web/routes/desktop-lock.js'
 import { tryHandleFleetFreeze } from './web/routes/fleet-freeze.js'
 import { initGromzoConsentWatch, tryHandleGromzo } from './web/routes/gromzo.js'
@@ -653,6 +654,11 @@ export function startWebServer(port = 3420): http.Server {
   // SCHEDCMDAPPROVAL1121: the schedule_command consumer, and its start-up sweep
   registerScheduleCommandConsumer()
   try { sweepScheduleCommandOnStart() } catch (err) { logger.error({ err }, 'schedule_command start-up sweep failed') }
+  // FORKDEPLOY1121: the boot stamp a running deploy waits for (the commit this dist was built from), the fork_deploy
+  // consumer, and the start-up sweep (a deploy that restarted this dashboard is watched to its final stage).
+  writeForkDeployBootStamp()
+  registerForkDeployConsumer()
+  try { sweepForkDeployOnStart() } catch (err) { logger.error({ err }, 'fork_deploy start-up sweep failed') }
 // Desktop-lock TTL sweeper. Independent of the schedule gate on purpose: an
 // abandoned lock must expire (and be reported) even on a day when no
 // desktop-driving round happens to be due.
