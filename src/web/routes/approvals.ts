@@ -7,6 +7,7 @@ import {
   CATEGORY_CONSUME_DEFAULT_WINDOW_S, CATEGORY_CONSUME_MAX_WINDOW_S,
   createApproval, getApproval, resolveApproval, listApprovals, expireTimedOutApprovals,
   createAgentMessage, setApprovalTelegramMessageId, resolveApprovalByOwner, decideApproval,
+  HASH_BOUND_APPROVAL_CATEGORIES, OWNER_BUTTON_HASH_HEAD_LEN,
   type Approval,
 } from '../../db.js'
 import { logger } from '../../logger.js'
@@ -28,7 +29,8 @@ import { readTeamsCreds, channelStateDir } from '../../channel-provider.js'
 import { mayActAsOwner, OWNER_SESSION_REQUIRED, refuseOwner } from './auth.js'
 import { supersededApprovals, supersededResolver, SUPERSEDED_NOTE } from '../approval-supersede.js'
 import type { RouteContext } from './types.js'
-import { fileAgentSpecRequest, AGENT_CREATE_CATEGORY } from '../agent-create-approval.js'
+import { fileAgentSpecRequest } from '../agent-create-approval.js'
+import { fileScheduleCommandRequest, SCHEDULE_COMMAND_CATEGORY } from '../schedule-command-approval.js'
 import { readVaultAcl, isAgentReadableDecodedVaultId, claimedAgentOf } from '../vault-acl.js'
 
 // Kanban 80d0e3c6: APPROVING is the owner's decision, so the two routes that make a row approved
@@ -189,16 +191,19 @@ export function buildOwnerApprovalText(approval: Approval, lang: ApprovalLang = 
 // conditional UPDATE in the DB. The notification is rewritten with the outcome, best effort.
 export type OwnerDecisionResult =
   | { ok: true; approval: Approval }
-  | { ok: false; reason: 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired' | 'button_only'; approval?: Approval }
-export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDecision, nowS = Math.floor(Date.now() / 1000), via: OwnerDecisionVia = 'command'): OwnerDecisionResult {
+  | { ok: false; reason: 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired' | 'button_only' | 'content_changed'; approval?: Approval }
+export function applyOwnerDecision(id: string, nonce: string, decision: OwnerDecision, nowS = Math.floor(Date.now() / 1000), via: OwnerDecisionVia = 'command', hashHead?: string): OwnerDecisionResult {
   if (via !== 'button') {
     const target = getApproval(id)
-    if (target && isButtonOnlyCategory(target.category)) {
+    // SCHEDCMDAPPROVAL1121: a hash-bound request (agent_create, schedule_command) is decided on Telegram by its button
+    // only: the button carries the head of the content hash its message showed, a typed command does not.
+    if (target && (isButtonOnlyCategory(target.category) || HASH_BOUND_APPROVAL_CATEGORIES.has(target.category))) {
       logger.warn({ id, category: target.category, via }, 'owner decision refused: this category is decided by the Telegram button only')
       return { ok: false, reason: 'button_only', approval: target }
     }
   }
-  const r = resolveApprovalByOwner({ id, nonce, decision, resolvedBy: OWNER_RESOLVER, nowS })
+  // A hash-bound request goes through the decision core with the hash head the button carried, and its consumer runs.
+  const r = resolveApprovalByOwner({ id, nonce, decision, resolvedBy: OWNER_RESOLVER, nowS, shownHashHead: hashHead })
   if (r.ok) {
     logger.info({ id, decision, resolved_by: OWNER_RESOLVER }, 'Approval resolved by the owner on Telegram')
     const a = r.approval
@@ -243,6 +248,7 @@ export function ownerDecisionRefusalText(reason: string): string {
     case 'already_resolved': return 'Ez a jóváhagyás már eldőlt; nem változtattam semmit.'
     case 'expired': return 'Ez a jóváhagyás lejárt; nem változtattam semmit.'
     case 'button_only': return 'Ezt csak a Telegram-üzenet gombjával lehet eldönteni; nem változtattam semmit.'
+    case 'content_changed': return 'A gomb nem ehhez a tartalomhoz tartozik (az ellenőrző kód nem egyezik); nem változtattam semmit.'
     default: return 'Nem sikerült feloldani; nem változtattam semmit.'
   }
 }
@@ -434,7 +440,11 @@ function notifyOwner(approval: Approval, chatApprovedMessageId: number | string 
       try {
         // the fork's one-tap owner decision (PR #18): the Approve / Reject buttons ride on the Telegram message,
         // but not on the informative note (that row was already approved in the chat, nothing is left to press)
-        const extra = !informative && approval.owner_nonce ? { reply_markup: ownerApprovalKeyboard(approval.id, approval.owner_nonce) } : {}
+        // SCHEDCMDAPPROVAL1121: a hash-bound request's buttons carry the head of the content hash the text shows
+        // (its "check code"), and the press is decided with it (resolveApprovalByOwner -> the decision core).
+        const hashHead = HASH_BOUND_APPROVAL_CATEGORIES.has(approval.category) && typeof approval.content_hash === 'string'
+          ? approval.content_hash.slice(0, OWNER_BUTTON_HASH_HEAD_LEN) : undefined
+        const extra = !informative && approval.owner_nonce ? { reply_markup: ownerApprovalKeyboard(approval.id, approval.owner_nonce, hashHead) } : {}
         // APPROVALNOTIFYRETRY1118: a passing failure (a reset connection, a timeout, 429, 5xx) is sent again a few
         // times before the request is written off as OWNER_UNREACHED. Before each further send the row is read
         // again: a request decided on the dashboard in the meantime gets no late question.
@@ -677,6 +687,35 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // POST /api/schedule-command-specs -- SCHEDCMDAPPROVAL1121 (Péter GO 17598): the MAIN agent files a schedule_command
+  // REQUEST, the whole scheduled shell command as a spec (the shared token too: nothing is created here). The server
+  // validates and stores the spec, opens an approval bound to its hash, and sends the owner the text rendered from the
+  // stored spec (the command verbatim), on Telegram with the buttons. Only the owner's approval (the Telegram button or
+  // the dashboard, both with the hash shown) makes the server create exactly that task, once. Who asked is
+  // self-declared (a per-agent token's name, else the claimed agent, else the header): anyone but the main agent is
+  // refused, and a sub-agent's own token never gets this far (the agent-token route list). On unless
+  // SCHEDULE_COMMAND_VIA_APPROVAL=off.
+  if (path === '/api/schedule-command-specs' && method === 'POST') {
+    const raw = await readBodyOrRefuse(req, res, { maxBytes: 64 * 1024 })
+    if (!raw) return true
+    let body: unknown
+    try { body = JSON.parse(raw.toString()) } catch { json(res, { error: 'Invalid JSON' }, 400); return true }
+    const header = req.headers['x-agent-id']
+    const declared = typeof header === 'string' && /^[a-z0-9_-]{1,64}$/i.test(header) ? header : 'unknown'
+    const requestedBy = ctx.auth?.kind === 'token' ? (ctx.auth.tokenAgent ?? claimedAgentOf(ctx.auth) ?? declared) : declared
+    const lang = (reactionDeps.lang ?? approvalTextLang)()
+    // Ellenőr #59 J1: the owner's text says whether the name came from the agent's own token or was only claimed.
+    const requesterSource = ctx.auth?.kind === 'token' && ctx.auth.tokenAgent ? 'agent-token' as const : 'self-declared' as const
+    const r = fileScheduleCommandRequest(body, requestedBy, { setting: (k) => String(getEffectiveSettingValue(k) ?? ''), lang, requesterSource })
+    if (r.approval) {
+      // serverFiled: the description is the server's own rendering of the stored spec
+      void notifyOwner(r.approval, null, true, lang)
+      notifyMainAgent(r.approval)
+    }
+    json(res, r.body, r.status)
+    return true
+  }
+
   // POST /api/approvals -- create new approval request
   if (path === '/api/approvals' && method === 'POST') {
     let body: { supersedes?: unknown; agent_id?: unknown; category?: unknown; action_description?: unknown; action_payload?: unknown; timeout_seconds?: unknown; content_hash?: unknown; owner_approved_message_id?: unknown; for_agent?: unknown }
@@ -704,6 +743,11 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     // exact call as payload. A caller-filed row could carry a call's hash under a harmless text.
     if (category.trim() === 'second_review') {
       json(res, { error: 'category second_review is reserved for the server' }, 403)
+      return true
+    }
+    // SCHEDCMDAPPROVAL1121: a schedule_command request is filed only with its stored spec (POST /api/schedule-command-specs).
+    if (category.trim() === SCHEDULE_COMMAND_CATEGORY) {
+      json(res, { error: 'category schedule_command is filed through POST /api/schedule-command-specs, with its spec' }, 403)
       return true
     }
     if (typeof action_description !== 'string' || !action_description.trim()) {
@@ -997,17 +1041,18 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     }
     // AGENTCREATEPR2-1119 (Samu 81167): an agent_create request is approved here only by the owner's session (the owner
     // gate above), and only through the decision core with the hash the dashboard showed the owner: never by a plain
-    // status write. Rejecting it stays a status write.
-    if (target?.category === AGENT_CREATE_CATEGORY && status === 'approved') {
+    // status write. Rejecting it stays a status write. SCHEDCMDAPPROVAL1121: the same for every hash-bound category
+    // (schedule_command too), so none of them can be approved by a plain status write.
+    if (target && HASH_BOUND_APPROVAL_CATEGORIES.has(target.category) && status === 'approved') {
       const shown = body.content_hash
       if (typeof shown !== 'string' || !/^[0-9a-f]{64}$/.test(shown)) {
-        json(res, { error: 'content_hash (the hash the owner was shown) is required to approve an agent_create request' }, 400)
+        json(res, { error: `content_hash (the hash the owner was shown) is required to approve this ${target.category} request` }, 400)
         return true
       }
       const d = decideApproval({ approvalId: target.id, status: 'approved', evidence: { channel: 'dashboard', mode: 'owner' }, expectedContentHash: shown })
       if (d.outcome !== 'decided') { json(res, { error: `Not approved: ${d.outcome}` }, 409); return true }
-      logger.info({ id: target.id }, 'agent_create approved by the owner on the dashboard')
-      json(res, d.approval)
+      logger.info({ id: target.id, category: target.category }, 'hash-bound request approved by the owner on the dashboard')
+      json(res, redactOwnerNonce(d.approval))
       return true
     }
     if (target && resolved_by.trim() === target.agent_id) {
