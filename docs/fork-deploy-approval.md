@@ -122,6 +122,27 @@ decision is needed (a fixing PR or a revert commit).
 it is refused (`consume_refused:...`). A consumed deploy without a stage file is marked `interrupted`, reported, and
 never re-run.
 
+## Known limits
+
+Measured by the reviewer on #61 (Ellenőr 8634, 8642); none of them lets an unapproved SHA go live.
+
+- **Two open requests for the same PR.** Both runs fetch into the same `refs/remotes/fork/pr/<n>`. If the stale one is
+  pressed while the current one is still running, before its push (in practice: during the whole build, minutes), the
+  stale one stops (`precheck_pr_head_moved`, or `precheck_install_moved` once the current run has merged) and deletes
+  that ref on its way out. The current one then has no remote-tracking ref for its commit, so the hook-proof gate stops
+  its push (`push_failed`): the install goes back to the old SHA, nothing restarts, and the report says why. Pressed
+  after the first run has finished, both behave as described above. Card 3d970f6c puts the SHA into the ref name.
+- **`push_not_visible` has no test in the PR's own suite.** It is reached when the fork accepts the push but
+  `fork/main` then reads back as another SHA. The PR's sandbox did not produce it; a post-receive hook on the fork that
+  moves `main` back does (Ellenőr, `zzEllenor62k` K4). The install goes back to the old SHA and nothing restarts; the
+  fork stays on whatever it reads back, and the report names that SHA.
+- **The hook-proof gate does not ask for a local pre-commit proof of the deployed commit.** The commit is already on
+  the fork (it is the PR head, behind a remote-tracking ref), so the gate counts it as not leaving the machine; the
+  push only moves `main`. The commit's own checks are the ones its author's clone and CI ran, and the reviewer's.
+- **A branch named `pr` on the fork**, once the install has fetched it (a plain `git fetch fork` creates
+  `refs/remotes/fork/pr`), makes the fetch fail (`precheck_fetch_failed`, nothing moves). Not fetched, it does not
+  matter. The fork has none.
+
 ## Turning it off
 
 `FORK_DEPLOY_VIA_APPROVAL=off` closes the filing route (403). A request filed before stays open, and approving it still
