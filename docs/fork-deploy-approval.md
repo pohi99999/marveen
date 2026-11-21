@@ -17,7 +17,11 @@ in the request. GitHub marks the PR merged when its head lands on `main`.
 
 ## The request
 
-`POST /api/fork-deploy-specs`, filed only by the main agent (`marveen`), or the helper:
+`POST /api/fork-deploy-specs`, filed by the main agent (`marveen`), or the helper. **Who asked is self-declared:** on the
+shared token the name comes from the `X-Agent-Id` header (or the claimed agent), so any agent holding the shared token
+can claim `marveen`; another name, or a sub-agent's own token, is refused with 403. The owner's text says the name is
+self-declared. The real protection is the owner's press on a spec the server measured itself, not the requester's name
+(the same as for `schedule_command`).
 
 ```bash
 bash scripts/marveen-api.sh fork-deploy-request marveen <pr-number> <full-head-sha>
@@ -71,11 +75,16 @@ a throwaway launchd job: the detached child ran on after the kickstart, a child 
 
 The script, logging to `store/fork-deploy/<approval id>.log` and writing each stage to `store/fork-deploy/<approval id>.json`:
 
-1. checks every precondition again, fresh (install, fork main, mirrors, one commit);
+1. checks every precondition again, fresh: the install, the fork main, the mirrors, the PR head and the one-commit
+   shape. A PR head that moved after the request (a force-push) stops the deploy: the owner approved another SHA, so
+   nothing goes, and a new request is needed. The PR head is fetched into `refs/remotes/fork/pr/<n>`, a remote-tracking
+   ref, because the commit IS already on the fork: the install's hook-proof pre-push gate (`scripts/hook-proof.mjs`)
+   asks a local pre-commit proof only for commits no remote-tracking ref reaches, and would otherwise block the push of
+   a commit made in any other clone. The ref is deleted when the script ends;
 2. `git merge --ff-only <sha>` in the install, `npm ci` only when `package-lock.json` changed, `npm run build`, and
    checks that `dist/.built-commit` is the new SHA;
 3. backs up `store/claudeclaw.db` (sqlite's backup API, `integrity_check`) to `store/backups/fork-deploy-*.db`, the last
-   three kept;
+   three of these kept (a missing or broken database is a failure, not an empty backup);
 4. pushes the SHA to `fork/main`, then to each mirror (fast-forward only, never forced);
 5. writes a `--- RESTART ... fork-deploy <old>..<new> ---` marker to `store/dashboard.log`, restarts the dashboard
    (`launchctl kickstart -k gui/<uid>/com.<service>.dashboard`), and waits up to 120 s for the NEW dashboard: its boot
@@ -86,7 +95,7 @@ The script, logging to `store/fork-deploy/<approval id>.log` and writing each st
 
 | Where | What happens | Fork main | Install |
 | --- | --- | --- | --- |
-| a precondition | nothing | old | old |
+| a precondition (a moved PR head too) | nothing | old | old |
 | build, `npm ci`, the backup, the fork push | the install goes back to the old SHA (`reset --keep`, rebuild), no restart | old | old |
 | a mirror push | the deploy goes on; the report names the mirror to bring up by hand | new | new |
 | the new dashboard does not come up | the install goes back to the old SHA, rebuilt, restarted again | **new** | old |

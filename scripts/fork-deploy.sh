@@ -5,7 +5,11 @@
 #
 # Order, chosen so that a failure leaves the fork and the install apart as rarely as possible:
 #   1. every precondition again, fresh: the install on <branch> at FROM with a clean tracked tree, <remote>/<branch> and
-#      every mirror's <branch> at FROM, TO's only parent FROM;
+#      every mirror's <branch> at FROM, the PR's head on <remote> still TO, TO's only parent FROM. The PR head is fetched
+#      into refs/remotes/<remote>/pr/<n>: a remote-tracking ref, because TO IS already on the remote. Without it the
+#      install's hook-proof pre-push gate (scripts/hook-proof.mjs: commits not reachable from any remote-tracking ref
+#      need a local pre-commit proof) would count TO as leaving the machine for the first time and block the push of a
+#      commit made in any other clone (Ellenőr 8634, H1). The ref is deleted when the script ends.
 #   2. the install fast-forwards to TO, npm ci when package-lock.json changed, npm run build (stamps dist/.built-commit);
 #   3. a backup of store/claudeclaw.db (sqlite's backup API; the last 3 are kept);
 #   4. push TO to <remote>/<branch>, then to each mirror (fast-forward only, never forced);
@@ -17,13 +21,13 @@
 # remote names only); the dashboard reports the final one. Only when no dashboard answers at the end does this script
 # send the owner a Telegram line itself (scripts/notify.sh).
 #
-# Usage: fork-deploy.sh <approval-id> <from-sha> <to-sha> <remote> <mirrors,csv> <branch> <service-label> <port> <lock 0|1>
+# Usage: fork-deploy.sh <approval-id> <from-sha> <to-sha> <remote> <mirrors,csv> <branch> <service-label> <port> <lock 0|1> <pr>
 # Test hooks (the dashboard removes both from the environment it starts this with):
 #   FORK_DEPLOY_RESTART_CMD      replaces the launchctl kickstart
 #   FORK_DEPLOY_HEALTH_TIMEOUT_S replaces the 120 s wait
 set -u
 
-ID="${1:-}"; FROM="${2:-}"; TO="${3:-}"; REMOTE="${4:-}"; MIRRORS_CSV="${5:-}"; BRANCH="${6:-}"; LABEL="${7:-}"; PORT="${8:-}"; LOCK="${9:-}"
+ID="${1:-}"; FROM="${2:-}"; TO="${3:-}"; REMOTE="${4:-}"; MIRRORS_CSV="${5:-}"; BRANCH="${6:-}"; LABEL="${7:-}"; PORT="${8:-}"; LOCK="${9:-}"; PR="${10:-}"
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GIT=/usr/bin/git
 [ -x "$GIT" ] || GIT=git
@@ -38,6 +42,8 @@ die_usage() { echo "fork-deploy.sh: $1" >&2; exit 2; }
 [[ "$LABEL" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die_usage "bad service label"
 [[ "$PORT" =~ ^[0-9]{1,5}$ ]] || die_usage "bad port"
 [[ "$LOCK" = 0 || "$LOCK" = 1 ]] || die_usage "bad lock flag"
+[[ "$PR" =~ ^[1-9][0-9]{0,6}$ ]] || die_usage "bad pr number"
+PR_REF="refs/remotes/$REMOTE/pr/$PR"
 
 DIR="$INSTALL_DIR/store/fork-deploy"
 mkdir -p "$DIR" || exit 3
@@ -76,7 +82,9 @@ remote_main() {
   "$GIT" ls-remote "$1" "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1; exit}'
 }
 
-finish() { stage "$1" true "$2" "$3"; exit 0; }
+drop_pr_ref() { "$GIT" update-ref -d "$PR_REF" 2>/dev/null || true; }
+
+finish() { stage "$1" true "$2" "$3"; drop_pr_ref; exit 0; }
 
 notify_owner() {
   # Only when no dashboard can report: a fixed text, no SHA longer than 8.
@@ -100,7 +108,7 @@ rollback_local() {
   fi
   stage rollback_failed true rollback_failed "$reason"
   notify_owner "Elesites ${TO:0:8}: HIBA ($reason), es a visszaallas sem sikerult. A futo vezerlopult meg a regi kodot tartja, de a dist serult lehet: NE inditsd ujra kezi ellenorzes nelkul. Naplo: store/fork-deploy/$ID.log"
-  exit 1
+  drop_pr_ref; exit 1
 }
 
 # wait_health <sha> <restart-epoch>: the boot stamp of a dashboard started after the restart, built from <sha>, and 200.
@@ -142,7 +150,9 @@ stage started
 for m in "${MIRRORS[@]}"; do
   [ "$(remote_main "$m")" = "$FROM" ] || finish failed failed precheck_mirror_moved
 done
-"$GIT" fetch --no-tags --quiet "$REMOTE" "$TO" || finish failed failed precheck_fetch_failed
+"$GIT" fetch --no-tags --quiet "$REMOTE" "+refs/pull/$PR/head:$PR_REF" || finish failed failed precheck_fetch_failed
+# the PR head moved after the request (a force-push): the owner approved another SHA, so nothing goes
+[ "$("$GIT" rev-parse --verify -q "$PR_REF")" = "$TO" ] || finish failed failed precheck_pr_head_moved
 [ "$("$GIT" rev-list --parents -n 1 "$TO" 2>/dev/null)" = "$TO $FROM" ] || finish failed failed precheck_not_one_commit
 stage prechecked
 
@@ -159,6 +169,8 @@ stage built
 # 3. a backup of the database before the new code starts on it
 BACKUP_DIR="$INSTALL_DIR/store/backups"
 mkdir -p "$BACKUP_DIR" || rollback_local backup_failed
+# sqlite3.connect would create an empty file and "back it up" (Ellenőr 8634): a missing database is a failure
+[ -s "$INSTALL_DIR/store/claudeclaw.db" ] || rollback_local backup_failed
 BACKUP="$BACKUP_DIR/fork-deploy-${FROM:0:8}-$(date +%Y%m%d-%H%M%S).db"
 python3 -I -c '
 import sqlite3, sys
@@ -202,4 +214,4 @@ if "$GIT" reset --keep "$FROM" && rebuild; then
 fi
 stage rollback_failed true rollback_failed health_failed
 notify_owner "Elesites ${TO:0:8}: az uj vezerlopult nem indult el, es a visszaallas utan sem valaszol. A fork main mar ${TO:0:8}. Kezi beavatkozas kell. Naplo: store/fork-deploy/$ID.log"
-exit 1
+drop_pr_ref; exit 1

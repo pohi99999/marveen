@@ -329,7 +329,7 @@ export function consumeForkDeploy(approval: Approval, nowS?: number): void {
   const s = step.spec
   try { mkdirSync(FORK_DEPLOY_DIR, { recursive: true }) } catch { /* the script reports a missing dir */ }
   setOutcome(approval.id, 'started')
-  spawner([approval.id, s.from_sha, s.to_sha, s.remote, s.mirrors.join(','), s.branch, s.service_label, String(WEB_PORT), s.lockfile_changed ? '1' : '0'],
+  spawner([approval.id, s.from_sha, s.to_sha, s.remote, s.mirrors.join(','), s.branch, s.service_label, String(WEB_PORT), s.lockfile_changed ? '1' : '0', String(s.pr)],
     () => { try { finalizeFromStageFile(approval.id) } catch (err) { logger.error({ err }, 'fork_deploy finalize after exit failed') } })
   logger.info({ approvalId: approval.id, pr: s.pr, to: s.to_sha }, 'fork_deploy started')
 }

@@ -129,8 +129,8 @@ export function renderForkDeploySpec(spec: ForkDeploySpecV1, hash: string, lang:
       ? `- utána: build, és a vezérlőpult (${spec.service_label}) ÚJRAINDUL; várható kiesés kb. 5-15 mp. Ha a build vagy az indulás elbukik, a telepítés visszaáll a régi SHA-ra, és jelentés megy.`
       : `- then: build, and the dashboard (${spec.service_label}) RESTARTS; expected outage about 5-15 s. If the build or the start fails, the install goes back to the old SHA and a report is sent.`,
     hu
-      ? '- Ha a gombnyomásig a fork main, egy tükör vagy az éles telepítés elmozdul, nem történik semmi, és új kérés kell.'
-      : '- If the fork main, a mirror or the running install moves before the press, nothing happens and a new request is needed.',
+      ? '- Ha a gombnyomásig a fork main, egy tükör, az éles telepítés vagy a PR feje elmozdul, nem történik semmi, és új kérés kell.'
+      : '- If the fork main, a mirror, the running install or the PR head moves before the press, nothing happens and a new request is needed.',
     ...(requester
       ? [`- ${hu ? 'kérő' : 'requested by'}: ${requester.name} (${requester.source === 'agent-token'
         ? (hu ? 'saját tokennel azonosítva' : 'identified by its own token')

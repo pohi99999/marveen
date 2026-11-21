@@ -252,7 +252,8 @@ describe('3. a filed request: both SHAs, the PR and the restart shown; nothing s
     expect(text).toContain(`PR #7: feat: change the app (#7)`)
     expect(text).toContain(FROM)
     expect(text).toContain(sha)
-    expect(text).toContain('ÚJRAINDUL')
+    expect(text.split('\n')).toContain('- utána: build, és a vezérlőpult (com.marveen.dashboard) ÚJRAINDUL; várható kiesés kb. 5-15 mp. Ha a build vagy az indulás elbukik, a telepítés visszaáll a régi SHA-ra, és jelentés megy.')
+    expect(text).toContain('az éles telepítés vagy a PR feje elmozdul')
     expect(text).toContain('npm ci')
     expect(text).toContain(`ellenőrző kód: ${a.content_hash!.slice(0, 10)}`)
     expect(text).toContain('ÖNBEVALLOTT')
@@ -296,7 +297,7 @@ describe('4. the owner\'s press starts exactly that deploy, once', () => {
     const [, , , extra] = h.telegramSends[0] as [string, string, string, any]
     const approveData = extra.reply_markup.inline_keyboard[0][0].callback_data as string
     expect(await press(approveData)).toMatchObject({ outcome: 'approved' })
-    expect(spawned).toEqual([[body.approvalId, FROM, sha, 'fork', 'brunella', 'main', 'com.marveen.dashboard', '3420', '0']])
+    expect(spawned).toEqual([[body.approvalId, FROM, sha, 'fork', 'brunella', 'main', 'com.marveen.dashboard', '3420', '0', '7']])
     const a = db.getApproval(body.approvalId)!
     expect([a.status, a.consumed_by, a.consumed_ref]).toEqual(['approved', 'fork_deploy', body.approvalId])
     expect(specRow(body.approvalId)).toMatchObject({ outcome: 'started' })
@@ -463,5 +464,28 @@ describe('6. the start-up sweep and the boot stamp', () => {
     expect(stamp).toBeGreaterThan(sc)
     expect(reg).toBeGreaterThan(stamp)
     expect(sweep).toBeGreaterThan(reg)
+  })
+})
+
+describe('7. the real start of the script: detached, without the test hooks', () => {
+  it('its own process group (a kickstart of the dashboard does not reach it), and FORK_DEPLOY_* test hooks removed from its environment', async () => {
+    const rec = join(h.root, 'spawn-record.txt')
+    mkdirSync(join(h.root, 'scripts'), { recursive: true })
+    writeFileSync(fd.FORK_DEPLOY_SCRIPT, [
+      '#!/bin/bash',
+      `{ echo "pid=$$"; echo "pgid=$(ps -o pgid= -p $$ | tr -d ' ')"; echo "restart=\${FORK_DEPLOY_RESTART_CMD:-unset}"; echo "health=\${FORK_DEPLOY_HEALTH_TIMEOUT_S:-unset}"; echo "args=$*"; } > "${rec}"`,
+    ].join('\n'))
+    process.env.FORK_DEPLOY_RESTART_CMD = 'touch /tmp/should-never-run'
+    process.env.FORK_DEPLOY_HEALTH_TIMEOUT_S = '1'
+    try {
+      await new Promise<void>((resolve) => fd.spawnDeployScript(['x', 'y'], resolve))
+    } finally {
+      delete process.env.FORK_DEPLOY_RESTART_CMD
+      delete process.env.FORK_DEPLOY_HEALTH_TIMEOUT_S
+    }
+    const r = Object.fromEntries(readFileSync(rec, 'utf-8').trim().split('\n').map((l) => l.split(/=(.*)/s).slice(0, 2)))
+    expect(r.pgid).toBe(r.pid)
+    expect(Number(r.pgid)).not.toBe(Number(execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf-8' }).trim()))
+    expect([r.restart, r.health, r.args]).toEqual(['unset', 'unset', 'x y'])
   })
 })
