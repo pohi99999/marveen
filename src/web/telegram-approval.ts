@@ -34,20 +34,25 @@ export function newApprovalNonce(bytes = 6): string {
   return randomBytes(bytes).toString('base64url').replace(/[^A-Za-z0-9]/g, '').slice(0, 8).padEnd(8, 'x')
 }
 
-/** `apr:<id>:<nonce>:a|r`; Telegram caps callback_data at 64 bytes, our ids (uuid, 36) + nonce (8) fit. */
-export function buildCallbackData(approvalId: string, nonce: string, decision: OwnerDecision): string {
-  const d = `${CALLBACK_PREFIX}:${approvalId}:${nonce}:${decision === 'approved' ? 'a' : 'r'}`
+/** `apr:<id>:<nonce>:a|r`; Telegram caps callback_data at 64 bytes, our ids (uuid, 36) + nonce (8) fit.
+ *  SCHEDCMDAPPROVAL1121: a hash-bound request's buttons also carry the head of the content hash the message showed
+ *  (`apr:<id>:<nonce>:a|r:<hex>`, 62 bytes with a 10-character head), so the press names the content it approves. */
+export function buildCallbackData(approvalId: string, nonce: string, decision: OwnerDecision, hashHead?: string): string {
+  if (hashHead !== undefined && !/^[0-9a-f]{6,16}$/.test(hashHead)) throw new Error('hash head must be 6-16 lower-case hex characters')
+  const d = `${CALLBACK_PREFIX}:${approvalId}:${nonce}:${decision === 'approved' ? 'a' : 'r'}${hashHead !== undefined ? `:${hashHead}` : ''}`
   if (Buffer.byteLength(d) > 64) throw new Error('callback_data over 64 bytes')
   return d
 }
 
-export interface ParsedCallback { approvalId: string; nonce: string; decision: OwnerDecision }
+export interface ParsedCallback { approvalId: string; nonce: string; decision: OwnerDecision; hashHead?: string }
 
 export function parseCallbackData(data: string | null | undefined): ParsedCallback | null {
   if (typeof data !== 'string') return null
-  const m = /^apr:([0-9a-fA-F-]{8,36}):([A-Za-z0-9]{6,16}):([ar])$/.exec(data)
+  const m = /^apr:([0-9a-fA-F-]{8,36}):([A-Za-z0-9]{6,16}):([ar])(?::([0-9a-f]{6,16}))?$/.exec(data)
   if (!m) return null
-  return { approvalId: m[1], nonce: m[2], decision: m[3] === 'a' ? 'approved' : 'rejected' }
+  const parsed: ParsedCallback = { approvalId: m[1], nonce: m[2], decision: m[3] === 'a' ? 'approved' : 'rejected' }
+  if (m[4] !== undefined) parsed.hashHead = m[4]
+  return parsed
 }
 
 export type OwnerCheck =
@@ -75,12 +80,13 @@ export function resolvableByOwner(a: Pick<Approval, 'status' | 'timeout_at'> & {
   return null
 }
 
-/** The inline keyboard under the owner notification. */
-export function ownerApprovalKeyboard(approvalId: string, nonce: string): { inline_keyboard: { text: string; callback_data: string }[][] } {
+/** The inline keyboard under the owner notification. `hashHead`: a hash-bound request's content-hash head, on both
+ *  buttons (SCHEDCMDAPPROVAL1121). */
+export function ownerApprovalKeyboard(approvalId: string, nonce: string, hashHead?: string): { inline_keyboard: { text: string; callback_data: string }[][] } {
   return {
     inline_keyboard: [[
-      { text: 'Jóváhagyom', callback_data: buildCallbackData(approvalId, nonce, 'approved') },
-      { text: 'Elutasítom', callback_data: buildCallbackData(approvalId, nonce, 'rejected') },
+      { text: 'Jóváhagyom', callback_data: buildCallbackData(approvalId, nonce, 'approved', hashHead) },
+      { text: 'Elutasítom', callback_data: buildCallbackData(approvalId, nonce, 'rejected', hashHead) },
     ]],
   }
 }

@@ -24,7 +24,7 @@ export async function handleCallbackLine(
   line: CallbackLine,
   ownerId: string | null,
   deps: {
-    apply: (id: string, nonce: string, decision: 'approved' | 'rejected') => ReturnType<typeof applyOwnerDecision>
+    apply: (id: string, nonce: string, decision: 'approved' | 'rejected', hashHead?: string) => ReturnType<typeof applyOwnerDecision>
     answer: (callbackQueryId: string, text: string) => Promise<unknown>
   },
 ): Promise<CallbackOutcome> {
@@ -34,7 +34,7 @@ export async function handleCallbackLine(
     if (line.callback_query_id && check.reason === 'not-owner') await deps.answer(line.callback_query_id, 'Nem jogosult.').catch(() => {})
     return { data, outcome: check.reason === 'malformed' ? 'malformed' : 'refused', reason: check.reason }
   }
-  const r = deps.apply(check.parsed.approvalId, check.parsed.nonce, check.parsed.decision)
+  const r = deps.apply(check.parsed.approvalId, check.parsed.nonce, check.parsed.decision, check.parsed.hashHead)
   const text = r.ok ? (check.parsed.decision === 'approved' ? 'Jóváhagyva.' : 'Elutasítva.') : ownerDecisionRefusalText(r.reason)
   if (line.callback_query_id) await deps.answer(line.callback_query_id, text).catch(() => {})
   return r.ok ? { data, outcome: check.parsed.decision } : { data, outcome: 'refused', reason: r.reason }
@@ -79,7 +79,7 @@ export async function pollApprovalCallbacks(
     let line: CallbackLine
     try { line = JSON.parse(raw) as CallbackLine } catch { outcomes.push({ data: raw.slice(0, 40), outcome: 'malformed' }); continue }
     const o = await handleCallbackLine(line, ownerId, deps ?? {
-      apply: (id, nonce, decision) => applyOwnerDecision(id, nonce, decision, undefined, 'button'),
+      apply: (id, nonce, decision, hashHead) => applyOwnerDecision(id, nonce, decision, undefined, 'button', hashHead),
       answer: (cb, text) => TELEGRAM_BOT_TOKEN ? answerTelegramCallbackQuery(TELEGRAM_BOT_TOKEN, cb, text) : Promise.resolve(false),
     })
     logger.info({ ...pressForLog(o.data), outcome: o.outcome, reason: o.reason }, 'approval-callbacks: owner button press handled')

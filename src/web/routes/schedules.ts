@@ -23,6 +23,7 @@ import {
   registerScheduledTask, unregisterScheduledTask, verifyScheduledTask, describeVerdict,
 } from '../schedule-registry.js'
 import { runScheduledTaskNow } from '../schedule-runner.js'
+import { validateScheduleCreate, writeNewScheduledTask, type ScheduleCreateData } from '../schedule-create.js'
 import type { RouteContext } from './types.js'
 import { mayActAsOwner, refuseOwner } from './auth.js'
 
@@ -244,22 +245,13 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       }
       throw err
     }
-    const data = JSON.parse(body.toString()) as {
-      name: string; description: string; prompt: string; schedule: string; agent?: string; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; once?: boolean
-    }
-    const name = sanitizeScheduleName(data.name || '')
-    if (!name) { json(res, { error: 'Name is required' }, 400); return true }
-    if (!data.prompt?.trim()) { json(res, { error: 'Prompt is required' }, 400); return true }
-    if (data.prompt.length > MAX_SCHEDULED_TASK_PROMPT_LEN) {
-      json(res, {
-        error: `Prompt too large (${data.prompt.length} chars, max ${MAX_SCHEDULED_TASK_PROMPT_LEN})`,
-      }, 413)
-      return true
-    }
-    if (!data.schedule?.trim()) { json(res, { error: 'Schedule is required' }, 400); return true }
-    if (!isValidCronShape(data.schedule)) { json(res, { error: 'Invalid cron expression' }, 400); return true }
-    if (data.once !== undefined && typeof data.once !== 'boolean') { json(res, { error: 'once must be true or false' }, 400); return true }
-    // OWNEREXEC1109: a 'command' task is a shell command, created only by the owner (see SCHEDULE_OWNER_FIELDS).
+    const data = JSON.parse(body.toString()) as ScheduleCreateData
+    // SCHEDCMDAPPROVAL1121: the body's checks and the write are createScheduledTask's (schedule-create.ts), shared with
+    // the schedule_command consumer; the owner gate stays here, between the two, in the order it always ran.
+    const v = validateScheduleCreate(data)
+    if (!v.ok) { json(res, v.result.body, v.result.status); return true }
+    // OWNEREXEC1109: a 'command' task is a shell command, created only by the owner (see SCHEDULE_OWNER_FIELDS). The
+    // main agent asks for one through POST /api/schedule-command-specs instead, and the owner approves it.
     if (data.type === 'command' && !mayActAsOwner(ctx.auth, req)) {
       refuseOwner(res, 'Creating a command task needs the dashboard login (an owner session).')
       return true
@@ -269,24 +261,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       return true
     }
 
-    const dir = join(SCHEDULED_TASKS_DIR, name)
-    if (existsSync(dir)) { json(res, { error: 'Schedule already exists' }, 409); return true }
-
-    const written = writeScheduledTask(name, {
-      description: data.description || '',
-      prompt: data.prompt.trim(),
-      schedule: data.schedule.trim(),
-      agent: data.agent || MAIN_AGENT_ID,
-      enabled: true,
-      type: data.type || 'task',
-      skipIfBusy: data.skipIfBusy === true,
-      forceSend: data.forceSend === true,
-      targetSession: data.targetSession || undefined,
-      once: data.once,
-    })
-    if (!registerAfterWrite(res, name, 'api:create', written, { noUnwrittenDirFiles: true })) return true
-    logger.info({ name, schedule: data.schedule, once: data.once === true }, 'Scheduled task created')
-    json(res, { ok: true, name })
+    const r = writeNewScheduledTask(v.value, 'api:create')
+    json(res, r.body, r.status)
     return true
   }
 

@@ -17645,6 +17645,23 @@ async function _resolveApproval(id, decision) {
       if (!ok) return
       payload.content_hash = row.content_hash
     }
+    // SCHEDCMDAPPROVAL1121: a scheduled shell command is approved the same way: the whole server-rendered spec (the
+    // command verbatim), its check code, and the hash the owner was shown goes back to the server.
+    if (row && row.category === 'schedule_command' && decision === 'approved') {
+      const pre = document.createElement('pre')
+      pre.className = 'approval-spec-text'
+      pre.style.whiteSpace = 'pre-wrap'
+      pre.textContent = row.action_description
+      const ok = await confirmDialog({
+        title: t('approvals.schedule_command.confirm_title'),
+        message: t('approvals.schedule_command.confirm_message', { code: String(row.content_hash || '').slice(0, 10) }),
+        okLabel: t('approvals.schedule_command.confirm_ok'),
+        content: pre,
+        wide: true,
+      })
+      if (!ok) return
+      payload.content_hash = row.content_hash
+    }
     const res = await fetch(`/api/approvals/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
