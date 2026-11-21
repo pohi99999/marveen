@@ -122,6 +122,23 @@ decision is needed (a fixing PR or a revert commit).
 it is refused (`consume_refused:...`). A consumed deploy without a stage file is marked `interrupted`, reported, and
 never re-run.
 
+## Known limits
+
+Measured by the reviewer on #61 (Ellenőr 8634, 8642); none of them lets an unapproved SHA go live.
+
+- **Two open requests for the same PR, pressed at the same time.** Both runs fetch into the same
+  `refs/remotes/fork/pr/<n>`. The stale one stops at once (`precheck_pr_head_moved`) and deletes that ref; the current
+  one then has no remote-tracking ref for its commit, so the hook-proof gate stops its push (`push_failed`): nothing
+  moves, nothing restarts, and the report says why. Pressed one after the other, both behave as described above. Card
+  3d970f6c puts the SHA into the ref name.
+- **`push_not_visible` has no test.** The branch for a push that succeeds while `fork/main` then reads back as another
+  SHA could not be produced in the sandbox; it goes back to the old SHA like every other failure before the restart.
+- **The hook-proof gate does not ask for a local pre-commit proof of the deployed commit.** The commit is already on
+  the fork (it is the PR head, behind a remote-tracking ref), so the gate counts it as not leaving the machine; the
+  push only moves `main`. The commit's own checks are the ones its author's clone and CI ran, and the reviewer's.
+- **A branch named `pr` on the fork** would make the fetch fail (`precheck_fetch_failed`, nothing moves). The fork has
+  none.
+
 ## Turning it off
 
 `FORK_DEPLOY_VIA_APPROVAL=off` closes the filing route (403). A request filed before stays open, and approving it still
