@@ -101,6 +101,18 @@ The script, logging to `store/fork-deploy/<approval id>.log` and writing each st
 | the new dashboard does not come up | the install goes back to the old SHA, rebuilt, restarted again | **new** | old |
 | the rollback fails too | the script itself sends the owner a Telegram line (`scripts/notify.sh`) | new | ? |
 
+**`push_failed`, the case to expect.** The push runs from the install's own git, so the install's pre-push hooks run on
+it. `hook-proof` blocks a commit that no remote-tracking ref reaches and that has no local pre-commit proof; the script
+fetches the PR head into `refs/remotes/fork/pr/<n>` first, so a PR head that is on the fork passes (measured in the
+sandbox with the real hook, a commit made in another clone). The review gate applies only to pushes from an agent
+session, which this is not. If a hook or the fork still refuses (a rule added later, a protected branch, a lost
+credential), the script stops with `push_failed`: the install goes back to the old SHA and is rebuilt, nothing is
+restarted, nothing left the machine, and the report says so in words, with the log's path
+(`store/fork-deploy/<id>.log` holds the hook's own message). This is a safe stop, not a half deploy.
+
+Every reason code the script can write has a sentence in the report (`DEPLOY_REASON_TEXT` in
+`src/web/fork-deploy-approval.ts`; a test fails if a new code has none).
+
 The report of a final stage goes to the main agent and to the owner on Telegram, sent by the dashboard that sees it: the
 old one when the script stopped before the restart, the new one after it (its start-up sweep watches a running deploy
 for 15 minutes). A rollback after the restart says in words that the fork main and the install are apart, and that a

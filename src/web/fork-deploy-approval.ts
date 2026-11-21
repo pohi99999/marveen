@@ -280,19 +280,47 @@ export function setForkDeploySpawner(s: SpawnDeploy): void { spawner = s }
 
 const short = (s?: string): string => (s && isFullSha(s) ? s.slice(0, 8) : '?')
 
+/** The script's reason codes in words (Marveen 8638: the report names the cause, so nobody has to guess). */
+export const DEPLOY_REASON_TEXT: Readonly<Record<string, string>> = {
+  precheck_not_on_branch: 'az éles telepítés nem a main ágon áll',
+  precheck_install_moved: 'az éles telepítés HEAD-je elmozdult a kérés óta',
+  precheck_install_dirty: 'az éles telepítésben helyi módosítás van',
+  precheck_fork_moved: 'a fork main elmozdult a kérés óta',
+  precheck_mirror_moved: 'egy tükör main-je elmozdult a kérés óta',
+  precheck_fetch_failed: 'a PR fejét nem sikerült lehúzni a forkról',
+  precheck_pr_head_moved: 'a PR feje elmozdult a kérés óta (force-push), a jóváhagyott SHA már nem a fej; új kérés kell',
+  precheck_not_one_commit: 'a PR feje nem egyetlen commit a main tetején',
+  merge_failed: 'a fast-forward merge nem sikerült',
+  npm_ci_failed: 'az npm ci elbukott',
+  build_failed: 'a build elbukott',
+  build_stamp_mismatch: 'a build nem az új SHA-ból készült (dist/.built-commit)',
+  backup_failed: 'az adatbázis-mentés nem sikerült',
+  push_failed: 'a push nem ment át: a fork elutasította, vagy egy pre-push hook (hook-proof, review-gate) megállította; a pontos ok a naplóban',
+  push_not_visible: 'a push után a fork main nem az új SHA',
+  health_failed: 'az új vezérlőpult 120 mp alatt nem jelentkezett az új builddel',
+}
+
+/** "<words> (<code>)", or the code alone when it is unknown. */
+export function reasonText(code?: string): string {
+  if (!code) return 'ismeretlen ok'
+  const words = DEPLOY_REASON_TEXT[code]
+  return words ? `${words} (${code})` : code
+}
+
 /** The report of a final stage, in Hungarian (the owner's and the main agent's language). */
 export function renderOutcome(spec: ForkDeploySpecV1, f: DeployStageFile): string {
   const head = `Élesítés PR #${spec.pr} (${short(spec.from_sha)} -> ${short(spec.to_sha)})`
   const mirrorsFailed = f.mirrors_failed ? ` FIGYELEM: a tükör (${f.mirrors_failed}) NEM frissült, kézzel kell utánahúzni.` : ''
+  const log = `Napló: store/fork-deploy/${f.approval_id}.log.`
   switch (f.result) {
     case 'deployed':
       return `${head}: KÉSZ. Az éles telepítés és a ${spec.remote}/${spec.branch} is ${short(spec.to_sha)}, a vezérlőpult az új builddel fut.${mirrorsFailed}`
     case 'failed':
-      return `${head}: NEM történt élesítés (${f.reason ?? 'ismeretlen ok'}). Az éles telepítés ${short(f.prod ?? spec.from_sha)}, a ${spec.remote}/${spec.branch} ${short(f.fork ?? spec.from_sha)}.${f.fork && f.prod && f.fork !== f.prod ? ' ELTÉRNEK.' : ''}${mirrorsFailed}`
+      return `${head}: NEM történt élesítés, oka: ${reasonText(f.reason)}. Az éles telepítés ${short(f.prod ?? spec.from_sha)}, a ${spec.remote}/${spec.branch} ${short(f.fork ?? spec.from_sha)}.${f.fork && f.prod && f.fork !== f.prod ? ' ELTÉRNEK.' : ' Újraindítás nem volt.'}${mirrorsFailed} ${log}`
     case 'rolled_back':
-      return `${head}: VISSZAÁLLT (${f.reason ?? 'ismeretlen ok'}). Az éles telepítés újra ${short(f.prod)}, de a ${spec.remote}/${spec.branch} már ${short(f.fork)}: ELTÉRNEK, döntés kell (javító PR vagy visszavonó commit).${mirrorsFailed}`
+      return `${head}: VISSZAÁLLT, oka: ${reasonText(f.reason)}. Az éles telepítés újra ${short(f.prod)}, de a ${spec.remote}/${spec.branch} már ${short(f.fork)}: ELTÉRNEK, döntés kell (javító PR vagy visszavonó commit).${mirrorsFailed} ${log}`
     case 'rollback_failed':
-      return `${head}: HIBA, a visszaállás sem sikerült (${f.reason ?? 'ismeretlen ok'}). Az éles telepítés ${short(f.prod)}, a ${spec.remote}/${spec.branch} ${short(f.fork)}. Kézi beavatkozás kell: store/fork-deploy/${f.approval_id}.log.${mirrorsFailed}`
+      return `${head}: HIBA, a visszaállás sem sikerült, oka: ${reasonText(f.reason)}. Az éles telepítés ${short(f.prod)}, a ${spec.remote}/${spec.branch} ${short(f.fork)}. Kézi beavatkozás kell. ${log}${mirrorsFailed}`
     default:
       return `${head}: ismeretlen kimenet (${f.stage}).`
   }

@@ -392,9 +392,31 @@ describe('5. the outcome is recorded and reported once', () => {
     const { id } = await started()
     writeStage(id, { stage: 'failed', final: true, result: 'failed', reason: 'precheck_fork_moved', prod: FROM, fork: 'c'.repeat(40), mirrors_failed: 'brunella' })
     expect(fd.finalizeFromStageFile(id)).toBe(true)
-    expect(toMain[0]).toContain('NEM történt élesítés (precheck_fork_moved)')
+    expect(toMain[0]).toContain('NEM történt élesítés, oka: a fork main elmozdult a kérés óta (precheck_fork_moved)')
     expect(toMain[0]).toContain('ELTÉRNEK')
     expect(toMain[0]).toContain('brunella')
+  })
+
+  it('a push stopped by the fork or a pre-push hook: the report names the hook-proof gate, the safe state and the log', async () => {
+    const { id } = await started()
+    writeStage(id, { stage: 'failed', final: true, result: 'failed', reason: 'push_failed', prod: FROM, fork: FROM })
+    expect(fd.finalizeFromStageFile(id)).toBe(true)
+    expect(toOwner[0]).toContain('pre-push hook (hook-proof, review-gate)')
+    expect(toOwner[0]).toContain('Újraindítás nem volt.')
+    expect(toOwner[0]).toContain(`Napló: store/fork-deploy/${id}.log.`)
+  })
+
+  it('every reason code the script can write has words in the report', () => {
+    const script = readFileSync(new URL('../../scripts/fork-deploy.sh', import.meta.url), 'utf-8')
+    const codes = new Set([
+      ...[...script.matchAll(/finish failed failed ([a-z_]+)/g)].map((m) => m[1]),
+      ...[...script.matchAll(/rollback_local ([a-z_]+)/g)].map((m) => m[1]),
+      ...[...script.matchAll(/(?:rolled_back|rollback_failed) ([a-z_]+)$/gm)].map((m) => m[1]),
+    ])
+    codes.delete('rollback_failed')
+    expect(codes.size).toBeGreaterThanOrEqual(15)
+    for (const c of codes) expect(fd.DEPLOY_REASON_TEXT[c], c).toBeTruthy()
+    expect(fd.reasonText('nincs_ilyen')).toBe('nincs_ilyen')
   })
 
   it('a stage that is not final records nothing', async () => {
