@@ -1174,6 +1174,19 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     loosens: (oldValue: string, newValue: string) => oldValue.trim().toLowerCase() !== 'on' && newValue.trim().toLowerCase() === 'on',
   },
   {
+    // FORKDEPLOY1121 (Péter GO 17701): the one-press merge + deploy of a reviewed fork PR. ON by default because the owner
+    // asked for it; switching it back on after an "off" needs the owner's session.
+    key: 'FORK_DEPLOY_VIA_APPROVAL',
+    type: 'string',
+    default: 'on',
+    description: 'Élesítés egy gombbal (FORKDEPLOY1121): bekapcsolva (on) a fő ügynök a közös tokennel LEADHAT egy élesítési kérést (POST /api/fork-deploy-specs: PR-szám és a PR fejének teljes SHA-ja); élesíteni nem tud. A szerver a gitből méri meg a többit (az éles telepítés, a fork és a tükrök main-je, a PR feje, ami egyetlen commit a main tetején), eltárolja, és jóváhagyást kér a gazdától Telegramon (gombbal) vagy a dashboardon. A gazda egy gombnyomása után a szerver pontosan azt a SHA-t teszi a fork és a tükrök main-jére (fast-forward), húzza be az éles telepítésbe, buildeli, és újraindítja a vezérlőpultot; ha bármelyik SHA közben elmozdult, semmi nem történik. Csak macOS-en (launchd). Alapból BE (a gazda kérte).',
+    module: 'agents',
+    secret: false,
+    requiresRestart: false,
+    validate: (v: string) => (['on', 'off'].includes(v.trim().toLowerCase()) ? null : 'on vagy off'),
+    loosens: (oldValue: string, newValue: string) => oldValue.trim().toLowerCase() !== 'on' && newValue.trim().toLowerCase() === 'on',
+  },
+  {
     // TEAMSAPPROVECARD1118 (Samu D3): one more way to approve, so off by default and switching it on needs the owner.
     key: 'APPROVAL_TEAMS_CARDS',
     type: 'string',

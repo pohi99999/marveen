@@ -1433,7 +1433,9 @@ const SCHEDULE_SQL_WRITE_RX = /\b(?:insert(?:\s+or\s+\w+)?\s+into|replace\s+into
 // trail of an enabling, or lift the lock that stands in front of enabling.
 // schedule_command_specs (SCHEDCMDAPPROVAL1121): the same for a scheduled shell command the owner approved: an agent
 // that could write it could swap the approved command for another one, or mark a spec consumed so it never runs.
-export const SECURITY_TABLES = ['approvals', 'approval_events', 'approval_slack_posts', 'approval_teams_cards', 'agent_create_specs', 'schedule_command_specs', 'auth_sessions', 'dashboard_users', 'device_keys', 'vault_ssh_keys', 'support_consents', 'support_password_state']
+// fork_deploy_specs (FORKDEPLOY1121): the one-press deploy's spec: an agent that could write it could point an approved
+// deploy at another SHA, or mark it consumed or finished.
+export const SECURITY_TABLES = ['approvals', 'approval_events', 'approval_slack_posts', 'approval_teams_cards', 'agent_create_specs', 'schedule_command_specs', 'fork_deploy_specs', 'auth_sessions', 'dashboard_users', 'device_keys', 'vault_ssh_keys', 'support_consents', 'support_password_state']
 // An SQL write on one of them. The table name is read wherever the statement
 // names its target: after a schema prefix (`main.approvals`, an ATTACHed
 // `x.approvals`), in [brackets], with SQL comments or line breaks between the

@@ -1853,6 +1853,25 @@ export function initDatabase(dbPathOverride?: string): void {
       outcome_at INTEGER
     )
   `)
+  // FORKDEPLOY1121: the stored spec behind a fork_deploy approval (the one-press merge + deploy the main agent asked
+  // for): spec_json is the canonical JSON the owner was shown, content_hash its sha256 (equal to the approvals row's),
+  // to_sha the PR head it would deploy (one open request per SHA). The consumer stamps consumed_at in the same
+  // transaction as the approval's consume; outcome is 'started' while scripts/fork-deploy.sh runs, then its result.
+  // A security table.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fork_deploy_specs (
+      approval_id TEXT PRIMARY KEY,
+      spec_json TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      pr INTEGER NOT NULL,
+      to_sha TEXT NOT NULL,
+      requested_by TEXT NOT NULL,
+      requested_at INTEGER NOT NULL,
+      consumed_at INTEGER,
+      outcome TEXT,
+      outcome_at INTEGER
+    )
+  `)
   // A security table: the db-write-gate denies an agent's write on it, like approvals.
   db.exec(`
     CREATE TABLE IF NOT EXISTS approval_teams_cards (
@@ -8194,7 +8213,8 @@ export type ApprovalDecideOutcome = 'decided' | 'not_pending' | 'content_changed
  * request is approved only when it carries a content hash AND the adapter showed the owner exactly that hash; a missing
  * hash on either side is never an approval. A rejection needs neither.
  */
-export const HASH_BOUND_APPROVAL_CATEGORIES: ReadonlySet<string> = new Set(['agent_create', 'schedule_command'])
+// FORKDEPLOY1121: fork_deploy, the one-press deploy's spec, is hash-bound too.
+export const HASH_BOUND_APPROVAL_CATEGORIES: ReadonlySet<string> = new Set(['agent_create', 'schedule_command', 'fork_deploy'])
 
 function decideApprovalInTx(p: {
   approvalId: string; status: 'approved' | 'rejected'; resolvedBy: string; expectedContentHash?: string; now: number
@@ -8536,7 +8556,8 @@ export const CATEGORY_CONSUME_MAX_WINDOW_S = 24 * 3600
 // category in a generic call. schedule_command (SCHEDCMDAPPROVAL1121): its
 // consumer is the server's own (schedule-command-approval.ts); a generic
 // consume would spend the owner's approval without creating the task.
-export const SERVER_CONSUMED_CATEGORIES: readonly string[] = ['email_send', 'data_delete', 'schedule_command']
+// fork_deploy (FORKDEPLOY1121): the same; its consumer starts the deploy (fork-deploy-approval.ts).
+export const SERVER_CONSUMED_CATEGORIES: readonly string[] = ['email_send', 'data_delete', 'schedule_command', 'fork_deploy']
 
 // Categories that are a STANDING decision, not a one-off permission: the owner's
 // LAST resolved decision on the anchor wins, and a later rejection revokes it

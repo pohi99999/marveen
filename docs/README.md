@@ -16,6 +16,7 @@ Minden lap két szemszögből mutatja be a funkciót:
 | [Ügynök-flotta + inter-agent kommunikáció](agent-fleet.md) | Több specializált ügynök közös üzenetsoron keresztül |
 | [Ügynök-létrehozás jóváhagyással](agent-create-approval.md) | Egy ügynök kérheti új ügynök létrehozását; a szerver tárolja és hash-eli a specifikációt, és csak a gazda jóváhagyása után hozza létre, ugyanazon a kódon, mint a dashboard (alapból KI) |
 | [Ütemezett shell-parancs jóváhagyással](schedule-command-approval.md) | A fő ügynök kérheti egy ütemezett shell-parancs létrehozását; a szerver tárolja és hash-eli, a gazda a parancsot szó szerint látja (csak ASCII), és csak a jóváhagyása után jön létre, egyszer (alapból BE) |
+| [Élesítés egy gombbal](fork-deploy-approval.md) | A fő ügynök kérheti egy ellenőrzött fork-PR élesítését; a szerver a gitből méri a régi és az új SHA-t, a gazda egy gombnyomására pontosan az a SHA kerül a fork main-re, a telepítésbe, és a vezérlőpult újraindul; hibánál visszaáll (alapból BE, csak macOS) |
 | [Föderáció](federation.md) | Több Marveen-példány összekötése: rendszer-minősített címzés (`teodor/backend-dev`) + HTTPS-híd, dashboard-menü, per-társ tokenek, automatikus ügynök-felkészítés, **képesség-alapú auto-routing** (LLM-katalógus) + fő-ügynök auto-drain, beépített rollback — opt-in, fail-closed |
 | [Skill-factory (öntanulás)](skill-factory.md) | Visszatérő munkafolyamatokból újrahasznosítható skill-ek |
 | [Channels (Telegram / Slack)](channels.md) | Natív üzenetküldő-integráció proaktív értesítésekkel |
@@ -43,11 +44,11 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **67**, egyedi `/api/...` útvonal-literál bennük: **204**
+- Route-modulok (`src/web/routes/*.ts`): **67**, egyedi `/api/...` útvonal-literál bennük: **205**
 - Claude Code hookok (`.claude/settings.json`): **8** esemény, **58** bejegyzés, **37** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **10** -- channel-image, commit-identity, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **70**, ebből a fenti táblázat linkel **25**
+- Dokumentációs lapok a `docs/` alatt: **71**, ebből a fenti táblázat linkel **26**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
