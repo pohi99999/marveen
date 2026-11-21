@@ -41,7 +41,7 @@ Marker: SCHEDCMDAPPROVAL1121.
   where the name came from (below).
 - Caps: at most 3 open requests, one per task name; an existing task name is 409, a fourth open request 429.
 
-The answer is `201 { approvalId, contentHash, text }`. The server stores the canonical spec (sorted keys, no whitespace)
+The answer is `201 { ok: true, approvalId, contentHash, text }`. The server stores the canonical spec (sorted keys, no whitespace)
 in `schedule_command_specs`, a security table agents cannot write (`SECURITY_TABLES` in `scripts/self-pace-gate.mjs`,
 enforced by `scripts/hooks/db-write-gate.mjs`), and opens a `schedule_command` approval whose `content_hash` is the sha256 of that JSON. Nothing is
 created yet. The request times out after 24 hours.
@@ -102,8 +102,8 @@ requests.
 
 - **Stop new requests:** `SCHEDULE_COMMAND_VIA_APPROVAL=off`, then reject the open `schedule_command` approvals.
 - **A task created this way** is an ordinary command task: switch it off or delete it on the dashboard's schedules
-  page, as any other. Its spec row keeps the record (`outcome = created`, `created_task`).
+  page, as any other (the shared token can switch it off or delete it too; only creating one needs the approval). Its spec row keeps the record (`outcome = created`, `created_task`).
 - **The code:** reverting the commit removes the route, the consumer and the sweep; the Telegram buttons of the other
   categories keep their old format. The `schedule_command_specs` table stays in the database (it was created with
-  `CREATE TABLE IF NOT EXISTS` and nothing reads it after the revert); dropping it is not needed and, being a security
-  table, it is not writable by agents anyway.
+  `CREATE TABLE IF NOT EXISTS`). The revert also takes it off the security-table list (`SECURITY_TABLES`), so from then
+  on the db-write-gate no longer protects it; nothing reads it either, so it is harmless and may be dropped.
