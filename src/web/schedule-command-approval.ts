@@ -26,7 +26,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   canonicalScheduleCommandSpec, canonicalJson, scheduleSpecHash, renderScheduleCommandSpec, recheckStoredScheduleSpec,
-  type ScheduleCommandSpecV1,
+  type ScheduleCommandSpecV1, type RequesterSource,
 } from './schedule-command-spec.js'
 import { createScheduledTask } from './schedule-create.js'
 import { newApprovalNonce } from './telegram-approval.js'
@@ -47,7 +47,7 @@ export function scheduleCommandViaApprovalOn(setting: (key: string) => string): 
 
 export interface ScheduleFileResult { status: number; body: Record<string, unknown>; approval?: Approval }
 
-export function fileScheduleCommandRequest(body: unknown, requestedBy: string, deps: { setting: (k: string) => string; lang: 'hu' | 'en' }): ScheduleFileResult {
+export function fileScheduleCommandRequest(body: unknown, requestedBy: string, deps: { setting: (k: string) => string; lang: 'hu' | 'en'; requesterSource?: RequesterSource }): ScheduleFileResult {
   if (!scheduleCommandViaApprovalOn(deps.setting)) {
     return { status: 403, body: { error: 'Scheduled commands by approval are off (SCHEDULE_COMMAND_VIA_APPROVAL).' } }
   }
@@ -60,7 +60,7 @@ export function fileScheduleCommandRequest(body: unknown, requestedBy: string, d
   if (existsSync(join(SCHEDULED_TASKS_DIR, r.spec.name))) return { status: 409, body: { error: 'Schedule already exists' } }
   const json = canonicalJson(r.spec)
   const hash = scheduleSpecHash(r.spec)
-  const text = renderScheduleCommandSpec(r.spec, hash, deps.lang)
+  const text = renderScheduleCommandSpec(r.spec, hash, deps.lang, { name: requestedBy, source: deps.requesterSource ?? 'self-declared' })
   const id = randomUUID()
   const now = Math.floor(Date.now() / 1000)
   // The count and the insert in ONE synchronous transaction, nothing awaited in between (the agent_create lesson,
@@ -145,6 +145,9 @@ export function consumeScheduleCommand(approval: Approval): void {
   const step = consumeScheduleCommandStep(approval.id)
   if (!step.go) {
     if (!step.reason.startsWith('consume_refused:already_consumed')) {
+      // Ellenőr #59 J3: the refusal is written on the spec row, so the start-up sweep does not pick the same request up
+      // (and alert) again on every start (an approval past its consume window stays approved and unconsumed).
+      if (step.reason.startsWith('consume_refused:')) setOutcome(approval.id, step.reason)
       alertMain(`Az ütemezett parancs jóváhagyott kérése (${approval.id}) nem futott le: ${step.reason}. Semmi nem jött létre.`)
     }
     return
@@ -168,7 +171,7 @@ export function sweepScheduleCommandOnStart(): { consumed: number; interrupted: 
   const db = getDb()
   const pending = db.prepare(`
     SELECT a.* FROM approvals a JOIN schedule_command_specs s ON s.approval_id = a.id
-    WHERE a.category = ? AND a.status = 'approved' AND a.consumed_at IS NULL AND s.consumed_at IS NULL
+    WHERE a.category = ? AND a.status = 'approved' AND a.consumed_at IS NULL AND s.consumed_at IS NULL AND s.outcome IS NULL
   `).all(SCHEDULE_COMMAND_CATEGORY) as Approval[]
   const interrupted = db.prepare(`
     SELECT approval_id FROM schedule_command_specs WHERE consumed_at IS NOT NULL AND outcome IS NULL

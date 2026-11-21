@@ -419,4 +419,50 @@ describe('7. the start-up sweep', () => {
     expect(reg).toBeGreaterThan(ac)
     expect(sweep).toBeGreaterThan(reg)
   })
+
+  // Ellenőr #59 J3: an approval past its consume window was picked up (and alerted) again on every start.
+  it('an approval past its consume window: refused once, written on the row, not picked up again', async () => {
+    const { body } = await fileSpec()
+    const old = Math.floor(Date.now() / 1000) - 8 * 86400
+    db.getDb().prepare("UPDATE approvals SET status = 'approved', resolved_at = ?, resolved_by = 'telegram-owner' WHERE id = ?").run(old, body.approvalId)
+    expect(sweepScheduleCommandOnStart().consumed).toBe(1)
+    expect(existsSync(taskDir(SPEC.name))).toBe(false)
+    expect(String(specRow(body.approvalId)!.outcome)).toMatch(/^consume_refused:/)
+    expect(h.alerts).toHaveLength(1)
+    expect(sweepScheduleCommandOnStart()).toEqual({ consumed: 0, interrupted: 0 })
+    expect(h.alerts).toHaveLength(1)
+  })
+})
+
+// Ellenőr #59 J1, J2: the owner's text names where the requester's name came from; the command is printable ASCII.
+describe('8. the requester line and the ASCII-only command', () => {
+  it('the shared token: the name is marked self-declared; the main agent\'s own token: identified by it', async () => {
+    const shared = await fileSpec()
+    expect(shared.status).toBe(201)
+    expect(shared.body.text).toContain('kérő: marveen (a közös tokennel, ÖNBEVALLOTT név')
+    db.getDb().prepare("UPDATE approvals SET status = 'rejected', resolved_at = ? WHERE id = ?").run(Math.floor(Date.now() / 1000), shared.body.approvalId)
+    const own = await fileSpec({ ...SPEC, name: 'napi-ping-2' }, { kind: 'token', agent: 'marveen', tokenAgent: 'marveen' })
+    expect(own.status).toBe(201)
+    expect(own.body.text).toContain('kérő: marveen (saját tokennel azonosítva)')
+  })
+
+  it.each([
+    ['a Cyrillic a in a host name', 'curl -fsS https://exаmple.invalid/ping'],
+    ['a Greek o', 'curl -fsS https://exοmple.invalid/'],
+    ['a no-break space', 'echo hello'],
+    ['an ideographic space', 'echo　hello'],
+    ['a Hangul filler', 'echo ㅤ hello'],
+    ['a variation selector', 'echo ok️'],
+    ['an accented letter', 'echo árvíztűrő'],
+  ])('%s in the command: 400, nothing stored', async (_n, command) => {
+    const r = await fileSpec({ ...SPEC, command })
+    expect(r.status).toBe(400)
+    expect(String(r.body.error)).toContain('printable ASCII')
+    expect(scheduleApprovals()).toHaveLength(0)
+  })
+
+  it('the description may still be Hungarian (it is not run)', async () => {
+    const r = await fileSpec({ ...SPEC, description: 'Napi pályázat-betöltés, árvíztűrő' })
+    expect(r.status).toBe(201)
+  })
 })

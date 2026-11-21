@@ -85,6 +85,11 @@ export function canonicalScheduleCommandSpec(body: unknown): ScheduleSpecResult 
   if (command.length > MAX_COMMAND_LEN) return bad(`command too long (max ${MAX_COMMAND_LEN} characters)`)
   const cu = unshowableText(command)
   if (cu !== null) return bad(`command contains a character that cannot be shown verbatim on one line (${cu}); write it on one line, with ; or && between the steps`)
+  // Ellenőr #59 J2: a look-alike letter (Cyrillic a, Greek o), a no-break or ideographic space, a Hangul filler or a
+  // variation selector is not a format character, yet it makes the command the owner reads differ from the one bash
+  // runs (a host name that only looks the same, an NBSP bash does not split on). The command is printable ASCII only.
+  const na = /[^\x20-\x7e]/u.exec(command)
+  if (na) return bad(`command must be printable ASCII only (U+${na[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')} is not): a look-alike character would make the command shown differ from the command run`)
   const description = typeof body.description === 'string' ? body.description : ''
   if (description.length > MAX_DESCRIPTION_LEN) return bad(`description too long (max ${MAX_DESCRIPTION_LEN} characters)`)
   const du = unshowableText(description)
@@ -122,7 +127,10 @@ export const CHECK_CODE_LEN = 10
  * The owner's text, rendered from the canonical spec and nothing else. Every hashed field is a line; the command is
  * its own line, verbatim (the spec guarantees it is one line of showable characters).
  */
-export function renderScheduleCommandSpec(spec: ScheduleCommandSpecV1, hash: string, lang: 'hu' | 'en'): string {
+/** Who asked, as the server knows it: an agent's own token names it, the shared token only claims it (Ellenőr #59 J1). */
+export type RequesterSource = 'agent-token' | 'self-declared'
+
+export function renderScheduleCommandSpec(spec: ScheduleCommandSpecV1, hash: string, lang: 'hu' | 'en', requester?: { name: string; source: RequesterSource }): string {
   const hu = lang === 'hu'
   return [
     hu ? 'Ütemezett shell-parancs létrehozása, jóváhagyásra:' : 'Create a scheduled shell command, for approval:',
@@ -137,6 +145,11 @@ export function renderScheduleCommandSpec(spec: ScheduleCommandSpecV1, hash: str
     `- ${hu ? 'riasztás ennyi egymás utáni hiba után' : 'alert after this many failures in a row'}: ${spec.fail_threshold}`,
     `- ${hu ? 'leírás' : 'description'}: ${spec.description || (hu ? '(nincs)' : '(none)')}`,
     `- ${hu ? 'ügynök (a futások címkéje)' : 'agent (labels the runs)'}: ${spec.agent}`,
+    ...(requester
+      ? [`- ${hu ? 'kérő' : 'requested by'}: ${requester.name} (${requester.source === 'agent-token'
+        ? (hu ? 'saját tokennel azonosítva' : 'identified by its own token')
+        : (hu ? 'a közös tokennel, ÖNBEVALLOTT név: bármelyik ügynök írhatta, csak a jóváhagyásod véd' : 'on the shared token, a SELF-DECLARED name: any agent could have written it, only your approval protects')})`]
+      : []),
     `- ${hu ? 'spec-verzió' : 'spec version'}: ${spec.spec_version}`,
     `- ${hu ? 'ellenőrző kód' : 'check code'}: ${hash.slice(0, CHECK_CODE_LEN)}`,
   ].join('\n')

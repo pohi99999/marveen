@@ -704,7 +704,9 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     const declared = typeof header === 'string' && /^[a-z0-9_-]{1,64}$/i.test(header) ? header : 'unknown'
     const requestedBy = ctx.auth?.kind === 'token' ? (ctx.auth.tokenAgent ?? claimedAgentOf(ctx.auth) ?? declared) : declared
     const lang = (reactionDeps.lang ?? approvalTextLang)()
-    const r = fileScheduleCommandRequest(body, requestedBy, { setting: (k) => String(getEffectiveSettingValue(k) ?? ''), lang })
+    // Ellenőr #59 J1: the owner's text says whether the name came from the agent's own token or was only claimed.
+    const requesterSource = ctx.auth?.kind === 'token' && ctx.auth.tokenAgent ? 'agent-token' as const : 'self-declared' as const
+    const r = fileScheduleCommandRequest(body, requestedBy, { setting: (k) => String(getEffectiveSettingValue(k) ?? ''), lang, requesterSource })
     if (r.approval) {
       // serverFiled: the description is the server's own rendering of the stored spec
       void notifyOwner(r.approval, null, true, lang)
