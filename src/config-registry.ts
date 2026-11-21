@@ -1161,6 +1161,19 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     loosens: (oldValue: string, newValue: string) => oldValue.trim().toLowerCase() !== 'on' && newValue.trim().toLowerCase() === 'on',
   },
   {
+    // SCHEDCMDAPPROVAL1121 (Péter GO 17598): the main agent's approval-gated path to a scheduled shell command. ON by
+    // default because the owner asked for it; switching it back on after an "off" needs the owner's session.
+    key: 'SCHEDULE_COMMAND_VIA_APPROVAL',
+    type: 'string',
+    default: 'on',
+    description: 'Ütemezett shell-parancs jóváhagyással (SCHEDCMDAPPROVAL1121): bekapcsolva (on) a fő ügynök a közös tokennel LEADHAT egy ütemezett parancs-kérést (POST /api/schedule-command-specs: név, cron, parancs, időkorlát, hibaküszöb, leírás); létrehozni nem tud. A szerver ellenőrzi és eltárolja a specifikációt, és jóváhagyást kér a gazdától Telegramon (gombbal) vagy a dashboardon; a gazdának mutatott szöveget, benne a parancsot szó szerint, a szerver állítja össze a tárolt specifikációból. Csak a gazda jóváhagyása után, a szerver hozza létre pontosan azt a feladatot, egyszer, ugyanazon az úton, mint a dashboardos létrehozás. Al-ügynök nem kérhet ilyet. A közvetlen létrehozás (POST /api/schedules, type command) továbbra is csak a gazda munkamenetével megy. Alapból BE (a gazda kérte).',
+    module: 'agents',
+    secret: false,
+    requiresRestart: false,
+    validate: (v: string) => (['on', 'off'].includes(v.trim().toLowerCase()) ? null : 'on vagy off'),
+    loosens: (oldValue: string, newValue: string) => oldValue.trim().toLowerCase() !== 'on' && newValue.trim().toLowerCase() === 'on',
+  },
+  {
     // TEAMSAPPROVECARD1118 (Samu D3): one more way to approve, so off by default and switching it on needs the owner.
     key: 'APPROVAL_TEAMS_CARDS',
     type: 'string',

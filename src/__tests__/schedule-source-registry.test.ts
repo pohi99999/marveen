@@ -670,8 +670,12 @@ describe('scheduled-task registry: the whole task dir is hashed', () => {
     expect(getScheduledTaskRegistryEntry('dir-written')).toBeUndefined()
     unlinkSync(join(dirOf('dir-written'), 'dropped.sh'))
     expect(registerScheduledTask('dir-written', 'api:create', written, { noUnwrittenDirFiles: true })).not.toBeNull()
+    // SCHEDCMDAPPROVAL1121: the create's write and registration live in schedule-create.ts, shared by the route and the
+    // schedule_command consumer; the route creates through it with its own source label.
     const routes = readFileSync(join(__dirname, '../web/routes/schedules.ts'), 'utf-8')
-    expect(routes).toMatch(/registerAfterWrite\(res, name, 'api:create', written, \{ noUnwrittenDirFiles: true \}\)/)
+    expect(routes).toMatch(/writeNewScheduledTask\(v\.value, 'api:create'\)/)
+    const create = readFileSync(join(__dirname, '../web/schedule-create.ts'), 'utf-8')
+    expect(create).toMatch(/registerScheduledTask\(name, source, written, \{ noUnwrittenDirFiles: true \}\)/)
   })
 
   it('a task dir over the entry bound has no hash: it is neither registered nor fired', async () => {

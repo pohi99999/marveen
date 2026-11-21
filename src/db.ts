@@ -1834,6 +1834,25 @@ export function initDatabase(dbPathOverride?: string): void {
       outcome_at INTEGER
     )
   `)
+  // SCHEDCMDAPPROVAL1121: the stored spec behind a schedule_command approval (a scheduled shell command the main agent
+  // asked for). The same shape and rules as agent_create_specs: spec_json is the canonical JSON the owner was shown,
+  // content_hash its sha256 (equal to the approvals row's), task_name the task it would create (one open request per
+  // name). The consumer stamps consumed_at in the same transaction as the approval's consume, then the outcome.
+  // A security table.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schedule_command_specs (
+      approval_id TEXT PRIMARY KEY,
+      spec_json TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      task_name TEXT NOT NULL,
+      requested_by TEXT NOT NULL,
+      requested_at INTEGER NOT NULL,
+      consumed_at INTEGER,
+      created_task TEXT,
+      outcome TEXT,
+      outcome_at INTEGER
+    )
+  `)
   // A security table: the db-write-gate denies an agent's write on it, like approvals.
   db.exec(`
     CREATE TABLE IF NOT EXISTS approval_teams_cards (
@@ -8056,15 +8075,22 @@ export function createApproval(params: {
 // Card 3558: the owner's Telegram decision, resolved on the server in ONE conditional UPDATE:
 // only a pending row with this exact nonce, inside its window, flips -- the same shape as
 // consumeApproval, so a stale button, a guessed nonce or a second press can never decide twice.
-export type OwnerResolveRefusal = 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired'
+export type OwnerResolveRefusal = 'not_found' | 'no_nonce' | 'wrong_nonce' | 'already_resolved' | 'expired' | 'content_changed'
+/** SCHEDCMDAPPROVAL1121: how many hex characters of a hash-bound request's content hash its Telegram buttons carry
+ *  (the callback_data cap is 64 bytes: `apr:` + uuid + nonce + decision + this head is 62). */
+export const OWNER_BUTTON_HASH_HEAD_LEN = 10
 export function resolveApprovalByOwner(params: {
   id: string
   nonce: string
   decision: 'approved' | 'rejected'
   resolvedBy: string
   nowS?: number
+  /** The head of the content hash the pressed button carried (hash-bound categories only). */
+  shownHashHead?: string
 }): { ok: true; approval: Approval } | { ok: false; reason: OwnerResolveRefusal; approval?: Approval } {
   const now = params.nowS ?? Math.floor(Date.now() / 1000)
+  const target = getApproval(params.id)
+  if (target && HASH_BOUND_APPROVAL_CATEGORIES.has(target.category)) return resolveHashBoundByOwner(params, now)
   return db.transaction(() => {
     const changes = db.prepare(`
       UPDATE approvals SET status = ?, resolved_at = ?, resolved_by = ?
@@ -8081,6 +8107,41 @@ export function resolveApprovalByOwner(params: {
     else reason = 'expired'
     return { ok: false as const, reason, approval: row }
   })()
+}
+
+/**
+ * SCHEDCMDAPPROVAL1121: the owner's Telegram press on a HASH-BOUND request (HASH_BOUND_APPROVAL_CATEGORIES). The nonce
+ * and the window are checked as for every press; then the decision goes through the same decision core the dashboard
+ * and the channel adapters use (decideApprovalInTx), with the content hash the pressed button was rendered for: an
+ * approval whose button carries no hash head, or a head that is not the head of the request's hash, is refused as
+ * content_changed. A rejection needs no hash. After the commit the category's consumer runs, as on every other path,
+ * so the press itself makes the server act; a plain status write would leave the request for the start-up sweep.
+ */
+function resolveHashBoundByOwner(params: {
+  id: string; nonce: string; decision: 'approved' | 'rejected'; resolvedBy: string; shownHashHead?: string
+}, now: number): { ok: true; approval: Approval } | { ok: false; reason: OwnerResolveRefusal; approval?: Approval } {
+  const r = db.transaction((): { ok: true } | { ok: false; reason: OwnerResolveRefusal } => {
+    const row = getApproval(params.id)
+    if (!row) return { ok: false, reason: 'not_found' }
+    if (!row.owner_nonce) return { ok: false, reason: 'no_nonce' }
+    if (row.owner_nonce !== params.nonce) return { ok: false, reason: 'wrong_nonce' }
+    if (row.status !== 'pending') return { ok: false, reason: 'already_resolved' }
+    if (row.timeout_at != null && row.timeout_at <= now) return { ok: false, reason: 'expired' }
+    let expected: string | undefined
+    if (params.decision === 'approved') {
+      const head = params.shownHashHead
+      if (typeof head !== 'string' || !/^[0-9a-f]+$/.test(head) || head.length < OWNER_BUTTON_HASH_HEAD_LEN
+        || typeof row.content_hash !== 'string' || !row.content_hash.startsWith(head)) return { ok: false, reason: 'content_changed' }
+      expected = row.content_hash
+    }
+    const outcome = decideApprovalInTx({ approvalId: params.id, status: params.decision, resolvedBy: params.resolvedBy, expectedContentHash: expected, now })
+    if (outcome === 'decided') return { ok: true }
+    return { ok: false, reason: outcome === 'not_pending' ? 'already_resolved' : outcome }
+  })()
+  const row = getApproval(params.id)
+  if (!r.ok) return { ok: false, reason: r.reason, approval: row }
+  runApprovalConsumer(params.id)
+  return { ok: true, approval: getApproval(params.id) ?? row! }
 }
 
 export function getApproval(id: string): Approval | undefined {
@@ -8128,11 +8189,12 @@ export type ApprovalDecideOutcome = 'decided' | 'not_pending' | 'content_changed
  * the timeout (a rejection may land after it). Only then is the request resolved, and the UPDATE repeats every condition.
  */
 /**
- * AGENTCREATEPR2-1119: categories whose approval is bound to content the server stored (agent_create: the spec). Such a
+ * AGENTCREATEPR2-1119: categories whose approval is bound to content the server stored (agent_create: the spec;
+ * schedule_command, SCHEDCMDAPPROVAL1121: the scheduled shell command's spec). Such a
  * request is approved only when it carries a content hash AND the adapter showed the owner exactly that hash; a missing
  * hash on either side is never an approval. A rejection needs neither.
  */
-export const HASH_BOUND_APPROVAL_CATEGORIES: ReadonlySet<string> = new Set(['agent_create'])
+export const HASH_BOUND_APPROVAL_CATEGORIES: ReadonlySet<string> = new Set(['agent_create', 'schedule_command'])
 
 function decideApprovalInTx(p: {
   approvalId: string; status: 'approved' | 'rejected'; resolvedBy: string; expectedContentHash?: string; now: number
@@ -8471,8 +8533,10 @@ export const CATEGORY_CONSUME_MAX_WINDOW_S = 24 * 3600
 // by the send path (consumeApproval above / the gate), data_delete by the
 // memory DELETE route. The generic consume below never touches them, so a
 // tool cannot spend a letter's or a memory delete's approval by naming the
-// category in a generic call.
-export const SERVER_CONSUMED_CATEGORIES: readonly string[] = ['email_send', 'data_delete']
+// category in a generic call. schedule_command (SCHEDCMDAPPROVAL1121): its
+// consumer is the server's own (schedule-command-approval.ts); a generic
+// consume would spend the owner's approval without creating the task.
+export const SERVER_CONSUMED_CATEGORIES: readonly string[] = ['email_send', 'data_delete', 'schedule_command']
 
 // Categories that are a STANDING decision, not a one-off permission: the owner's
 // LAST resolved decision on the anchor wins, and a later rejection revokes it
