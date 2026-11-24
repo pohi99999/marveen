@@ -102,22 +102,22 @@ const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex')
 // skill section (one git-managed tree, <repo>/.claude/skills, commit + push; no skill-propose recipe); every other
 // byte is upstream's. Diffed variant by variant before these values were written.
 const EXPECTED: Record<string, string> = {
-  'en:own-curl:drive=none': '3377e1ee8bc7a27611b7a6ae65b0f62c1b7f5afb1dafea8dfbcaf52b92031419',
-  'en:own-curl:drive=set': '6ad52c57e11c32077e45850097b52fda0b16c3327427a96657aa66212538af68',
-  'en:own-helper:drive=none': '5b309582cbfba5212b76fb59ce17d6167d6123017b4103b3f7eaa292b129796a',
-  'en:own-helper:drive=set': 'a82daca5498d7b074f2f0b9efea1893c4ce36a12c9cbd8256ac664c0edb7e980',
-  'en:shared-curl:drive=none': 'ffc50df3686ffd7c1e7cad3435f682eb410f7577541b4dfb3210b2516a71a050',
-  'en:shared-curl:drive=set': 'ec11b94087f4a825eb078a5abc6d85305da3e6fa5e3b9893a2bfe07fed31c8a2',
-  'en:shared-helper:drive=none': 'cbda0bdf405aa99377b3135c5ff12caf6ef77a827bab3257d0e86037098d2329',
-  'en:shared-helper:drive=set': 'd3166060ea1c4dd222f86b6879c3d8cdf6df534c81214ff3913e4e5f3cf349bc',
-  'hu:own-curl:drive=none': 'd413db393171d0032421f2d2eab09d6359d8609e5ca50f475cbd1ea808901378',
-  'hu:own-curl:drive=set': 'cce93976395b531787473cb27a2e69daec2f7175f77abe4a0eb664d1c4a90778',
-  'hu:own-helper:drive=none': 'f2192d9215e664ce0009145fd4932dc8b53bbf30c473d60979b0511bbf07bcb2',
-  'hu:own-helper:drive=set': '3c4cef091cf02e9849e18894feeb9927162393ee1e51c2c8d1086cb86fb65768',
-  'hu:shared-curl:drive=none': 'acff2c5c2ca87d85e9e995138700f6cf998de092748f68d1e050096fb6c00f2e',
-  'hu:shared-curl:drive=set': 'eafc3c6a99e2e76652838d94041ce25be61b1de0f9332a65b4aa95e3f8496408',
-  'hu:shared-helper:drive=none': '2d5cbe08deea765d091a07ca847c74fb88e1fc98056358c0fe30fa61801d4f4d',
-  'hu:shared-helper:drive=set': 'e6f41bf75850903588d6c4a16c80592cf99d6b02dbfaec1528746261312f2fff',
+  'en:own-curl:drive=none': '7aa909e8366b5a64d2cd66d79ffcbc03eaadbd27031ef71c1a2d9330b80b9c18',
+  'en:own-curl:drive=set': 'df65a5b88b02fcd9c69a6855725649af2df9dd4a90dfae773f69918ec869ecbb',
+  'en:own-helper:drive=none': 'f8003887b11dd58b1b6ccec452253f90c8b2f9f512c56ed8f3b7eb55c73e2b01',
+  'en:own-helper:drive=set': 'd9d9ad850ab8a64aa38c965814d75f9bcd619a953fab41df28de423e44ea6ae4',
+  'en:shared-curl:drive=none': '79c00b410e132b537cff5d6f08bcddd2f8abfd8ce419b4307b7390103e54d685',
+  'en:shared-curl:drive=set': '603a6173ac2a366060e8dc91acf95ebbcc15542327459e4d2b63014c0999331a',
+  'en:shared-helper:drive=none': '16ccabd568be2fd794f828f4ae27d6241b8b4230468f1780214668b1c44dbfd0',
+  'en:shared-helper:drive=set': 'b5d799d147eb84ff11bbe2fb5302619aab83466513d8ca77408e2420f9ec48f0',
+  'hu:own-curl:drive=none': '4f78ac0be3a5cb6b58b33ca74881c2bbbc0efcd590e1465dbaff322fee8b8fa2',
+  'hu:own-curl:drive=set': 'abf0ee54c087fc6d3bca34859e403ca7d5f2d90350c0975f6780dafee1fc3acb',
+  'hu:own-helper:drive=none': '001b8553488baf4944c14a151bd7e83401108ebe3a666e3fe737d073b2805e76',
+  'hu:own-helper:drive=set': '9c0ac0cef503b35ce077698e8a817c28f9f7e13ecd4bea185736f623f93daae3',
+  'hu:shared-curl:drive=none': '366e6990f21a79b9e942e51f55ce61f740421f528ebcf3664c05cb62e208cda9',
+  'hu:shared-curl:drive=set': '202c1a13b06016da81d268be745b320a815085ff83844a7ae5948aeb57c89bac',
+  'hu:shared-helper:drive=none': 'e85d1cab951380365712e3a6508a825afc8e5734a031d1ec8b2a962e16689564',
+  'hu:shared-helper:drive=set': 'fdf1c66110645f3a6a27dcd788923cc4d3f699eb34d0639b85ad1473a5b1e57e',
 }
 
 describe('the sub-agent creation prompt is byte-identical across the fleet base rules lift (N12)', () => {

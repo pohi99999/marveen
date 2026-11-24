@@ -53,9 +53,18 @@ describe('skill propose instructions', () => {
     const rest = src.slice(a + 1)
     const m = rest.search(/\n(function |export )/)
     const body = src.slice(a, m < 0 ? undefined : a + 1 + m)
-    // FORK (SKILLSGIT914): one tree, the private marveen-skills clone; a skill is committed there, not proposed
+    // FORK (SKILLSGIT914, INSTRSURFACE1118): one tree, the private marveen-skills clone; the main agent commits a
+    // skill there and a sub-agent hands one in as a file in its own folder. The proposal call is named ONCE, and
+    // only to say it is not to be used: without the quarantine it would put the text live unread (measured on
+    // the merge of upstream v1.52.0, 2026-11-24), and for a new name outside the tree.
     expect(body).toContain('SKILLSGIT914')
-    expect(body).not.toContain('POST /api/skills/propose')
+    expect(body).toContain('INSTRSURFACE1118')
+    expect(body).toContain('`skill-javaslat/SKILL-NEV/`')
+    const naming = body.split('\n').filter((line) => line.includes('POST /api/skills/propose'))
+    expect(naming).toHaveLength(1)
+    expect(naming[0]).toContain('NE használd')
+    // No recipe of the call: neither the helper's command line nor a curl.
+    expect(body).not.toMatch(/marveen-api\.sh skill-propose|curl[^\n]*skills\/propose/)
   })
 
   it('T6: security-hardening doc describes propose', () => {
