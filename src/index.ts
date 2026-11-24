@@ -34,6 +34,7 @@ import { notifyOwner } from './notify.js'
 import { endAllDetachedGroups } from './web/detached-groups.js'
 import { logger } from './logger.js'
 import { isStandby, STANDBY_NOTICE } from './standby.js'
+import { startSpawnBroker } from './web/spawn-broker.js'
 import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
 import { startChannelRequestWatcher, stopChannelRequestWatcher } from './web/channel-request-watcher.js'
@@ -504,6 +505,7 @@ async function main(): Promise<void> {
 
   // Database
   initDatabase()
+  startSpawnBroker()
   logger.info('Adatbazis inicializalva')
 
   // WDSANDBOXNODE1119: the node this dashboard runs on, for scripts/watchdog.sh (its PATH may not hold it, e.g. nvm).

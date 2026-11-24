@@ -497,7 +497,7 @@ describe('the retired path of the English text (EGM review Major 2): per languag
 // their English twins are the FORK blocks in agent-scaffold.ts.
 const HU_SOURCE_HASHES: Record<string, string> = {
   'agent-id-header': '44f5248d7fc36cbc',
-  'api-helper': 'a70dbd6e315bb59e',
+  'api-helper': 'b8eeff8bebdff1d1',
   'autonomy': '728210d786c75e11',
   'background-checkpoint': '04505f8789507f70',
   'evidence': 'bb88050dd1cff21d',
@@ -511,7 +511,7 @@ const HU_SOURCE_HASHES: Record<string, string> = {
   'message-close': '835ee6c92d6e0a7a',
   'pane-at-escape': '81d1f7d930d89739',
   'skills-path-trap': '073cd572d4fb4a86',
-  'strict-api': 'e619c666af284fec',
+  'strict-api': '0eeec47cd845f598',
   'system-directive-auth': '5f72174ed4de6b5d',
 }
 

@@ -25,8 +25,11 @@
 import type http from 'node:http'
 import { readBody, json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
+import { getEffectiveSettingValue } from '../../settings-store.js'
 import { notifySecurityEvent } from '../../notify.js'
-import { parseCookies, SESSION_COOKIE_NAME } from '../auth-gate.js'
+import { parseCookies, SESSION_COOKIE_NAME, messengerNameTaken } from '../auth-gate.js'
+import { MAIN_AGENT_ID, RESERVED_AGENT_IDS, SYSTEM_SENDER_IDS, parseSystemSenderIds } from '../../config.js'
+import { sanitizeAgentIdent } from '../../prompt-safety.js'
 import {
   hashPassword,
   verifyPassword,
@@ -326,6 +329,14 @@ const DEVICE_KEY_MAX_EXPIRY_DAYS = 3650
 // session principal, or a valid owner cookie beside the bearer). A bool only (no id, no expiry), and only for a caller
 // that could hold one: absent for an anonymous caller, an operator key and a sub-agent token. The Bridge reads it to
 // offer the password login once per run.
+/** HOSTINGERI18N1122: the dashboard language the sign-in page should show. DASHBOARD_LANG is not a secret, and before a
+ *  login the page cannot read it from /api/settings (401), so a Docker install set to en showed its login in Hungarian. */
+export function dashboardLang(read: () => unknown = () => getEffectiveSettingValue('DASHBOARD_LANG')): 'hu' | 'en' {
+  let v: unknown
+  try { v = read() } catch { v = null }
+  return v === 'en' ? 'en' : 'hu'
+}
+
 function statusPayload(auth: RouteContext['auth'], req?: http.IncomingMessage) {
   const authenticated = auth?.kind === 'token' || auth?.kind === 'session' || auth?.kind === 'device' || auth?.kind === 'setup'
   const method = authenticated ? auth!.kind : null
@@ -339,6 +350,7 @@ function statusPayload(auth: RouteContext['auth'], req?: http.IncomingMessage) {
     device,
     ...(mayHoldOwner ? { owner_session: auth?.kind === 'session' || ownerCookieSession(req) !== null } : {}),
     login_available: countDashboardUsers(false) >= 1,
+    lang: dashboardLang(),
     setup_required: countDashboardUsers(true) === 0,
     // DOCKERHTTPS1119: the public listener before the first login: the page asks for the one-time setup code.
     ...(isPublicRequest(req) ? { setup_code: auth?.kind !== 'setup' && countDashboardUsers(true) === 0 && setupCodeAvailable() } : {}),
@@ -980,16 +992,40 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `Invalid scope (${DEVICE_KEY_SCOPES.join(' | ')})` }, 400)
       return true
     }
-    if (scope === 'operator' && (body.expires_in_days === 0 || body.expires_in_days === null)) {
-      json(res, { error: 'An operator key must expire' }, 400)
+    // MVDKSCOPE917: a 'messenger' key (sends as itself, reads its own conversation) is the owner's alone, never the
+    // first-run path; its name is its sender id, so it must be a canonical id that names nobody else, and the owner
+    // lists it in SYSTEM_SENDER_IDS first (the messages route accepts it as `from` only then; not added here).
+    if (scope === 'messenger') {
+      if (!mayActAsOwner(auth, req)) {
+        refuseOwner(res, 'Issuing a messenger key needs the dashboard login (an owner session).')
+        return true
+      }
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
+        json(res, { error: 'A messenger key name is its sender id: lowercase a-z, 0-9 and single dashes' }, 400)
+        return true
+      }
+      const taken = messengerNameTaken(name, MAIN_AGENT_ID) ?? (RESERVED_AGENT_IDS.includes(name) ? 'a reserved system id' : null)
+      if (taken) {
+        json(res, { error: `A messenger key cannot be named like ${taken}` }, 400)
+        return true
+      }
+      if (!parseSystemSenderIds(SYSTEM_SENDER_IDS, sanitizeAgentIdent).has(name)) {
+        json(res, { error: `'${name}' is not in SYSTEM_SENDER_IDS: add it to .env and restart the dashboard first, then issue the key` }, 400)
+        return true
+      }
+    }
+    // A messenger key expires under the operator key's rule (MVDKSCOPE917).
+    const mustExpire = scope === 'operator' || scope === 'messenger'
+    if (mustExpire && (body.expires_in_days === 0 || body.expires_in_days === null)) {
+      json(res, { error: `An ${scope} key must expire` }, 400)
       return true
     }
     // Expiry is opt-in for a full key: absent/0 means it lives until revoked.
-    let expiresInDays: number | undefined = scope === 'operator' ? OPERATOR_KEY_DEFAULT_EXPIRY_DAYS : undefined
+    let expiresInDays: number | undefined = mustExpire ? OPERATOR_KEY_DEFAULT_EXPIRY_DAYS : undefined
     if (body.expires_in_days !== undefined && body.expires_in_days !== null && body.expires_in_days !== 0) {
       const n = Number(body.expires_in_days)
-      // An operator key has its own, shorter ceiling (a year); a full key keeps 3650.
-      const maxDays = scope === 'operator' ? OPERATOR_KEY_MAX_EXPIRY_DAYS : DEVICE_KEY_MAX_EXPIRY_DAYS
+      // An operator (or messenger) key has its own, shorter ceiling (a year); a full key keeps 3650.
+      const maxDays = mustExpire ? OPERATOR_KEY_MAX_EXPIRY_DAYS : DEVICE_KEY_MAX_EXPIRY_DAYS
       if (!Number.isFinite(n) || n <= 0 || n > maxDays) {
         json(res, { error: `Invalid expires_in_days (1-${maxDays})` }, 400)
         return true

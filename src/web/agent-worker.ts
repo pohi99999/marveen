@@ -1,6 +1,7 @@
 import { tmuxStderr } from './tmux-stderr.js'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, lstatSync, symlinkSync, realpathSync } from 'node:fs'
+import { writeMcpJsonFile } from './atomic-write.js'
 import { join } from 'node:path'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -471,7 +472,9 @@ function seedWorkerCredentials(ctx: WorkerCtx, auth: WorkerAuthDecision = decide
   return applyWorkerCredentials(ctx.configDir, auth, {
     platform: process.platform,
     clearKeychain: () => clearWorkerKeychainEntry(ctx),
-    readHostLogin: readClaudeCodeOauthJson,
+    // WORKERLOGOUTWARN1121 (upstream #3015): with a fleet setup-token the worker is launched with
+    // CLAUDE_CODE_OAUTH_TOKEN from it, so a Keychain miss is not a logged-out worker: no warning then.
+    readHostLogin: () => readClaudeCodeOauthJson({ warnOnMiss: !hasFleetOauthToken() }),
   }) === 'seeded'
 }
 
@@ -670,7 +673,7 @@ export function ensureWorkerCwd(ctx: WorkerCtx = ctxSlow, auth: WorkerAuthDecisi
   if (!existsSync(ctx.scratchDir)) mkdirSync(ctx.scratchDir, { recursive: true })
 
   const mcpPath = join(ctx.home, '.mcp.json')
-  if (!existsSync(mcpPath)) writeFileSync(mcpPath, '{"mcpServers":{}}\n')
+  if (!existsSync(mcpPath)) writeMcpJsonFile(mcpPath, '{"mcpServers":{}}\n')
 
   if (!existsSync(ctx.configDir)) mkdirSync(ctx.configDir, { recursive: true })
 
