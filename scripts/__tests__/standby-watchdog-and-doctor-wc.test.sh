@@ -39,8 +39,10 @@ printf '#!/bin/bash\necho "curl $*" >> "%s"\necho 000\nexit 7\n' "$SHIM_LOG" > "
 echo ""
 echo "(1a) progress-watchdog installers honour store/.standby"
 make_root() { # dir provider
-  mkdir -p "$1/scripts/hooks" "$1/store" "$1/.claude"
+  mkdir -p "$1/scripts/hooks" "$1/scripts/lib" "$1/store" "$1/.claude"
   cp "$REPO/scripts/install-$2-progress-hook.sh" "$REPO/scripts/retire-progress-watchdog.sh" "$1/scripts/"
+  # The installers read the launchd PATH from this library on macOS since upstream v1.52.0 (ISSUE1968BREWPREFIX).
+  cp "$REPO/scripts/lib/helper-path.sh" "$1/scripts/lib/"
   cp "$REPO/scripts/hooks/$2_progress_watchdog.py" "$1/scripts/hooks/"
   printf 'SERVICE_ID=testbot\nBOT_NAME=TestBot\nCHANNEL_PROVIDER=%s\n' "$2" > "$1/test.env"
 }

@@ -1812,9 +1812,14 @@ export function readAgentSendExceptions(name: string): AgentSendException | null
 }
 
 // Mirror the tracked project settings, including their timeout and rc guard.
+// FORK: the shell matcher is two names here (`Bash|Monitor`, MONITORGATE1030) and one entry of the tracked settings,
+// so it is taken whole and only the rest is split at the bar. Upstream splits the whole string, which with two shell
+// names made `Bash` and `Monitor` two entries and pushed every later matcher one place on.
+const EMAIL_APPROVAL_REST = EMAIL_GATE_MATCHER.slice(SHELL_TOOL_MATCHER.length + 1).split('|')
 const EMAIL_APPROVAL_MATCHERS = [
-  ...EMAIL_GATE_MATCHER.split('|').slice(0, 6),
-  EMAIL_GATE_MATCHER.split('|').slice(6).join('|'),
+  SHELL_TOOL_MATCHER,
+  ...EMAIL_APPROVAL_REST.slice(0, 5),
+  EMAIL_APPROVAL_REST.slice(5).join('|'),
 ]
 export const EMAIL_APPROVAL_COMMAND = failClosedGateRun(
   'python3 -I -S "$CLAUDE_PROJECT_DIR/scripts/hooks/email-approval-gate.py"', 'email-approval-gate.py', 10,
@@ -1847,7 +1852,8 @@ export function injectEmailApprovalGate(existing: Record<string, unknown>): void
     ? existing.hooks : (existing.hooks = {})) as Record<string, unknown>
   const prev = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []
   hooks.PreToolUse = [...prev, ...EMAIL_APPROVAL_MATCHERS.map(matcher => ({
-    matcher, hooks: [{ type: 'command', command: EMAIL_APPROVAL_COMMAND, timeout: 10 }],
+    // FORK: a security gate's entry carries onFailure: block (card a62a27ce), as the tracked settings' entries do.
+    matcher, hooks: [securityGateHook(EMAIL_APPROVAL_COMMAND, 10)],
   }))]
 }
 

@@ -124,7 +124,8 @@ describe('channels.sh: no --model next to a custom provider', () => {
     const sh = readFileSync(join(__dirname, '..', '..', 'scripts', 'channels.sh'), 'utf-8')
     const inject = sh.indexOf('      CUSTOM_PROVIDER_ENV="$_cp_env"\n')
     const cleared = sh.indexOf('      MODEL_FLAG=""\n', inject)
-    const launch = sh.indexOf('${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}')
+    // FORK: the fork's main launch line carries --chrome before the model flag (the main session drives the browser).
+    const launch = sh.indexOf('${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} --chrome ${MODEL_FLAG}')
     expect(inject).toBeGreaterThan(-1)
     expect(cleared).toBeGreaterThan(inject)
     expect(cleared - inject).toBeLessThan(600)

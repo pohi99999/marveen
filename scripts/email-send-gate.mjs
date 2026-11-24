@@ -146,7 +146,9 @@ export function readAgentSendExceptions() {
 // EXACTAPPROVALBIND (card 90a639ef): the approval hook command exactly as the
 // scaffold writes it. Keep this byte-identical to EMAIL_APPROVAL_COMMAND in
 // src/web/agent-scaffold.ts; the approval command drift test pins the equality.
-export const EMAIL_APPROVAL_GATE_COMMAND = 'if command -v timeout >/dev/null 2>&1; then timeout -k 1 8 python3 -I -S "$CLAUDE_PROJECT_DIR/scripts/hooks/email-approval-gate.py"; else python3 -I -S "$CLAUDE_PROJECT_DIR/scripts/hooks/email-approval-gate.py"; fi; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 2 ] || { echo "governance-kapu (fail-closed): email-approval-gate.py: a kapu nem 0-val vagy 2-vel lepett ki (rc=$rc: betoltesi hiba, hianyzo fajl, jel vagy idotullepes). A hivas ezert TILTVA. Javitas: a kapu fajlja vagy egy fuggosege hibas, a hibauzenet fent." >&2; exit 2; }; exit "$rc"'
+// FORK: the gate's deadline is four seconds inside the hook's timeout, not two (card a62a27ce, gateDeadlineSec in
+// agent-scaffold.ts), so the mirrored command says 6 where upstream's says 8. The scaffold test pins the two equal.
+export const EMAIL_APPROVAL_GATE_COMMAND = 'if command -v timeout >/dev/null 2>&1; then timeout -k 1 6 python3 -I -S "$CLAUDE_PROJECT_DIR/scripts/hooks/email-approval-gate.py"; else python3 -I -S "$CLAUDE_PROJECT_DIR/scripts/hooks/email-approval-gate.py"; fi; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 2 ] || { echo "governance-kapu (fail-closed): email-approval-gate.py: a kapu nem 0-val vagy 2-vel lepett ki (rc=$rc: betoltesi hiba, hianyzo fajl, jel vagy idotullepes). A hivas ezert TILTVA. Javitas: a kapu fajlja vagy egy fuggosege hibas, a hibauzenet fent." >&2; exit 2; }; exit "$rc"'
 
 // SENDAPPROVALBIND (card f2ccb0bb, round 2): is the py approval gate actually
 // BOUND for this agent? The exception config above is read live, but the

@@ -194,7 +194,9 @@ describe('approval-gate removal is exact-command', () => {
   const approvalCommand = failClosedGateRun(
     'python3 -I -S "$CLAUDE_PROJECT_DIR/scripts/hooks/email-approval-gate.py"', 'email-approval-gate.py', 10,
   )
-  const approvalHook = { type: 'command', command: approvalCommand, timeout: 10 }
+  // FORK: the fork's gate entries carry onFailure: block (card a62a27ce), and its shell matcher is two names (MONITORGATE1030).
+  const approvalHook = { type: 'command', command: approvalCommand, timeout: 10, onFailure: 'block' }
+  const SHELL = 'Bash|Monitor'
   const siblingHook = { type: 'command', command: 'echo sibling', timeout: 5 }
   const exactApprovalHooks = (settings: Record<string, unknown>) =>
     entries(settings)
@@ -235,13 +237,13 @@ describe('approval-gate removal is exact-command', () => {
     // First call still repairs: the email-send gate itself is missing here.
     expect(ensureGovernanceGateCommands(agentName, profile, () => entry)).toBe(true)
     // The mixed entry survives intact (not treated as stale approval wiring).
-    expect(entries(readSettings())).toContainEqual({ matcher: 'Bash', hooks: [approvalHook, siblingHook] })
+    expect(entries(readSettings())).toContainEqual({ matcher: SHELL, hooks: [approvalHook, siblingHook] })
     expect(approvalEntries(readSettings())).toHaveLength(7)
     // Converged: nothing left to do while the grant stands.
     expect(ensureGovernanceGateCommands(agentName, profile, () => entry)).toBe(false)
     // Revocation removes the exact hook only; the sibling hook survives in place.
     expect(ensureGovernanceGateCommands(agentName, profile, () => null)).toBe(true)
-    expect(entries(readSettings())).toContainEqual({ matcher: 'Bash', hooks: [siblingHook] })
+    expect(entries(readSettings())).toContainEqual({ matcher: SHELL, hooks: [siblingHook] })
     expect(approvalEntries(readSettings())).toHaveLength(0)
     expect(ensureGovernanceGateCommands(agentName, profile, () => null)).toBe(false)
   })
