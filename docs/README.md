@@ -44,20 +44,22 @@ Minden lap két szemszögből mutatja be a funkciót:
 
 _Ezt a blokkot a `node scripts/docs-drift.mjs --write` frissíti; a `--check` (doctor.sh, CI) elbukik, ha elavult. Kézzel ne szerkeszd. Csak követett fájlokból számol (az `agents/` és a `.mcp.json` host-lokális, ezért nincs itt)._
 
-- Route-modulok (`src/web/routes/*.ts`): **67**, egyedi `/api/...` útvonal-literál bennük: **205**
-- Claude Code hookok (`.claude/settings.json`): **8** esemény, **58** bejegyzés, **37** szkript a `scripts/hooks/` alatt
+- Route-modulok (`src/web/routes/*.ts`): **70**, egyedi `/api/...` útvonal-literál bennük: **215**
+- Claude Code hookok (`.claude/settings.json`): **8** esemény, **60** bejegyzés, **38** szkript a `scripts/hooks/` alatt
 - Seed ütemezett feladatok (`scheduled-tasks/`): **7** -- dream-engine, heti-mentes-kulso, ledger-live-drain, memoria-heartbeat, napi-mentes, reggeli-napindito, usage-collect
 - Git-hook telepítők (`scripts/install-*-hook.sh`): **10** -- channel-image, commit-identity, git-guard, hook-proof, prod-tree-guard, review-gate, secret-gate, slack-progress, telegram-image, telegram-progress
-- Dokumentációs lapok a `docs/` alatt: **71**, ebből a fenti táblázat linkel **26**
+- Dokumentációs lapok a `docs/` alatt: **73**, ebből a fenti táblázat linkel **26**
 
 ### Lapok, amiket a fenti táblázat még nem sorol be
 
 - [MIGRATION](MIGRATION.md)
 - [agens-azonositas-api](agens-azonositas-api.md)
 - [agent-budgets](agent-budgets.md)
+- [agent-send-exceptions](agent-send-exceptions.md)
 - [agent-state-observer](agent-state-observer.md)
 - [archivalt-kartyak](archivalt-kartyak.md)
 - [bash-sandbox](bash-sandbox.md)
+- [board-access](board-access.md)
 - [channel-reply-guard](channel-reply-guard.md)
 - [computer-use-access](computer-use-access.md)
 - [config-reference](config-reference.md)
