@@ -14,8 +14,10 @@ import { projectsDirFor } from './active-model.js'
  *  versions: on 2026-11-24 it was "Login reached its time limit · Please run /login" (01:07-07:13 UTC, nine turns),
  *  which the first two markers did not read, so the healer stayed silent all night. */
 export const TRANSCRIPT_REAUTH_MARKERS: RegExp[] = [
-  /Login expired\s*[·\-–]\s*Please run\s+\/login/i,
-  /Login reached its time limit\s*[·\-–]\s*Please run\s+\/login/i,
+  // Anchored to the whole reply (Ellenőr 9130): Claude Code's dead-login reply is this sentence ALONE, and a normal
+  // reply that quotes it (a report about such a night) must not read as a dead login for the 12-hour window.
+  /^Login expired\s*[·\-–]\s*Please run\s+\/login\.?$/i,
+  /^Login reached its time limit\s*[·\-–]\s*Please run\s+\/login\.?$/i,
   /^Not logged in\b.*\/login/i,
 ]
 

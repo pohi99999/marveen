@@ -80,6 +80,13 @@ describe('reauth transcript signal (3fda6b5e)', () => {
     expect(TRANSCRIPT_WINDOW_MS).toBe(12 * 60 * 60_000)
     expect(detectReauthFromTranscriptLines([nov24(N0)], N0 + 13 * 60 * 60_000).needsReauth).toBe(false)
   })
+  it('a normal reply that QUOTES the sentence is not a dead login (Ellenőr 9130, limit a)', () => {
+    const quoting = 'Az éjjel a fő session ezt írta: "Login reached its time limit · Please run /login", ezért nem futottak a feladatok.'
+    expect(detectReauthFromTranscriptLines([nov24(N0, quoting, {})], N0 + 60_000).needsReauth).toBe(false)
+    expect(detectReauthFromTranscriptLines([line('assistant', 'Earlier: Login expired · Please run /login. Fixed now.', N0)], N0 + 60_000).needsReauth).toBe(false)
+    // The sentence alone, with or without a full stop, still is.
+    expect(detectReauthFromTranscriptLines([nov24(N0, 'Login reached its time limit · Please run /login.', {})], N0 + 60_000).needsReauth).toBe(true)
+  })
   it('a normal reply after the 11-24 turn means healed', () => {
     const lines = [nov24(N0), line('assistant', 'Reggeli napindító kész.', N0 + 60_000)]
     expect(detectReauthFromTranscriptLines(lines, N0 + 120_000).needsReauth).toBe(false)
