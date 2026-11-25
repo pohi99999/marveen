@@ -55,6 +55,35 @@ describe('reauth transcript signal (3fda6b5e)', () => {
     const r = combineMainReauthSignals({ needsReauth: true, reason: 'Not logged in' }, () => { read++; return { needsReauth: false } })
     expect(r.reason).toBe('Not logged in'); expect(read).toBe(0)
   })
+  // MAINUNAUTHALERT1125: the 2026-11-24 night (24b6edf4): nine scheduled prompts answered with the wording below,
+  // the entry flagged by Claude Code itself. Neither the text nor the flag was read before, so the healer was silent.
+  const nov24 = (atMs: number, text = 'Login reached its time limit · Please run /login', flags: Record<string, unknown> = { isApiErrorMessage: true, error: 'authentication_failed' }) =>
+    JSON.stringify({ type: 'assistant', timestamp: new Date(atMs).toISOString(), ...flags, message: { role: 'assistant', content: [{ type: 'text', text }] } })
+  const N0 = Date.parse('2026-11-24T01:07:27.000Z')
+  it('the 11-24 wording "Login reached its time limit · Please run /login" is a dead login, with the transcript: prefix', () => {
+    const r = detectReauthFromTranscriptLines([nov24(N0)], N0 + 60_000)
+    expect(r.needsReauth).toBe(true)
+    expect(r.reason).toMatch(/^transcript: Login reached its time limit/)
+  })
+  it('the wording alone is enough (no flags), and the flag alone is enough (a wording not seen yet)', () => {
+    expect(detectReauthFromTranscriptLines([nov24(N0, undefined, {})], N0 + 60_000).needsReauth).toBe(true)
+    const r = detectReauthFromTranscriptLines([nov24(N0, 'Something new · try again later')], N0 + 60_000)
+    expect(r.needsReauth).toBe(true)
+    expect(r.reason).toMatch(/^transcript: /)
+  })
+  it('the flag is read narrowly: another API error, or the flag without an authentication error, is not a dead login', () => {
+    expect(detectReauthFromTranscriptLines([nov24(N0, 'Overloaded', { isApiErrorMessage: true, error: 'overloaded_error' })], N0 + 60_000).needsReauth).toBe(false)
+    expect(detectReauthFromTranscriptLines([nov24(N0, 'Something', { isApiErrorMessage: false, error: 'authentication_failed' })], N0 + 60_000).needsReauth).toBe(false)
+  })
+  it('the night\'s gap between prompts (01:07 -> 05:05, four hours) does not reset it; half a day does', () => {
+    expect(detectReauthFromTranscriptLines([nov24(N0)], N0 + 4 * 60 * 60_000).needsReauth).toBe(true)
+    expect(TRANSCRIPT_WINDOW_MS).toBe(12 * 60 * 60_000)
+    expect(detectReauthFromTranscriptLines([nov24(N0)], N0 + 13 * 60 * 60_000).needsReauth).toBe(false)
+  })
+  it('a normal reply after the 11-24 turn means healed', () => {
+    const lines = [nov24(N0), line('assistant', 'Reggeli napindító kész.', N0 + 60_000)]
+    expect(detectReauthFromTranscriptLines(lines, N0 + 120_000).needsReauth).toBe(false)
+  })
   it('a transcript-proven dead login is escalate-only (a fresh respawn reads the same dead file); a pane-proven one may restart', () => {
     expect(shouldSkipMainRestartForFileDeadLogin('transcript: Login expired · Please run /login')).toBe(true)
     expect(shouldSkipMainRestartForFileDeadLogin('Not logged in')).toBe(false)

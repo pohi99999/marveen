@@ -49,6 +49,46 @@ const DEAD_PROBE_THRESHOLD = 3          // ~9 min of consecutive dead-token prob
 // produced ~10 identical alerts in one morning).
 const ESCALATION_COOLDOWN_MS = 3 * 60 * 60 * 1000 // 1 alert / agent / 3h (re-alerts if still dead)
 
+// MAINUNAUTHALERT1125 (Péter 18308, Marveen 9121): the MAIN session is what the owner talks to and what runs every
+// scheduled task, so its dead login is alerted faster than a sub-agent's, at night too, and once more when it is back.
+// 2026-11-24 01:07-07:13 UTC it answered nine scheduled prompts with "Login reached its time limit · Please run /login"
+// and nobody was told: the transcript markers did not know the wording, the transcript window dropped the state
+// between the night's prompts, and quiet hours would have held the alert until morning anyway.
+// - threshold: one probe when the TRANSCRIPT proves it (Claude Code's own error turn, not a redrawable pane), two
+//   when only the pane shows it (a pane can flicker); with the 3 min sweep that is an alert within ~3-6 minutes;
+// - cooldown: at most one reminder an hour while it lasts;
+// - quiet hours do not hold it back (a dead main session is a mute fleet; Péter asked for the alert);
+// - when the session is logged in again after an alert, one "rendben" line.
+export const MAIN_ESCALATION_COOLDOWN_MS = 60 * 60 * 1000
+
+/** The threshold and cooldown of one session's spell. Pure, for the tests. */
+export function healerThresholds(isMain: boolean, reason: string | undefined): ReauthHealerThresholds {
+  if (!isMain) return { threshold: DEAD_PROBE_THRESHOLD, cooldownMs: ESCALATION_COOLDOWN_MS }
+  return { threshold: typeof reason === 'string' && reason.startsWith('transcript:') ? 1 : 2, cooldownMs: MAIN_ESCALATION_COOLDOWN_MS }
+}
+
+/** Whether quiet hours hold this escalation back: never for the main session (MAINUNAUTHALERT1125). */
+export function escalationQuiet(isMain: boolean, quiet: boolean): boolean {
+  return isMain ? false : quiet
+}
+
+/** Whether the main session's "logged in again" line is due: an alert went out in this spell, and now the session
+ *  is up and shows no dead login. A session that is merely DOWN (no pane) is not back: nothing is said then. */
+export function mainRecoveryDue(s: { alertOpen: boolean; sessionAlive: boolean; needsReauth: boolean }): boolean {
+  return s.alertOpen && s.sessionAlive && !s.needsReauth
+}
+
+/** The owner's message for the main session's dead login: what is wrong, and the one thing to do. No token, no path,
+ *  no credential detail: the reason Claude Code gave is left out on purpose. */
+export function buildMainEscalationMessage(label: string, consecutiveDead: number, firstAlert: boolean): string {
+  const since = firstAlert ? '' : ` (kb. ${Math.round((consecutiveDead * PROBE_INTERVAL_MS) / 60_000)} perce)`
+  return `🔐 A fő munkamenet (${label}) ${firstAlert ? 'nincs bejelentkezve' : 'még mindig nincs bejelentkezve'}${since}: a feladatai nem futnak, az üzenetekre nem válaszol. Teendő: a dashboardon a ${label} lapján a "Channels restart" gomb; ha utána is ez a helyzet, a fő munkamenet paneljén /login kell.`
+}
+
+export function buildMainRecoveredMessage(label: string): string {
+  return `✅ A fő munkamenet (${label}) újra be van jelentkezve, rendben.`
+}
+
 export interface ReauthHealerState {
   consecutiveDead: number
   lastActionAtMs: number | null
@@ -170,6 +210,8 @@ function hostCanInteractiveLogin(): boolean {
 }
 
 const watchState = new Map<string, ReauthHealerState>()
+/** MAINUNAUTHALERT1125: an alert about the main session's dead login went out and its "rendben" line has not yet. */
+let mainAlertOpen = false
 
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)) }
 
@@ -235,6 +277,9 @@ export interface QuietSuppressedEntry {
   firstRunGate?: boolean
   /** MAINAUTH1107: the main agent runs on an API key: the failure is the key's (invalid, revoked, out of credit). */
   apiKey?: boolean
+  /** MAINUNAUTHALERT1125: the main session's dead login (its own message), and whether it is the spell's first alert. */
+  main?: boolean
+  firstAlert?: boolean
 }
 
 const quietSuppressed = new Map<string, QuietSuppressedEntry>()
@@ -291,6 +336,12 @@ export function routeEscalation(
   if (quiet) {
     suppressed.set(entry.session, entry)
     logger.warn({ label: entry.label, session: entry.session, reason: entry.reason }, 'reauth-healer: dead token escalation suppressed (quiet hours), queued for morning summary')
+    return
+  }
+  // MAINUNAUTHALERT1125: the main session's dead OAuth login gets its own message. Its API-key failure and its
+  // first-run gate keep the messages they had.
+  if (entry.main === true && entry.apiKey !== true && entry.firstRunGate !== true) {
+    notify(buildMainEscalationMessage(entry.label, entry.consecutiveDead, entry.firstAlert !== false))
     return
   }
   notify(buildEscalationMessage(entry.label, entry.reason, entry.consecutiveDead, entry.usesOwnTokenFile === true, entry.tokenFileInvalid === true, entry.firstRunGate === true, entry.apiKey === true))
@@ -477,6 +528,9 @@ export function checkSession(label: string, session: string, isMain: boolean, qu
     ? combineMainReauthSignals(detectReauthNeeded(pane), () => detectReauthFromTranscript(PROJECT_ROOT))
     : detectReauthNeeded(pane)
   const prev = watchState.get(session) ?? NO_REAUTH_STATE
+  // MAINUNAUTHALERT1125: a main session that is DOWN (no pane, e.g. mid-restart) is neither dead-logged-in nor
+  // back: keep its spell as it is, so the restart does not reset the reminder cadence or swallow the "rendben" line.
+  if (isMain && !sessionAlive) return
   // The reasons produced by the two first-run-gate markers in reauth-detect.
   const isFirstRunGate = /onboarding picker|sign-in screen/i.test(reauth.reason ?? '')
 
@@ -487,8 +541,15 @@ export function checkSession(label: string, session: string, isMain: boolean, qu
   // The main agent is never /login-healed here (isMain gates every branch), so evaluateSession skips the disk read for it.
   const { decision, tokenFileState, usesOwnTokenFile, escalationHint } = evaluateSession(
     { label, isMain, isDeadToken: reauth.needsReauth, sessionAlive, canInteractiveLogin: hostCanInteractiveLogin(), isFirstRunGate, prev, nowMs: Date.now() },
-    { threshold: DEAD_PROBE_THRESHOLD, cooldownMs: ESCALATION_COOLDOWN_MS },
+    healerThresholds(isMain, reauth.reason),
   )
+
+  // MAINUNAUTHALERT1125: the main session logged in again after an alert: one line, then the spell is over.
+  if (isMain && mainRecoveryDue({ alertOpen: mainAlertOpen, sessionAlive, needsReauth: reauth.needsReauth })) {
+    mainAlertOpen = false
+    logger.info({ label, session }, 'reauth-healer: main session logged in again after an alert -- telling the owner')
+    sendNotify(buildMainRecoveredMessage(label))
+  }
 
   if (decision.next.consecutiveDead === 0) {
     watchState.delete(session)
@@ -525,10 +586,14 @@ export function checkSession(label: string, session: string, isMain: boolean, qu
   if (decision.escalate) {
     logger.error({ label, session, reason: reauth.reason, quiet, mainOnKey }, mainOnKey ? 'reauth-healer: the main agent\'s API key fails on a live session -- escalating to owner' : 'reauth-healer: dead OAuth token on live session -- escalating to owner')
     routeEscalation(
-      { session, label, reason: reauth.reason ?? 'auth failure', consecutiveDead: decision.next.consecutiveDead, ...escalationHint, ...(mainOnKey ? { apiKey: true } : {}) },
-      quiet,
+      {
+        session, label, reason: reauth.reason ?? 'auth failure', consecutiveDead: decision.next.consecutiveDead, ...escalationHint, ...(mainOnKey ? { apiKey: true } : {}),
+        ...(isMain ? { main: true, firstAlert: prev.lastActionAtMs == null } : {}),
+      },
+      escalationQuiet(isMain, quiet),
       sendNotify,
     )
+    if (isMain) mainAlertOpen = true
     // A genuine 401 family failure while a fleet token exists: probe that token
     // once and quarantine it if the probe proves it dead (server-side
     // revocation). Without this there is NO recovery path -- every new launch
