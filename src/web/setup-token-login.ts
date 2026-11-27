@@ -89,8 +89,8 @@ export function extractOauthUrl(raw: string): string | null {
 const SGR_RE = /^\x1b\[[0-9;]*m/
 const RESET_RE = /^\x1b\[(?:0|39)?m/
 const TOKEN_CHAR = /[A-Za-z0-9_-]/
-// The same shape claude-credentials-guard.ts accepts (OAUTH_TOKEN_RX).
-const SETUP_TOKEN_SHAPE = /^sk-ant-oat01-[A-Za-z0-9_-]{40,}$/
+// The same shape claude-credentials-guard.ts accepts (OAUTH_TOKEN_RX): oat01- or oat02- (OAT02TOKEN1127).
+const SETUP_TOKEN_SHAPE = /^sk-ant-oat0[12]-[A-Za-z0-9_-]{40,}$/
 
 /** Every `sk-ant-` occurrence is tried in order: prose that names the prefix
  * before the real token must not hide it. */

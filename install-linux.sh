@@ -1278,7 +1278,7 @@ else
     echo -e "  ${BOLD}2.${NC} Futtasd: ${BLUE}claude setup-token${NC}"
     echo -e "  ${BOLD}3.${NC} A bongeszo megnyilik, jelentkezz be a Claude fiokoddal"
     echo -e "  ${BOLD}4.${NC} Masold vissza ide a kiirt tokent:"
-    echo -e "  ${DIM}A token sk-ant-oat01- kezdetu. A bongeszoben megjeleno kod NEM a token:${NC}"
+    echo -e "  ${DIM}A token sk-ant-oat01- vagy sk-ant-oat02- kezdetu. A bongeszoben megjeleno kod NEM a token:${NC}"
     echo -e "  ${DIM}azt a setup-token ablakaba kell beirni, es utana a terminal irja ki a tokent.${NC}"
     echo ""
     # Shape-check BEFORE the value is written anywhere. Without it any paste was
@@ -1294,11 +1294,11 @@ else
       _tok="$(printf '%s' "$OAUTH_TOKEN_INPUT" | tr -d '[:space:]')"
       OAUTH_TOKEN_INPUT=""
       [ -z "$_tok" ] && break
-      if printf '%s' "$_tok" | grep -Eq '^sk-ant-oat01-[A-Za-z0-9_-]{40,}$'; then
+      if printf '%s' "$_tok" | grep -Eq '^sk-ant-oat0[12]-[A-Za-z0-9_-]{40,}$'; then
         OAUTH_TOKEN_INPUT="$_tok"
         break
       fi
-      warn "Ez nem setup-token (nem sk-ant-oat01- kezdetu, vagy tul rovid). Probald ujra, vagy hagyd uresen a kihagyashoz."
+      warn "Ez nem setup-token (nem sk-ant-oat01- vagy sk-ant-oat02- kezdetu, vagy tul rovid). Probald ujra, vagy hagyd uresen a kihagyashoz."
     done
     unset _tok _try
     if [ -n "$OAUTH_TOKEN_INPUT" ]; then
@@ -1885,7 +1885,7 @@ chmod 600 "$INSTALL_DIR/.env"
 # the dashboard wizard (/api/onboarding/claude-auth) and scripts/auth.sh.
 # Shape-gated (a garbage paste must not poison every sub-agent launch) and
 # written under umask 077 (no 644 window before a chmod).
-if [ -n "${OAUTH_TOKEN_INPUT:-}" ] && printf '%s' "$OAUTH_TOKEN_INPUT" | grep -Eq '^sk-ant-oat01-[A-Za-z0-9_-]{40,}$'; then
+if [ -n "${OAUTH_TOKEN_INPUT:-}" ] && printf '%s' "$OAUTH_TOKEN_INPUT" | grep -Eq '^sk-ant-oat0[12]-[A-Za-z0-9_-]{40,}$'; then
   mkdir -p "$INSTALL_DIR/store"
   (umask 077 && printf '%s' "$OAUTH_TOKEN_INPUT" > "$INSTALL_DIR/store/.claude-oauth-token")
   ok "Fleet setup-token eltarolva (store/.claude-oauth-token) -- per-agent izolacio aktiv"

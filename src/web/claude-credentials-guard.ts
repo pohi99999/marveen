@@ -36,7 +36,9 @@ const BAK_CREDENTIALS = HOME_CREDENTIALS + '.bak'
 // sha256(token) of the last token that PASSED the live test. Lets a healthy
 // token skip the (network) re-test on subsequent launches.
 const VERIFIED_STAMP = join(STORE_DIR, '.claude-oauth-token.verified')
-const OAUTH_TOKEN_RX = /^sk-ant-oat01-[A-Za-z0-9_-]{40,}$/
+// Claude Code 2.1.332 (release notes, 2026-11-25): the CLAUDE_CODE_OAUTH_TOKEN prefix can end in oat02- as well as
+// oat01-. Both are accepted, nothing else: an unknown generation stays refused until it is named here (OAT02TOKEN1127).
+const OAUTH_TOKEN_RX = /^sk-ant-oat0[12]-[A-Za-z0-9_-]{40,}$/
 const LIVE_TEST_MODEL = 'claude-haiku-4-5-20251001'
 
 /** Opt-in, default OFF. Env flag so a pilot host enables it in isolation. */
@@ -51,7 +53,7 @@ function readFleetToken(): string | null {
   } catch { return null }
 }
 
-/** Bare setup-token shape check (the ~109-byte sk-ant-oat01- form). */
+/** Bare setup-token shape check (the ~109-byte sk-ant-oat01- or sk-ant-oat02- form). */
 export function looksLikeSetupToken(token: string): boolean {
   return OAUTH_TOKEN_RX.test(token)
 }
