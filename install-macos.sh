@@ -752,10 +752,10 @@ else
   echo -e "  ${BOLD}2.${NC} Masold ide a kiirt tokent (Enter = kihagyas):"
   read -rp "  OAuth token: " MACOS_OAUTH_TOKEN_INPUT
   if [ -n "$MACOS_OAUTH_TOKEN_INPUT" ]; then
-    if printf '%s' "$MACOS_OAUTH_TOKEN_INPUT" | grep -Eq '^sk-ant-oat01-[A-Za-z0-9_-]{40,}$'; then
+    if printf '%s' "$MACOS_OAUTH_TOKEN_INPUT" | grep -Eq '^sk-ant-oat0[12]-[A-Za-z0-9_-]{40,}$'; then
       ok "Token formailag rendben, elmentjuk a szolgaltatasoknak"
     else
-      warn "A beirt ertek nem setup-token alaku (sk-ant-oat01-...). Elmentjuk, de ellenorizd."
+      warn "A beirt ertek nem setup-token alaku (sk-ant-oat01-... vagy sk-ant-oat02-...). Elmentjuk, de ellenorizd."
     fi
   else
     warn "Token nem lett megadva -- az ugynokok igy nem fognak elindulni."
@@ -1318,7 +1318,7 @@ mkdir -p "$INSTALL_DIR/agents"
 if [ -n "${MACOS_OAUTH_TOKEN_INPUT:-}" ]; then
   env_merge_key CLAUDE_CODE_OAUTH_TOKEN "$MACOS_OAUTH_TOKEN_INPUT"
   chmod 600 "$INSTALL_DIR/.env"
-  if printf '%s' "$MACOS_OAUTH_TOKEN_INPUT" | grep -Eq '^sk-ant-oat01-[A-Za-z0-9_-]{40,}$'; then
+  if printf '%s' "$MACOS_OAUTH_TOKEN_INPUT" | grep -Eq '^sk-ant-oat0[12]-[A-Za-z0-9_-]{40,}$'; then
     (umask 077 && printf '%s' "$MACOS_OAUTH_TOKEN_INPUT" > "$INSTALL_DIR/store/.claude-oauth-token")
     ok "Fleet setup-token eltarolva (store/.claude-oauth-token) -- per-agent izolacio aktiv"
     # Point the MAIN agent at an isolated config dir too, not just the
