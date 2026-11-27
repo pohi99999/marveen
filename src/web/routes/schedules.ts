@@ -250,6 +250,22 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     // the schedule_command consumer; the owner gate stays here, between the two, in the order it always ran.
     const v = validateScheduleCreate(data)
     if (!v.ok) { json(res, v.result.body, v.result.status); return true }
+    // The create writes type and targetSession of the owner fields, and on a command task also command and timeoutMs
+    // (writeNewScheduledTask); any other one with a value used to be dropped behind a 200. Refuse it by name, so the
+    // caller sets it after creation instead of believing it is set (upstream c216f2ee, fitted to the fork's create).
+    // telegramChatId 'none' is no delivery instruction, not a value: skipped here as in changedScheduleOwnerFields.
+    const written = new Set<string>(['type', 'targetSession', ...(data.type === 'command' ? ['command', 'timeoutMs'] : [])])
+    const unwritten = SCHEDULE_OWNER_FIELDS.filter((k) => {
+      const val = (data as Record<string, unknown>)[k]
+      return !written.has(k) && val != null && val !== '' && !(k === 'telegramChatId' && val === 'none')
+    })
+    if (unwritten.length > 0) {
+      json(res, {
+        error: `Creating a task does not set ${unwritten.join(', ')}. Create it without, then set it with PUT /api/schedules/${v.value.name} (an owner session).`,
+        fields: unwritten,
+      }, 400)
+      return true
+    }
     // OWNEREXEC1109: a 'command' task is a shell command, created only by the owner (see SCHEDULE_OWNER_FIELDS). The
     // main agent asks for one through POST /api/schedule-command-specs instead, and the owner approves it.
     if (data.type === 'command' && !mayActAsOwner(ctx.auth, req)) {

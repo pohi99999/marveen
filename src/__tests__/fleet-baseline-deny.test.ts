@@ -13,10 +13,11 @@ import { join } from 'node:path'
 //   (A) sub-agents  -> the code-level floor in writeAgentSettingsFromProfile
 //   (B) main agent  -> the repo's tracked project settings (.claude/settings.json),
 //       which the scaffold deliberately never writes (#1305).
-import { writeAgentSettingsFromProfile, agentSettingsPath, FLEET_BASELINE_DENY, BASH_EGRESS_DENY, SUBAGENT_TOTP_STORE_DENY, SUBAGENT_VAULT_KEY_DENY } from '../web/agent-scaffold.js'
+import { writeAgentSettingsFromProfile, agentSettingsPath, FLEET_BASELINE_DENY, BASH_EGRESS_DENY, SUBAGENT_TOTP_STORE_DENY, SUBAGENT_VAULT_KEY_DENY, SUBAGENT_INBOUND_SIG_KEY_DENY } from '../web/agent-scaffold.js'
 import { agentDir } from '../web/agent-config.js'
 import { listProfileTemplates, loadProfileTemplate, resolveProfilePlaceholders } from '../web/profiles.js'
 import { PROJECT_ROOT } from '../config.js'
+import { AGENT_BROWSER_MCP_NAME } from '../web/agent-browser.js'
 
 const NAME = 'fleet-baseline-test-agent'
 const DIR = agentDir(NAME)
@@ -81,6 +82,31 @@ describe('(A) the baseline reaches EVERY profile, including ones added later', (
       writeAgentSettingsFromProfile(NAME, loadProfileTemplate(profile.id))
       writeAgentSettingsFromProfile(NAME, loadProfileTemplate(profile.id))
       for (const rule of SUBAGENT_VAULT_KEY_DENY) expect(readDeny().filter(r => r === rule)).toHaveLength(1)
+    }
+  })
+
+  it('HMACINBOUND1125: every profile denies the Read tool on the inbound signature key, exactly once', () => {
+    expect(SUBAGENT_INBOUND_SIG_KEY_DENY).toEqual(['Read(//**/store/.inbound-sig-key)'])
+    for (const profile of profiles) {
+      writeAgentSettingsFromProfile(NAME, loadProfileTemplate(profile.id))
+      writeAgentSettingsFromProfile(NAME, loadProfileTemplate(profile.id))
+      for (const rule of SUBAGENT_INBOUND_SIG_KEY_DENY) expect(readDeny().filter(r => r === rule)).toHaveLength(1)
+    }
+  })
+
+  // CDPP0DENY1126 (Dani, CDPSUTI1126): the fleet's own browser server is registered under AGENT_BROWSER_MCP_NAME and
+  // exposes browser_run_code_unsafe (HttpOnly cookie values back to the model, a fetch to any origin). The floor denies
+  // it under that server's name, derived from the same constant, on every profile and every respawn; the older
+  // mcp__playwright__ row stays for an agent that still has a server under that name.
+  it('CDPP0DENY1126: every profile denies browser_run_code_unsafe of the marveen-browser server, exactly once, the playwright row kept', () => {
+    const rule = `mcp__${AGENT_BROWSER_MCP_NAME}__browser_run_code_unsafe`
+    expect(rule).toBe('mcp__marveen-browser__browser_run_code_unsafe')
+    for (const profile of profiles) {
+      writeAgentSettingsFromProfile(NAME, loadProfileTemplate(profile.id))
+      writeAgentSettingsFromProfile(NAME, loadProfileTemplate(profile.id))
+      const deny = readDeny()
+      expect(deny.filter(r => r === rule), profile.id).toHaveLength(1)
+      expect(deny.filter(r => r === 'mcp__playwright__browser_run_code_unsafe'), profile.id).toHaveLength(1)
     }
   })
 

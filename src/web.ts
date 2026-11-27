@@ -14,6 +14,7 @@ import { readOperatorAccess } from './web/operator-access.js'
 import { boardGateDecision, readBoardAccess } from './web/board-access.js'
 import { tryHandleBoard } from './web/routes/board.js'
 import { colleagueGateDecision } from './web/colleague-gate.js'
+import { approverGateDecision } from './web/approver-gate.js'
 import { lanLockPreAuth, lanLockActiveNow, keepOnlyColleagueCookie, LAN_LOCK_CUT_OFF } from './web/colleague-lan-lock.js'
 import { tryHandleColleague } from './web/routes/colleague.js'
 import { sweepExpiredColleagueSessions } from './web/colleague-sessions.js'
@@ -71,6 +72,7 @@ import { tryHandleBridgeServicePorts } from './web/routes/bridge-service-ports.j
 import { tryHandleHttpProbe } from './web/routes/http-probe.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
+import { tryHandleCompanion } from './web/routes/companion.js'
 import { tryHandleFederation } from './web/routes/federation.js'
 import { startFederationPoller } from './web/federation/poller.js'
 import { registerBuiltinCommands } from './web/builtin-commands.js'
@@ -255,6 +257,15 @@ export function startWebServer(port = 3420): http.Server {
       res.end(JSON.stringify({ error: 'Forbidden for this credential', rule: 'colleague-scope', reason: colleagueDenied.reason }))
       return
     }
+    // DELEGAPPROVER1123 (approver-gate.ts): an approver session reaches its sign-in and the approval decision only,
+    // decided here for EVERY path, before any handler runs.
+    const approverDenied = approverGateDecision(auth, path, method)
+    if (approverDenied) {
+      logger.warn({ path, method, approver: auth.kind === 'approver' ? auth.user : undefined, reason: approverDenied }, 'approver gate: denied')
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Forbidden for this credential', rule: 'approver-scope', reason: approverDenied }))
+      return
+    }
     // DASHOPERATOR1005: an operator-scoped key reaches /api/operator/* only,
     // decided here, before ANY handler (including network-info below) runs.
     if (requiresAuth(path, method)) {
@@ -284,6 +295,7 @@ export function startWebServer(port = 3420): http.Server {
       : auth.kind === 'federation' ? { kind: 'federation' as const, peer: auth.peer }
       : auth.kind === 'setup' ? { kind: 'setup' as const }
       : auth.kind === 'colleague' ? { kind: 'colleague' as const, colleague: auth.colleague, person: auth.person }
+      : auth.kind === 'approver' ? { kind: 'approver' as const, user: auth.user }
       : undefined
 
     // The mobile-login QR needs a URL the phone can actually reach. When the
@@ -308,6 +320,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleHttpProbe(routeCtx)) return
       if (await tryHandleProfiles(routeCtx)) return
       if (await tryHandleMessages(routeCtx)) return
+      if (await tryHandleCompanion(routeCtx)) return
       if (await tryHandleFederation(routeCtx)) return
       if (await tryHandleDailyLog(routeCtx)) return
       if (await tryHandlePrLedger(routeCtx)) return

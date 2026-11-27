@@ -67,8 +67,9 @@ describe('resumePrompt carries the prod-tree constraint on every variant', () =>
 // fresh session never looked back, and completed_at is unused (0/37 measured)
 // so the loss was invisible. The resume prompt is the fresh session's ONLY
 // context, so the re-read instruction must be present on EVERY variant, and
-// it must demand an OBSERVABLE trace (ack to the sender) -- an instruction
-// whose success cannot be observed would run into the same blindness.
+// it must demand an OBSERVABLE trace -- an instruction whose success cannot be
+// observed would run into the same blindness. The trace is the closed row
+// (notify:false), not an ack message: each ack woke its sender for a full turn.
 describe('resumePrompt carries the restart-window re-read on every variant', () => {
   const variants = [
     ['without a handoff', () => resumePrompt('samu', '/x/HANDOFF.md', false)],
@@ -77,29 +78,18 @@ describe('resumePrompt carries the restart-window re-read on every variant', () 
     ['with unmeasurable freshness', () => resumePrompt('samu', '/x/HANDOFF.md', true, 'unknown')],
     ['main agent', () => resumePrompt('marveen', '/x/HANDOFF.md', true)],
   ] as const
-  // The agent name each variant passes as the first argument, so the system
-  // branch can be pinned to the caller's OWN queue (to=<name>), not to a fixed
-  // string. Read from the label list, not from Function.toString(): the
-  // transform may rewrite quotes and the regex would silently fall back.
-  const agentOf: Record<string, string> = { 'main agent': 'marveen' }
-  const name = (label: string) => agentOf[label] ?? 'samu'
   for (const [label, make] of variants) {
     it(label, () => {
       const p = make()
       expect(p).toContain('RESTART-ABLAK')
       // The queue re-read names the concrete endpoint, not a vague "check".
       expect(p).toContain('api/messages?agent=')
-      // The observable trace: an ack to the SENDER, required even when the
-      // item needs no work -- this is what makes the v1 measurable at all.
-      expect(p).toContain('nyugtát a feladónak')
-      expect(p).toContain('akkor is, ha nincs belőle teendő')
-      // A system-sent item (context-guard / restart-gate directive) cannot be
-      // acked back to "system": /api/messages does not deliver to that sender,
-      // and the fresh session logged a handoff-failure twice (2026-09-25 msg
-      // 1983, 2026-09-26 msgs 2027 -> 2029). The ack for those goes to the
-      // agent's OWN queue, and the prompt must name that queue explicitly.
-      expect(p).toContain('ha a feladó system, a saját sorodba')
-      expect(p).toMatch(new RegExp(`ha a feladó system, a saját sorodba \\(to=${name(label)}\\)`))
+      // The observable trace: the row closed without a notification, and no
+      // separate ack to the sender (the ack woke the sender for a whole turn).
+      expect(p).toContain('KÖTELEZŐ MEGFIGYELHETŐ NYOM: a lezárt sor')
+      expect(p).toContain('PUT /api/messages/<id> {"status":"done","notify":false}')
+      expect(p).toContain('nyugtát NE küldj')
+      expect(p).not.toContain('felvéve a friss sessionben')
     })
   }
 })
