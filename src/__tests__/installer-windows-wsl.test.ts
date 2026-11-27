@@ -44,7 +44,7 @@ describe('install-linux.sh on WSL', () => {
     // SECSZIVEK1007: the token no longer goes into an rc file; its first write
     // is the .env line for the services.
     const rcWrite = linux.indexOf('CLAUDE_AUTH_ENV_LINE="CLAUDE_CODE_OAUTH_TOKEN=${OAUTH_TOKEN_INPUT}"')
-    const check = linux.indexOf("grep -Eq '^sk-ant-oat01-", prompt)
+    const check = linux.indexOf("grep -Eq '^sk-ant-oat0[12]-", prompt)
     expect(prompt).toBeGreaterThan(0)
     expect(check).toBeGreaterThan(prompt)
     expect(check).toBeLessThan(rcWrite)
@@ -62,6 +62,10 @@ describe('install-linux.sh on WSL', () => {
       })
     const tok = 'sk-ant-oat01-' + 'A'.repeat(60)
     expect(run(`abcDEF123#xyz\n${tok}  \n`)).toBe(tok)
+    // OAT02TOKEN1127: Claude Code 2.1.332 may hand out an oat02 setup-token.
+    const tok2 = 'sk-ant-oat02-' + 'A'.repeat(60)
+    expect(run(`abcDEF123#xyz\n${tok2}\n`)).toBe(tok2)
+    expect(run(`sk-ant-oat03-${'A'.repeat(60)}\n\n`)).toBe('')
     expect(run('x\ny\nz\n')).toBe('')
     expect(run('\n')).toBe('')
   })

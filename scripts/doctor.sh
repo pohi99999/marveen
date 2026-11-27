@@ -262,10 +262,10 @@ fi
 
 # --- Claude headless auth (official: long-lived setup-token) ---
 echo -e "\n${BOLD}Claude headless auth${RESET}"
-if grep -qE '^CLAUDE_CODE_OAUTH_TOKEN="?sk-ant-oat01-' .env 2>/dev/null; then
+if grep -qE '^CLAUDE_CODE_OAUTH_TOKEN="?sk-ant-oat0[12]-' .env 2>/dev/null; then
   ok "Headless token: long-lived setup-token configured (CLAUDE_CODE_OAUTH_TOKEN, ~1 year)"
 elif grep -qE '^CLAUDE_CODE_OAUTH_TOKEN=' .env 2>/dev/null; then
-  warn "CLAUDE_CODE_OAUTH_TOKEN set, but not sk-ant-oat01- format (may be the wrong type)"
+  warn "CLAUDE_CODE_OAUTH_TOKEN set, but not sk-ant-oat01-/oat02- format (may be the wrong type)"
 elif [ "$(uname -s)" = "Darwin" ] && /usr/bin/security find-generic-password \
      -s "Claude Code-credentials" -a "$(id -un)" >/dev/null 2>&1; then
   ok "Headless token: not set, but the macOS Keychain holds a Claude login (interactive sessions are fine; only add a setup-token if you run agents headless)"
