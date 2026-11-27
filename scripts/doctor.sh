@@ -426,12 +426,12 @@ else
 fi
 
 # --- MCP endpoints ---
-# Channel endpoints are already covered above (Telegram bridge section, via
+# Channel endpoints are already covered above (Channel bridge section, via
 # verify-channels-health.sh). MCP servers were the gap.
 #
 # The inventory is read from the CONFIG FILES, never from `claude mcp list`.
 # Any `claude ...` process started from a live session takes over the channel
-# plugin's MCP connection and silently deafens the Telegram bridge -- that is
+# plugin's MCP connection and silently deafens the channel bridge -- that is
 # how the bridge went down on 2026-09-07. See the csatorna-plugin-lecsatlakozas
 # skill.
 #
