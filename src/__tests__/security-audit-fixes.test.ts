@@ -65,7 +65,7 @@ describe('voice TTS directive never carries the dashboard token value', () => {
   })
 
   it('references the token file instead of embedding its contents', () => {
-    const d = buildTtsDirective({ chatId: '1', stateDir: '/tmp/x', voiceModel: 'v' })
+    const d = buildTtsDirective({ chatId: '1', agentId: 'a', voiceModel: 'v' })
     expect(d).not.toBeNull()
     expect(d!).not.toContain(token)
     expect(d!).toContain(`Bearer $(cat '${tokenPath}')`)

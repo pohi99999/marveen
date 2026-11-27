@@ -108,8 +108,13 @@ describe('an install reached through a symlink', () => {
 
 describe('web.ts wiring (pinned in source)', () => {
   const src = readFileSync(join(__dirname, '..', 'web.ts'), 'utf-8')
-  it('the reclaim loop takes its victims from selectReclaimVictims, and the old node/tsx comm test is gone', () => {
-    expect(src).toContain('selectReclaimVictims(pids, process.pid, readPortHolder, PROJECT_ROOT, uid)')
+  // FORK: web.ts keeps the fork's own reclaim (src/web/port-reclaim.ts, #51, pinned in web-port-reclaim.test.ts), which
+  // came first for the same bug and leaves a root reached through a symlink alone. This module stays as upstream's
+  // library with its unit tests above; only the wiring claim is the fork's: web.ts does not call it, and the blind
+  // node/tsx comm test is gone either way.
+  it('the reclaim loop goes through the fork reclaim, and the old node/tsx comm test is gone', () => {
+    expect(src).toContain('reclaimPortHolders(port, { projectRoot: PROJECT_ROOT, log: logger })')
+    expect(src).not.toContain('selectReclaimVictims(')
     expect(src).not.toMatch(/\/node\|tsx\/i\.test\(cmd\)/)
     expect(src).not.toContain('victims.push(')
   })
